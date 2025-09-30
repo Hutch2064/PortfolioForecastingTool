@@ -13,6 +13,7 @@ from sklearn.neighbors import NearestNeighbors
 import shap
 import math
 import streamlit as st
+import pandas_datareader.data as web  # 👈 needed for Stooq fallback
 
 warnings.filterwarnings("ignore")
 
@@ -68,27 +69,41 @@ def compute_current_drawdown(returns: pd.Series) -> pd.Series:
 
 # ---------- Data Fetch ----------
 def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFrame:
+    # --- Try Yahoo Finance first ---
     data = yf.download(
-        tickers, 
-        start=start, 
-        auto_adjust=False, 
-        progress=False, 
-        interval="1mo", 
-        threads=False   # 👈 important fix for Streamlit Cloud
+        tickers,
+        start=start,
+        auto_adjust=False,
+        progress=False,
+        interval="1mo",
+        threads=False   # important for Streamlit Cloud
     )
-    if data.empty:
-        raise ValueError("No price data returned from Yahoo Finance.")
-    if isinstance(data.columns, pd.MultiIndex):
-        for field in ["Adj Close", "Close"]:
-            if field in data.columns.get_level_values(0):
-                close = data[field].copy()
-                break
+    if not data.empty:
+        if isinstance(data.columns, pd.MultiIndex):
+            for field in ["Adj Close", "Close"]:
+                if field in data.columns.get_level_values(0):
+                    close = data[field].copy()
+                    break
+            else:
+                raise ValueError("Could not find Close/Adj Close in Yahoo data.")
         else:
-            raise ValueError("Could not find Close/Adj Close in Yahoo data.")
+            colname = "Adj Close" if "Adj Close" in data.columns else "Close"
+            close = pd.DataFrame(data[colname]); close.columns = tickers
+        close = close.ffill().dropna(how="all").astype(np.float32)
     else:
-        colname = "Adj Close" if "Adj Close" in data.columns else "Close"
-        close = pd.DataFrame(data[colname]); close.columns = tickers
-    close = close.ffill().dropna(how="all").astype(np.float32)
+        # --- Fallback: Stooq ---
+        all_closes = []
+        for t in tickers:
+            try:
+                df = web.DataReader(f"{t}.US", "stooq")  # Stooq uses e.g. "SPY.US"
+                df = df.sort_index()  # ensure ascending order
+                df = df.loc[df.index >= pd.to_datetime(start)]
+                df = df.resample("M").last()[["Close"]].rename(columns={"Close": t})
+                all_closes.append(df)
+            except Exception:
+                raise ValueError(f"Ticker {t} not available from Stooq.")
+        close = pd.concat(all_closes, axis=1).dropna(how="all").astype(np.float32)
+
     first_valids = [close[col].first_valid_index() for col in close.columns]
     valid_starts = [d for d in first_valids if d is not None]
     if not valid_starts:
