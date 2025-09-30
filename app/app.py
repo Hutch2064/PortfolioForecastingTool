@@ -1,4 +1,4 @@
-import sys
+import sys 
 import warnings
 import random
 import os
@@ -68,7 +68,14 @@ def compute_current_drawdown(returns: pd.Series) -> pd.Series:
 
 # ---------- Data Fetch ----------
 def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFrame:
-    data = yf.download(tickers, start=start, auto_adjust=False, progress=False, interval="1mo")
+    data = yf.download(
+        tickers, 
+        start=start, 
+        auto_adjust=False, 
+        progress=False, 
+        interval="1mo", 
+        threads=False   # 👈 important fix for Streamlit Cloud
+    )
     if data.empty:
         raise ValueError("No price data returned from Yahoo Finance.")
     if isinstance(data.columns, pd.MultiIndex):
@@ -322,3 +329,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
