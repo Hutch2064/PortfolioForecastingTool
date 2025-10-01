@@ -27,7 +27,7 @@ DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 10        # number of seeds in the ensemble
 SIMS_PER_SEED = 2000       # simulations per seed
 FORECAST_YEARS = 1         # 12-month horizon
-BLOCK_LENGTH = 3           # block length for residual bootstrap
+BLOCK_LENGTH = 6           # block length for residual bootstrap
 
 # ---------- Helpers ----------
 def to_weights(raw: List[float]) -> np.ndarray:
@@ -359,7 +359,7 @@ def main():
             }
 
             # Comparison dashboard
-            st.subheader("Backtest vs Forecast Comparison")
+            st.subheader("Results")
             col1, col2, col3 = st.columns(3)
 
             with col1:
@@ -377,14 +377,14 @@ def main():
                 st.metric("Max Drawdown", f"{stats['Max Drawdown']:.2%}")
 
             with col3:
-                st.markdown("**Improvement**")
+                st.markdown("**Comparison**")
                 st.metric("CAGR", percent_improvement(stats["CAGR"], backtest_stats["CAGR"], higher_is_better=True))
                 st.metric("Volatility", percent_improvement(stats["Volatility"], backtest_stats["Volatility"], higher_is_better=False))
                 st.metric("Sharpe", percent_improvement(stats["Sharpe"], backtest_stats["Sharpe"], higher_is_better=True))
                 st.metric("Max Drawdown", percent_improvement(stats["Max Drawdown"], backtest_stats["Max Drawdown"], higher_is_better=True))
 
             ending_value = float(final_medoid[-1]) * start_capital
-            st.metric("Ending Portfolio Value", f"${ending_value:,.2f}")
+            st.metric("Forecasted Portfolio Value", f"${ending_value:,.2f}")
 
             plot_forecasts(port_rets, start_capital, final_medoid, rebalance_label)
 
