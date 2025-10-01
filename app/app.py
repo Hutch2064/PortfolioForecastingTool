@@ -66,18 +66,6 @@ def compute_current_drawdown(returns: pd.Series) -> pd.Series:
     roll_max = cum.cummax()
     return (cum / roll_max - 1.0).astype(np.float32)
 
-def r2_horizon(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """Compute R² across a horizon (variance explained)."""
-    if len(y_true) != len(y_pred) or len(y_true) == 0:
-        return np.nan
-    ss_res = np.sum((y_true - y_pred) ** 2)
-    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
-    return 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
-
-def path_to_returns(path: np.ndarray) -> np.ndarray:
-    """Convert a price-like path into monthly returns."""
-    return pd.Series(path).pct_change().dropna().values
-
 # ---------- Data Fetch ----------
 def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFrame:
     data = yf.download(
@@ -86,7 +74,7 @@ def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFram
         auto_adjust=False, 
         progress=False, 
         interval="1mo", 
-        threads=False
+        threads=False   # 👈 important fix for Streamlit Cloud
     )
     if data.empty:
         raise ValueError("No price data returned from Yahoo Finance.")
@@ -168,7 +156,10 @@ def run_forecast_model(X: pd.DataFrame, Y: pd.DataFrame):
         subsample=0.8,
         colsample_bytree=0.8,
         n_jobs=1,
-        random_state=GLOBAL_SEED
+        random_state=GLOBAL_SEED,
+        bagging_seed=GLOBAL_SEED,
+        feature_fraction_seed=GLOBAL_SEED,
+        data_random_seed=GLOBAL_SEED
     )
     model = MultiOutputRegressor(base_model)
     model.fit(X, Y)
@@ -215,6 +206,7 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
             base_preds = model.predict(last_X).astype(np.float32)
             shocks = residuals[(chosen_start + b) % n_res]
 
+            # volatility scaling
             pred_vol = base_preds[:, vol_index]
             hist_vol = Y_base.iloc[(chosen_start + b) % n_res, vol_index]
             scaling = (pred_vol / hist_vol).clip(0.1, 10.0)
@@ -330,6 +322,8 @@ def main():
                 return
 
             model, residuals, preds, X_full, Y_full = run_forecast_model(X, Y)
+
+            # choose best volatility column
             best_vol_col = choose_best_vol_indicator(Y_full)
 
             seed_medoids = []
@@ -340,10 +334,15 @@ def main():
                 rng = np.random.default_rng(GLOBAL_SEED + seed)
                 sims = run_monte_carlo_paths(model, X_full, Y_full, residuals, SIMS_PER_SEED, rng, best_vol_col, seed_id=seed)
                 seed_medoids.append(find_medoid(sims))
-                progress_bar.progress((i + 1) / ENSEMBLE_SEEDS)
+
+                # Update Streamlit progress bar
+                progress = (i + 1) / ENSEMBLE_SEEDS
+                progress_bar.progress(progress)
                 status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS} seeds complete")
 
+            # Clear progress bar and show completion message
             progress_bar.empty()
+
             seed_medoids = np.vstack(seed_medoids)
             final_medoid = find_medoid(seed_medoids)
 
@@ -358,51 +357,38 @@ def main():
                 "Max Drawdown": max_drawdown_from_rets(port_rets)
             }
 
-            # Dashboard
+            # Comparison dashboard
             st.subheader("Results")
             col1, col2, col3 = st.columns(3)
+
             with col1:
                 st.markdown("**Backtest**")
                 st.metric("CAGR", f"{backtest_stats['CAGR']:.2%}")
                 st.metric("Volatility", f"{backtest_stats['Volatility']:.2%}")
                 st.metric("Sharpe", f"{backtest_stats['Sharpe']:.2f}")
                 st.metric("Max Drawdown", f"{backtest_stats['Max Drawdown']:.2%}")
+
             with col2:
                 st.markdown("**Forecast**")
                 st.metric("CAGR", f"{stats['CAGR']:.2%}")
                 st.metric("Volatility", f"{stats['Volatility']:.2%}")
                 st.metric("Sharpe", f"{stats['Sharpe']:.2f}")
                 st.metric("Max Drawdown", f"{stats['Max Drawdown']:.2%}")
+
             with col3:
                 st.markdown("**Comparison**")
-                st.metric("CAGR", percent_improvement(stats["CAGR"], backtest_stats["CAGR"]))
+                st.metric("CAGR", percent_improvement(stats["CAGR"], backtest_stats["CAGR"], higher_is_better=True))
                 st.metric("Volatility", percent_improvement(stats["Volatility"], backtest_stats["Volatility"], higher_is_better=False))
-                st.metric("Sharpe", percent_improvement(stats["Sharpe"], backtest_stats["Sharpe"]))
-                st.metric("Max Drawdown", percent_improvement(stats["Max Drawdown"], backtest_stats["Max Drawdown"]))
+                st.metric("Sharpe", percent_improvement(stats["Sharpe"], backtest_stats["Sharpe"], higher_is_better=True))
+                st.metric("Max Drawdown", percent_improvement(stats["Max Drawdown"], backtest_stats["Max Drawdown"], higher_is_better=True))
 
             ending_value = float(final_medoid[-1]) * start_capital
             st.metric("Forecasted Portfolio Value", f"${ending_value:,.2f}")
+
             plot_forecasts(port_rets, start_capital, final_medoid, rebalance_label)
 
             final_X = X_full.iloc[[-1]]
             plot_feature_attributions(model, X_full, final_X)
-
-            # ---------- NEW: In-sample / Out-of-sample test ----------
-            st.subheader("Model Fit (IS vs OOS)")
-
-            # In-sample R²
-            r2_is = r2_horizon(Y_full["ret"].values, preds[:,0])
-
-            # OOS: align last 12m actual vs forecasted returns
-            realized_12m = port_rets.iloc[-12:].values
-            forecast_12m = path_to_returns(final_medoid)[-12:]
-            r2_oos = r2_horizon(realized_12m, forecast_12m)
-
-            is_oos_df = pd.DataFrame({
-                "Set": ["In-Sample", "Out-of-Sample"],
-                "R²": [r2_is, r2_oos]
-            })
-            st.table(is_oos_df.set_index("Set").style.format({"R²": "{:.3f}"}))
 
         except Exception as e:
             st.error(f"Error: {e}")
