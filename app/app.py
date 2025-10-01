@@ -67,12 +67,16 @@ def compute_current_drawdown(returns: pd.Series) -> pd.Series:
     return (cum / roll_max - 1.0).astype(np.float32)
 
 def r2_horizon(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """Compute R² on raw 12-month returns."""
+    """Compute R² across a horizon (variance explained)."""
     if len(y_true) != len(y_pred) or len(y_true) == 0:
         return np.nan
     ss_res = np.sum((y_true - y_pred) ** 2)
     ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
     return 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
+
+def path_to_returns(path: np.ndarray) -> np.ndarray:
+    """Convert a price-like path into monthly returns."""
+    return pd.Series(path).pct_change().dropna().values
 
 # ---------- Data Fetch ----------
 def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFrame:
@@ -389,9 +393,9 @@ def main():
             # In-sample R²
             r2_is = r2_horizon(Y_full["ret"].values, preds[:,0])
 
-            # OOS (last 12m actual vs forecast medoid path)
+            # OOS: align last 12m actual vs forecasted returns
             realized_12m = port_rets.iloc[-12:].values
-            forecast_12m = np.diff(final_medoid)[-12:]  # convert forecast path into returns
+            forecast_12m = path_to_returns(final_medoid)[-12:]
             r2_oos = r2_horizon(realized_12m, forecast_12m)
 
             is_oos_df = pd.DataFrame({
