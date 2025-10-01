@@ -28,6 +28,7 @@ ENSEMBLE_SEEDS = 10        # number of seeds in the ensemble
 SIMS_PER_SEED = 2000       # simulations per seed
 FORECAST_YEARS = 1         # 12-month horizon
 BLOCK_LENGTH = 6           # block length for residual bootstrap
+K_NEIGHBORS = 17           # fixed k for snapshot mode
 
 # ---------- Helpers ----------
 def to_weights(raw: List[float]) -> np.ndarray:
@@ -74,7 +75,7 @@ def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFram
         auto_adjust=False, 
         progress=False, 
         interval="1mo", 
-        threads=False   # 👈 important fix for Streamlit Cloud
+        threads=False
     )
     if data.empty:
         raise ValueError("No price data returned from Yahoo Finance.")
@@ -176,47 +177,45 @@ def find_medoid(paths: np.ndarray):
     best_idx = np.argmax(scores)
     return paths[best_idx]
 
-# ---------- Monte Carlo ----------
-def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, best_vol_col, k_neighbors=20, seed_id=None):
+# ---------- Monte Carlo (Snapshot Version) ----------
+def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, best_vol_col, seed_id=None):
     horizon_months = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
     log_paths[:, 0] = 0.0
 
-    nn_model = NearestNeighbors(n_neighbors=k_neighbors, metric="euclidean", algorithm="ball_tree", n_jobs=1)
+    # Freeze features at last snapshot
+    snapshot_X = X_base.iloc[[-1]].values.astype(np.float32).repeat(sims_per_seed, axis=0)
+
+    # Nearest neighbors for residual conditioning
+    nn_model = NearestNeighbors(n_neighbors=K_NEIGHBORS, metric="euclidean", algorithm="ball_tree", n_jobs=1)
     nn_model.fit(X_base.values.astype(np.float32))
-    _, precomputed_idxs = nn_model.kneighbors(X_base.values.astype(np.float32), n_neighbors=k_neighbors)
-    precomputed_idxs = np.sort(precomputed_idxs, axis=1)
+    _, neighbor_idxs = nn_model.kneighbors(snapshot_X[:1], n_neighbors=K_NEIGHBORS)
+    neighbor_idxs = neighbor_idxs.flatten()
 
-    last_X = np.repeat(X_base.iloc[[-1]].values.astype(np.float32), sims_per_seed, axis=0)
     n_res = len(residuals)
-
     vol_index = list(Y_base.columns).index(best_vol_col)
 
     n_blocks = math.ceil((horizon_months - 1) / BLOCK_LENGTH)
-    hist_idx_seq = rng.integers(0, len(precomputed_idxs), size=(sims_per_seed, n_blocks))
-    nn_idx_seq   = rng.integers(0, k_neighbors, size=(sims_per_seed, n_blocks))
 
-    t = 1
-    for j in range(n_blocks):
-        if t >= horizon_months: break
-        chosen_start = precomputed_idxs[hist_idx_seq[:, j], nn_idx_seq[:, j]]
-        block_len = min(BLOCK_LENGTH, horizon_months - t)
-
-        for b in range(block_len):
-            base_preds = model.predict(last_X).astype(np.float32)
-            shocks = residuals[(chosen_start + b) % n_res]
-
-            # volatility scaling
-            pred_vol = base_preds[:, vol_index]
-            hist_vol = Y_base.iloc[(chosen_start + b) % n_res, vol_index]
-            scaling = (pred_vol / hist_vol).clip(0.1, 10.0)
-
-            log_return_step = base_preds[:, 0] + shocks[:, 0] * scaling
-            log_paths[:, t] = log_paths[:, t-1] + log_return_step
-            next_indicators = base_preds[:, 1:] + shocks[:, 1:]
-            last_X = np.column_stack([base_preds[:, 0], next_indicators]).astype(np.float32)
-            t += 1
+    for path in range(sims_per_seed):
+        t = 1
+        for j in range(n_blocks):
             if t >= horizon_months: break
+            start_idx = rng.choice(neighbor_idxs)
+            block_len = min(BLOCK_LENGTH, horizon_months - t)
+
+            for b in range(block_len):
+                base_preds = model.predict(snapshot_X).astype(np.float32)
+                shocks = residuals[(start_idx + b) % n_res, 0]  # only return residuals
+
+                pred_vol = base_preds[:, vol_index]
+                hist_vol = Y_base.iloc[(start_idx + b) % n_res, vol_index]
+                scaling = (pred_vol / hist_vol).clip(0.1, 10.0)
+
+                log_return_step = base_preds[:, 0] + shocks * scaling
+                log_paths[path, t] = log_paths[path, t-1] + log_return_step
+                t += 1
+                if t >= horizon_months: break
 
     return np.exp(log_paths, dtype=np.float32)
 
@@ -335,21 +334,17 @@ def main():
                 sims = run_monte_carlo_paths(model, X_full, Y_full, residuals, SIMS_PER_SEED, rng, best_vol_col, seed_id=seed)
                 seed_medoids.append(find_medoid(sims))
 
-                # Update Streamlit progress bar
                 progress = (i + 1) / ENSEMBLE_SEEDS
                 progress_bar.progress(progress)
                 status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS} seeds complete")
 
-            # Clear progress bar and show completion message
             progress_bar.empty()
 
             seed_medoids = np.vstack(seed_medoids)
             final_medoid = find_medoid(seed_medoids)
 
-            # Forecast stats
             stats = compute_forecast_stats_from_path(final_medoid, start_capital, port_rets.index[-1])
 
-            # Backtest stats
             backtest_stats = {
                 "CAGR": annualized_return_monthly(port_rets),
                 "Volatility": annualized_vol_monthly(port_rets),
@@ -357,7 +352,6 @@ def main():
                 "Max Drawdown": max_drawdown_from_rets(port_rets)
             }
 
-            # Comparison dashboard
             st.subheader("Results")
             col1, col2, col3 = st.columns(3)
 
@@ -395,6 +389,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
