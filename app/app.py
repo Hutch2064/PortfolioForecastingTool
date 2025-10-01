@@ -75,7 +75,7 @@ def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFram
         auto_adjust=False, 
         progress=False, 
         interval="1mo", 
-        threads=False
+        threads=False   # 👈 important fix for Streamlit Cloud
     )
     if data.empty:
         raise ValueError("No price data returned from Yahoo Finance.")
@@ -239,6 +239,8 @@ def compute_forecast_stats_from_path(path: np.ndarray, start_capital: float, las
 
 # ---------- Improvement Calculator ----------
 def percent_improvement(forecast, backtest, higher_is_better=True):
+    if isinstance(forecast, str) or isinstance(backtest, str):
+        return "N/A"
     if np.isnan(forecast) or np.isnan(backtest) or backtest == 0:
         return "N/A"
     if higher_is_better:
@@ -284,6 +286,15 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
     ax.legend()
     st.pyplot(fig)
 
+# ---------- Utility: stats from a subperiod of simple returns ----------
+def stats_from_returns(simple_returns: pd.Series):
+    return {
+        "CAGR": annualized_return_monthly(simple_returns),
+        "Volatility": annualized_vol_monthly(simple_returns),
+        "Sharpe": annualized_sharpe_monthly(simple_returns),
+        "Max Drawdown": max_drawdown_from_rets(simple_returns)
+    }
+
 # ---------- Streamlit App ----------
 def main():
     st.title("Portfolio Forecasting Tool")
@@ -326,22 +337,21 @@ def main():
                 st.error("Not enough samples after feature building.")
                 return
 
-            # Unified progress bar
-            total_steps = ENSEMBLE_SEEDS + (ENSEMBLE_SEEDS if run_oos else 0)
+            # unified progress bar (forecast + optional IS + optional OOS)
+            total_steps = ENSEMBLE_SEEDS + (ENSEMBLE_SEEDS if run_is else 0) + (ENSEMBLE_SEEDS if run_oos else 0)
             completed = 0
             progress_bar = st.progress(0)
             status_text = st.empty()
 
-            # Train full model
+            # Train full model (Main Forecast)
             model, residuals, preds, X_full, Y_full = run_forecast_model(X, Y)
             best_vol_col = choose_best_vol_indicator(Y_full)
 
-            # Main Forecast
+            # Main Forecast ensemble
             seed_medoids = []
             for i, seed in enumerate(range(ENSEMBLE_SEEDS)):
                 rng = np.random.default_rng(GLOBAL_SEED + seed)
-                sims = run_monte_carlo_paths(model, X_full, Y_full, residuals,
-                                             SIMS_PER_SEED, rng, best_vol_col, seed_id=seed)
+                sims = run_monte_carlo_paths(model, X_full, Y_full, residuals, SIMS_PER_SEED, rng, best_vol_col, seed_id=seed)
                 seed_medoids.append(find_medoid(sims))
                 completed += 1
                 progress_bar.progress(completed / total_steps)
@@ -349,79 +359,155 @@ def main():
 
             seed_medoids = np.vstack(seed_medoids)
             final_medoid = find_medoid(seed_medoids)
+
+            # Forecast stats (full forward)
             stats = compute_forecast_stats_from_path(final_medoid, start_capital, port_rets.index[-1])
 
-            # Backtest stats
-            backtest_stats = {
+            # Backtest stats (full history, for top panel)
+            backtest_stats_full = {
                 "CAGR": annualized_return_monthly(port_rets),
                 "Volatility": annualized_vol_monthly(port_rets),
                 "Sharpe": annualized_sharpe_monthly(port_rets),
                 "Max Drawdown": max_drawdown_from_rets(port_rets)
             }
 
-            # Display forecast results
-            st.subheader("Main Forecast")
-            st.metric("CAGR", f"{stats['CAGR']:.2%}")
-            st.metric("Volatility", f"{stats['Volatility']:.2%}")
-            st.metric("Sharpe", f"{stats['Sharpe']:.2f}")
-            st.metric("Max Drawdown", f"{stats['Max Drawdown']:.2%}")
+            # Top Results panel: Backtest | Forecast | Comparison  (unchanged)
+            st.subheader("Results")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.markdown("**Backtest**")
+                st.metric("CAGR", f"{backtest_stats_full['CAGR']:.2%}")
+                st.metric("Volatility", f"{backtest_stats_full['Volatility']:.2%}")
+                st.metric("Sharpe", f"{backtest_stats_full['Sharpe']:.2f}")
+                st.metric("Max Drawdown", f"{backtest_stats_full['Max Drawdown']:.2%}")
+            with col2:
+                st.markdown("**Forecast**")
+                st.metric("CAGR", f"{stats['CAGR']:.2%}")
+                st.metric("Volatility", f"{stats['Volatility']:.2%}")
+                st.metric("Sharpe", f"{stats['Sharpe']:.2f}")
+                st.metric("Max Drawdown", f"{stats['Max Drawdown']:.2%}")
+            with col3:
+                st.markdown("**Comparison**")
+                st.metric("CAGR", percent_improvement(stats["CAGR"], backtest_stats_full["CAGR"], higher_is_better=True))
+                st.metric("Volatility", percent_improvement(stats["Volatility"], backtest_stats_full["Volatility"], higher_is_better=False))
+                st.metric("Sharpe", percent_improvement(stats["Sharpe"], backtest_stats_full["Sharpe"], higher_is_better=True))
+                st.metric("Max Drawdown", percent_improvement(stats["Max Drawdown"], backtest_stats_full["Max Drawdown"], higher_is_better=True))
 
+            # Plot + SHAP (unchanged)
             ending_value = float(final_medoid[-1]) * start_capital
             st.metric("Forecasted Portfolio Value", f"${ending_value:,.2f}")
-
             plot_forecasts(port_rets, start_capital, final_medoid, rebalance_label)
-
             final_X = X_full.iloc[[-1]]
             plot_feature_attributions(model, X_full, final_X)
 
-            # OOS Test
-            if run_oos:
-                test_year = Y_full.index[-12:]
-                train_mask = Y_full.index < test_year[0]
+            # ===== Testing tables (period-aligned) =====
+            # Define 12-month test window dynamically (last 12 Y rows if available)
+            if len(Y_full) >= 13:
+                test_idx = Y_full.index[-12:]
+                train_mask = Y_full.index < test_idx[0]
                 X_train, Y_train = X_full[train_mask], Y_full[train_mask]
-                X_test, Y_test = X_full.loc[test_year], Y_full.loc[test_year]
+                # Backtest over the same period (simple returns)
+                backtest_period_rets = port_rets.loc[test_idx]
+                backtest_stats_period = stats_from_returns(backtest_period_rets)
 
-                oos_model, oos_resid, _, X_train, Y_train = run_forecast_model(X_train, Y_train)
-                best_vol_col = choose_best_vol_indicator(Y_train)
+                # ---------- In-Sample (optional): model trained on full, BUT simulate from pre-test state ----------
+                if run_is:
+                    is_model, _, _, _, _ = run_forecast_model(X_full, Y_full)
+                    # use residuals/NN context from TRAIN period to align with start state; residuals from is_model on TRAIN
+                    is_preds_train = is_model.predict(X_train).astype(np.float32)
+                    is_resid_train = (Y_train.values - is_preds_train).astype(np.float32)
+                    best_vol_is = choose_best_vol_indicator(Y_train)
 
-                seed_medoids = []
-                for i, seed in enumerate(range(ENSEMBLE_SEEDS)):
-                    rng = np.random.default_rng(GLOBAL_SEED + 1000 + seed)
-                    sims = run_monte_carlo_paths(oos_model, X_train, Y_train, oos_resid,
-                                                 SIMS_PER_SEED, rng, best_vol_col, seed_id=seed)
-                    seed_medoids.append(find_medoid(sims))
-                    completed += 1
-                    progress_bar.progress(completed / total_steps)
-                    status_text.text(f"Running step {completed}/{total_steps}")
+                    seed_medoids_is = []
+                    for i, seed in enumerate(range(ENSEMBLE_SEEDS)):
+                        rng = np.random.default_rng(GLOBAL_SEED + 500 + seed)
+                        sims = run_monte_carlo_paths(is_model, X_train, Y_train, is_resid_train,
+                                                     SIMS_PER_SEED, rng, best_vol_is, seed_id=seed)
+                        seed_medoids_is.append(find_medoid(sims))
+                        completed += 1
+                        progress_bar.progress(completed / total_steps)
+                        status_text.text(f"Running step {completed}/{total_steps}")
 
-                seed_medoids = np.vstack(seed_medoids)
-                oos_medoid = find_medoid(seed_medoids)
-                oos_stats = compute_forecast_stats_from_path(oos_medoid, start_capital, test_year[0])
+                    seed_medoids_is = np.vstack(seed_medoids_is)
+                    is_medoid = find_medoid(seed_medoids_is)
+                    # stats from IS medoid over the test period start
+                    is_stats = compute_forecast_stats_from_path(is_medoid, start_capital, test_idx[0])
 
-                try:
-                    r2 = r2_score(Y_test["ret"], oos_medoid[1:len(Y_test)+1])
-                except:
-                    r2 = np.nan
+                    # R^2: compare log monthly returns (align lengths)
+                    # predicted from medoid path:
+                    pred_is_ar = pd.Series(is_medoid, index=pd.RangeIndex(len(is_medoid)))
+                    pred_is_log = np.log(1 + pred_is_ar.pct_change().dropna())
+                    # actual log returns:
+                    act_log = Y_full.loc[test_idx, "ret"]
+                    # align to min length (path has horizon_months levels -> horizon_months-1 returns)
+                    L = min(len(pred_is_log), len(act_log))
+                    r2_is = r2_score(act_log.iloc[:L], pred_is_log.iloc[:L]) if L > 1 else np.nan
 
-                # Build table
-                st.subheader("OOS Test vs Backtest")
-                metrics = ["CAGR", "Volatility", "Sharpe", "Max Drawdown", "R²"]
-                rows = []
-                for m in metrics:
-                    if m == "R²":
-                        back_val = "—"
-                        oos_val = f"{r2:.2f}" if not np.isnan(r2) else "—"
-                        delta_val = "—"
-                    else:
-                        back_val = backtest_stats[m]
-                        oos_val = oos_stats[m]
-                        delta_val = percent_improvement(oos_val, back_val, higher_is_better=(m!="Volatility" and m!="Max Drawdown"))
-                        back_val = f"{back_val:.2%}" if isinstance(back_val, (int,float)) else back_val
-                        oos_val = f"{oos_val:.2%}" if isinstance(oos_val, (int,float)) else oos_val
-                    rows.append([m, back_val, oos_val, delta_val])
-                df_out = pd.DataFrame(rows, columns=["Metric", "Backtest", "Out-of-Sample", "Δ OOS vs Backtest"])
-                st.table(df_out)
+                    # Build IS table (Backtest period vs In-Sample)
+                    st.subheader("In-Sample Test vs Backtest (Same Period)")
+                    metrics = ["CAGR", "Volatility", "Sharpe", "Max Drawdown", "R²"]
+                    rows = []
+                    for m in metrics:
+                        if m == "R²":
+                            back_val = "—"
+                            is_val = f"{r2_is:.2f}" if not np.isnan(r2_is) else "—"
+                            delta_val = "—"
+                        else:
+                            back_val_num = backtest_stats_period[m]
+                            is_val_num = is_stats[m]
+                            delta_val = percent_improvement(is_val_num, back_val_num, higher_is_better=(m!="Volatility" and m!="Max Drawdown"))
+                            back_val = f"{back_val_num:.2%}"
+                            is_val = f"{is_val_num:.2%}"
+                        rows.append([m, back_val, is_val, delta_val])
+                    df_is = pd.DataFrame(rows, columns=["Metric", "Backtest", "In-Sample", "Δ IS vs Backtest"])
+                    st.table(df_is)
 
+                # ---------- Out-of-Sample (optional): model trained only on pre-test ----------
+                if run_oos:
+                    oos_model, oos_resid, _, X_train, Y_train = run_forecast_model(X_train, Y_train)
+                    best_vol_oos = choose_best_vol_indicator(Y_train)
+
+                    seed_medoids_oos = []
+                    for i, seed in enumerate(range(ENSEMBLE_SEEDS)):
+                        rng = np.random.default_rng(GLOBAL_SEED + 1000 + seed)
+                        sims = run_monte_carlo_paths(oos_model, X_train, Y_train, oos_resid,
+                                                     SIMS_PER_SEED, rng, best_vol_oos, seed_id=seed)
+                        seed_medoids_oos.append(find_medoid(sims))
+                        completed += 1
+                        progress_bar.progress(completed / total_steps)
+                        status_text.text(f"Running step {completed}/{total_steps}")
+
+                    seed_medoids_oos = np.vstack(seed_medoids_oos)
+                    oos_medoid = find_medoid(seed_medoids_oos)
+                    oos_stats = compute_forecast_stats_from_path(oos_medoid, start_capital, test_idx[0])
+
+                    # R^2 OOS (log returns)
+                    pred_oos_ar = pd.Series(oos_medoid, index=pd.RangeIndex(len(oos_medoid)))
+                    pred_oos_log = np.log(1 + pred_oos_ar.pct_change().dropna())
+                    act_log = Y_full.loc[test_idx, "ret"]
+                    L = min(len(pred_oos_log), len(act_log))
+                    r2_oos = r2_score(act_log.iloc[:L], pred_oos_log.iloc[:L]) if L > 1 else np.nan
+
+                    # Bottom OOS table (Backtest period vs OOS)
+                    st.subheader("Out-of-Sample Test vs Backtest (Same Period)")
+                    metrics = ["CAGR", "Volatility", "Sharpe", "Max Drawdown", "R²"]
+                    rows = []
+                    for m in metrics:
+                        if m == "R²":
+                            back_val = "—"
+                            oos_val = f"{r2_oos:.2f}" if not np.isnan(r2_oos) else "—"
+                            delta_val = "—"
+                        else:
+                            back_val_num = backtest_stats_period[m]
+                            oos_val_num = oos_stats[m]
+                            delta_val = percent_improvement(oos_val_num, back_val_num, higher_is_better=(m!="Volatility" and m!="Max Drawdown"))
+                            back_val = f"{back_val_num:.2%}"
+                            oos_val = f"{oos_val_num:.2%}"
+                        rows.append([m, back_val, oos_val, delta_val])
+                    df_out = pd.DataFrame(rows, columns=["Metric", "Backtest", "Out-of-Sample", "Δ OOS vs Backtest"])
+                    st.table(df_out)
+
+            progress_bar.progress(1.0)
             progress_bar.empty()
             status_text.text("All tasks complete.")
 
@@ -430,5 +516,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
