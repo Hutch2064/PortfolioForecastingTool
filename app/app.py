@@ -1,4 +1,4 @@
-import sys 
+import sys
 import warnings
 import random
 import os
@@ -13,7 +13,6 @@ from sklearn.neighbors import NearestNeighbors
 import shap
 import math
 import streamlit as st
-import pandas_datareader.data as web  # 👈 needed for Stooq fallback
 
 warnings.filterwarnings("ignore")
 
@@ -69,41 +68,27 @@ def compute_current_drawdown(returns: pd.Series) -> pd.Series:
 
 # ---------- Data Fetch ----------
 def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFrame:
-    # --- Try Yahoo Finance first ---
     data = yf.download(
-        tickers,
-        start=start,
-        auto_adjust=False,
-        progress=False,
-        interval="1mo",
-        threads=False   # important for Streamlit Cloud
+        tickers, 
+        start=start, 
+        auto_adjust=False, 
+        progress=False, 
+        interval="1mo", 
+        threads=False   # 👈 important fix for Streamlit Cloud
     )
-    if not data.empty:
-        if isinstance(data.columns, pd.MultiIndex):
-            for field in ["Adj Close", "Close"]:
-                if field in data.columns.get_level_values(0):
-                    close = data[field].copy()
-                    break
-            else:
-                raise ValueError("Could not find Close/Adj Close in Yahoo data.")
+    if data.empty:
+        raise ValueError("No price data returned from Yahoo Finance.")
+    if isinstance(data.columns, pd.MultiIndex):
+        for field in ["Adj Close", "Close"]:
+            if field in data.columns.get_level_values(0):
+                close = data[field].copy()
+                break
         else:
-            colname = "Adj Close" if "Adj Close" in data.columns else "Close"
-            close = pd.DataFrame(data[colname]); close.columns = tickers
-        close = close.ffill().dropna(how="all").astype(np.float32)
+            raise ValueError("Could not find Close/Adj Close in Yahoo data.")
     else:
-        # --- Fallback: Stooq ---
-        all_closes = []
-        for t in tickers:
-            try:
-                df = web.DataReader(f"{t}.US", "stooq")  # Stooq uses e.g. "SPY.US"
-                df = df.sort_index()  # ensure ascending order
-                df = df.loc[df.index >= pd.to_datetime(start)]
-                df = df.resample("M").last()[["Close"]].rename(columns={"Close": t})
-                all_closes.append(df)
-            except Exception:
-                raise ValueError(f"Ticker {t} not available from Stooq.")
-        close = pd.concat(all_closes, axis=1).dropna(how="all").astype(np.float32)
-
+        colname = "Adj Close" if "Adj Close" in data.columns else "Close"
+        close = pd.DataFrame(data[colname]); close.columns = tickers
+    close = close.ffill().dropna(how="all").astype(np.float32)
     first_valids = [close[col].first_valid_index() for col in close.columns]
     valid_starts = [d for d in first_valids if d is not None]
     if not valid_starts:
@@ -143,6 +128,23 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
     df["vol_12m"] = returns.rolling(12).std().astype(np.float32)
     return df.dropna().astype(np.float32)
 
+# ---------- Volatility Selection ----------
+def choose_best_vol_indicator(Y: pd.DataFrame) -> str:
+    candidates = ["vol_3m", "vol_6m", "vol_12m"]
+    best_col, best_score = None, -np.inf
+    realized_var = (Y["ret"] ** 2).dropna()
+    for col in candidates:
+        if col not in Y.columns:
+            continue
+        common = Y[[col]].join(realized_var, how="inner").dropna()
+        if common.empty: 
+            continue
+        r = np.corrcoef(common[col], common["ret"] ** 2)[0,1]
+        score = r**2
+        if score > best_score:
+            best_score, best_col = score, col
+    return best_col if best_col else "vol_12m"
+
 # ---------- Forecast Model ----------
 def run_forecast_model(X: pd.DataFrame, Y: pd.DataFrame):
     base_model = LGBMRegressor(
@@ -175,7 +177,7 @@ def find_medoid(paths: np.ndarray):
     return paths[best_idx]
 
 # ---------- Monte Carlo ----------
-def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, k_neighbors=20, seed_id=None):
+def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, best_vol_col, k_neighbors=20, seed_id=None):
     horizon_months = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
     log_paths[:, 0] = 0.0
@@ -187,6 +189,8 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
 
     last_X = np.repeat(X_base.iloc[[-1]].values.astype(np.float32), sims_per_seed, axis=0)
     n_res = len(residuals)
+
+    vol_index = list(Y_base.columns).index(best_vol_col)
 
     n_blocks = math.ceil((horizon_months - 1) / BLOCK_LENGTH)
     hist_idx_seq = rng.integers(0, len(precomputed_idxs), size=(sims_per_seed, n_blocks))
@@ -201,7 +205,13 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
         for b in range(block_len):
             base_preds = model.predict(last_X).astype(np.float32)
             shocks = residuals[(chosen_start + b) % n_res]
-            log_return_step = base_preds[:, 0] + shocks[:, 0]
+
+            # volatility scaling
+            pred_vol = base_preds[:, vol_index]
+            hist_vol = Y_base.iloc[(chosen_start + b) % n_res, vol_index]
+            scaling = (pred_vol / hist_vol).clip(0.1, 10.0)
+
+            log_return_step = base_preds[:, 0] + shocks[:, 0] * scaling
             log_paths[:, t] = log_paths[:, t-1] + log_return_step
             next_indicators = base_preds[:, 1:] + shocks[:, 1:]
             last_X = np.column_stack([base_preds[:, 0], next_indicators]).astype(np.float32)
@@ -302,13 +312,16 @@ def main():
 
             model, residuals, preds, X_full, Y_full = run_forecast_model(X, Y)
 
+            # choose best volatility column
+            best_vol_col = choose_best_vol_indicator(Y_full)
+
             seed_medoids = []
             progress_bar = st.progress(0)
             status_text = st.empty()
 
             for i, seed in enumerate(range(ENSEMBLE_SEEDS)):
                 rng = np.random.default_rng(GLOBAL_SEED + seed)
-                sims = run_monte_carlo_paths(model, X_full, Y_full, residuals, SIMS_PER_SEED, rng, seed_id=seed)
+                sims = run_monte_carlo_paths(model, X_full, Y_full, residuals, SIMS_PER_SEED, rng, best_vol_col, seed_id=seed)
                 seed_medoids.append(find_medoid(sims))
 
                 # Update Streamlit progress bar
@@ -344,4 +357,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
