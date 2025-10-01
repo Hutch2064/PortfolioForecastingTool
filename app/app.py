@@ -235,6 +235,17 @@ def compute_forecast_stats_from_path(path: np.ndarray, start_capital: float, las
         "Max Drawdown": max_drawdown_from_rets(monthly)
     }
 
+# ---------- Improvement Calculator ----------
+def percent_improvement(forecast, backtest, higher_is_better=True):
+    if np.isnan(forecast) or np.isnan(backtest) or backtest == 0:
+        return "N/A"
+    if higher_is_better:
+        improvement = (forecast - backtest) / abs(backtest)
+    else:
+        improvement = (backtest - forecast) / abs(backtest)
+    sign = "+" if improvement >= 0 else ""
+    return f"{sign}{improvement*100:.1f}%"
+
 # ---------- Feature Attribution ----------
 def plot_feature_attributions(model, X, final_X):
     np.random.seed(GLOBAL_SEED)
@@ -336,13 +347,41 @@ def main():
             seed_medoids = np.vstack(seed_medoids)
             final_medoid = find_medoid(seed_medoids)
 
+            # Forecast stats
             stats = compute_forecast_stats_from_path(final_medoid, start_capital, port_rets.index[-1])
-            st.subheader("Forecast Summary Statistics")
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("CAGR", f"{float(stats['CAGR']):.2%}")
-            col2.metric("Volatility", f"{float(stats['Volatility']):.2%}")
-            col3.metric("Sharpe", f"{float(stats['Sharpe']):.2f}")
-            col4.metric("Max Drawdown", f"{float(stats['Max Drawdown']):.2%}")
+
+            # Backtest stats
+            backtest_stats = {
+                "CAGR": annualized_return_monthly(port_rets),
+                "Volatility": annualized_vol_monthly(port_rets),
+                "Sharpe": annualized_sharpe_monthly(port_rets),
+                "Max Drawdown": max_drawdown_from_rets(port_rets)
+            }
+
+            # Comparison dashboard
+            st.subheader("Backtest vs Forecast Comparison")
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                st.markdown("**Backtest**")
+                st.metric("CAGR", f"{backtest_stats['CAGR']:.2%}")
+                st.metric("Volatility", f"{backtest_stats['Volatility']:.2%}")
+                st.metric("Sharpe", f"{backtest_stats['Sharpe']:.2f}")
+                st.metric("Max Drawdown", f"{backtest_stats['Max Drawdown']:.2%}")
+
+            with col2:
+                st.markdown("**Forecast**")
+                st.metric("CAGR", f"{stats['CAGR']:.2%}")
+                st.metric("Volatility", f"{stats['Volatility']:.2%}")
+                st.metric("Sharpe", f"{stats['Sharpe']:.2f}")
+                st.metric("Max Drawdown", f"{stats['Max Drawdown']:.2%}")
+
+            with col3:
+                st.markdown("**Improvement**")
+                st.metric("CAGR", percent_improvement(stats["CAGR"], backtest_stats["CAGR"], higher_is_better=True))
+                st.metric("Volatility", percent_improvement(stats["Volatility"], backtest_stats["Volatility"], higher_is_better=False))
+                st.metric("Sharpe", percent_improvement(stats["Sharpe"], backtest_stats["Sharpe"], higher_is_better=True))
+                st.metric("Max Drawdown", percent_improvement(stats["Max Drawdown"], backtest_stats["Max Drawdown"], higher_is_better=True))
 
             ending_value = float(final_medoid[-1]) * start_capital
             st.metric("Ending Portfolio Value", f"${ending_value:,.2f}")
@@ -357,5 +396,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
