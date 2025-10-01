@@ -183,13 +183,12 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
     log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
     log_paths[:, 0] = 0.0
 
-    # Freeze features at last snapshot
-    snapshot_X = X_base.iloc[[-1]].values.astype(np.float32).repeat(sims_per_seed, axis=0)
+    snapshot_X = X_base.iloc[[-1]].values.astype(np.float32)
 
     # Nearest neighbors for residual conditioning
     nn_model = NearestNeighbors(n_neighbors=K_NEIGHBORS, metric="euclidean", algorithm="ball_tree", n_jobs=1)
     nn_model.fit(X_base.values.astype(np.float32))
-    _, neighbor_idxs = nn_model.kneighbors(snapshot_X[:1], n_neighbors=K_NEIGHBORS)
+    _, neighbor_idxs = nn_model.kneighbors(snapshot_X, n_neighbors=K_NEIGHBORS)
     neighbor_idxs = neighbor_idxs.flatten()
 
     n_res = len(residuals)
@@ -205,14 +204,15 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
             block_len = min(BLOCK_LENGTH, horizon_months - t)
 
             for b in range(block_len):
-                base_preds = model.predict(snapshot_X).astype(np.float32)
-                shocks = residuals[(start_idx + b) % n_res, 0]  # only return residuals
+                # predict only once, get scalars
+                base_preds = model.predict(snapshot_X).astype(np.float32).flatten()
+                shocks = residuals[(start_idx + b) % n_res, 0]
 
-                pred_vol = base_preds[:, vol_index]
+                pred_vol = base_preds[vol_index]
                 hist_vol = Y_base.iloc[(start_idx + b) % n_res, vol_index]
                 scaling = (pred_vol / hist_vol).clip(0.1, 10.0)
 
-                log_return_step = base_preds[:, 0] + shocks * scaling
+                log_return_step = base_preds[0] + shocks * scaling
                 log_paths[path, t] = log_paths[path, t-1] + log_return_step
                 t += 1
                 if t >= horizon_months: break
@@ -322,7 +322,6 @@ def main():
 
             model, residuals, preds, X_full, Y_full = run_forecast_model(X, Y)
 
-            # choose best volatility column
             best_vol_col = choose_best_vol_indicator(Y_full)
 
             seed_medoids = []
@@ -389,6 +388,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
