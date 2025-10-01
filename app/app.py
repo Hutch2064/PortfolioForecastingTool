@@ -119,10 +119,12 @@ def portfolio_returns_monthly(prices: pd.DataFrame, weights: np.ndarray, rebalan
 # ---------- Feature Builders ----------
 def build_features(returns: pd.Series) -> pd.DataFrame:
     df = pd.DataFrame({"ret": np.log(1 + returns).astype(np.float32)})
+    df["mom_1m"] = returns.rolling(1).apply(lambda x: (1+x).prod()-1, raw=True).astype(np.float32)
     df["mom_3m"] = returns.rolling(3).apply(lambda x: (1+x).prod()-1, raw=True).astype(np.float32)
     df["mom_6m"] = returns.rolling(6).apply(lambda x: (1+x).prod()-1, raw=True).astype(np.float32)
     df["mom_12m"] = returns.rolling(12).apply(lambda x: (1+x).prod()-1, raw=True).astype(np.float32)
     df["dd_state"] = compute_current_drawdown(returns)
+    df["vol_1m"] = returns.rolling(1).std().astype(np.float32)
     df["vol_3m"] = returns.rolling(3).std().astype(np.float32)
     df["vol_6m"] = returns.rolling(6).std().astype(np.float32)
     df["vol_12m"] = returns.rolling(12).std().astype(np.float32)
@@ -130,7 +132,7 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
 
 # ---------- Volatility Selection ----------
 def choose_best_vol_indicator(Y: pd.DataFrame) -> str:
-    candidates = ["vol_3m", "vol_6m", "vol_12m"]
+    candidates = ["vol_1m", "vol_3m", "vol_6m", "vol_12m"]
     best_col, best_score = None, -np.inf
     realized_var = (Y["ret"] ** 2).dropna()
     for col in candidates:
@@ -146,7 +148,7 @@ def choose_best_vol_indicator(Y: pd.DataFrame) -> str:
     return best_col if best_col else "vol_12m"
 
 # ---------- Forecast Model ----------
-def run_forecast_model(X: pd.DataFrame, Y: pd.DataFrame):
+def run_forecast_model(X: pd.DataFrame, Y: pd.DataFrame, best_vol_col: str):
     base_model = LGBMRegressor(
         n_estimators=5000,
         learning_rate=0.01,
@@ -164,8 +166,12 @@ def run_forecast_model(X: pd.DataFrame, Y: pd.DataFrame):
     model = MultiOutputRegressor(base_model)
     model.fit(X, Y)
     preds = model.predict(X).astype(np.float32)
-    residuals = (Y.values - preds).astype(np.float32)
-    return model, residuals, preds, X.astype(np.float32), Y.astype(np.float32)
+
+    vol_index = list(Y.columns).index(best_vol_col)
+    hist_vol = Y.iloc[:, vol_index].values
+    norm_residuals = (Y.values - preds) / (hist_vol[:, None] + 1e-8)
+
+    return model, norm_residuals, preds, X.astype(np.float32), Y.astype(np.float32), vol_index
 
 # ---------- Medoid ----------
 def find_medoid(paths: np.ndarray):
@@ -177,7 +183,7 @@ def find_medoid(paths: np.ndarray):
     return paths[best_idx]
 
 # ---------- Monte Carlo ----------
-def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, best_vol_col, k_neighbors=20, seed_id=None):
+def run_monte_carlo_paths(model, X_base, Y_base, norm_residuals, sims_per_seed, rng, vol_index, k_neighbors=20, seed_id=None):
     horizon_months = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
     log_paths[:, 0] = 0.0
@@ -188,9 +194,7 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
     precomputed_idxs = np.sort(precomputed_idxs, axis=1)
 
     last_X = np.repeat(X_base.iloc[[-1]].values.astype(np.float32), sims_per_seed, axis=0)
-    n_res = len(residuals)
-
-    vol_index = list(Y_base.columns).index(best_vol_col)
+    n_res = len(norm_residuals)
 
     n_blocks = math.ceil((horizon_months - 1) / BLOCK_LENGTH)
     hist_idx_seq = rng.integers(0, len(precomputed_idxs), size=(sims_per_seed, n_blocks))
@@ -204,17 +208,15 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
 
         for b in range(block_len):
             base_preds = model.predict(last_X).astype(np.float32)
-            shocks = residuals[(chosen_start + b) % n_res]
+            norm_shocks = norm_residuals[(chosen_start + b) % n_res]
 
-            # volatility scaling
             pred_vol = base_preds[:, vol_index]
-            hist_vol = Y_base.iloc[(chosen_start + b) % n_res, vol_index]
-            scaling = (pred_vol / hist_vol).clip(0.1, 10.0)
-
-            log_return_step = base_preds[:, 0] + shocks[:, 0] * scaling
+            log_return_step = base_preds[:, 0] + norm_shocks[:, 0] * pred_vol
             log_paths[:, t] = log_paths[:, t-1] + log_return_step
-            next_indicators = base_preds[:, 1:] + shocks[:, 1:]
+
+            next_indicators = base_preds[:, 1:] + norm_shocks[:, 1:] * pred_vol[:, None]
             last_X = np.column_stack([base_preds[:, 0], next_indicators]).astype(np.float32)
+
             t += 1
             if t >= horizon_months: break
 
@@ -310,10 +312,10 @@ def main():
                 st.error("Not enough samples after feature building.")
                 return
 
-            model, residuals, preds, X_full, Y_full = run_forecast_model(X, Y)
-
             # choose best volatility column
-            best_vol_col = choose_best_vol_indicator(Y_full)
+            best_vol_col = choose_best_vol_indicator(Y)
+
+            model, norm_residuals, preds, X_full, Y_full, vol_index = run_forecast_model(X, Y, best_vol_col)
 
             seed_medoids = []
             progress_bar = st.progress(0)
@@ -321,15 +323,13 @@ def main():
 
             for i, seed in enumerate(range(ENSEMBLE_SEEDS)):
                 rng = np.random.default_rng(GLOBAL_SEED + seed)
-                sims = run_monte_carlo_paths(model, X_full, Y_full, residuals, SIMS_PER_SEED, rng, best_vol_col, seed_id=seed)
+                sims = run_monte_carlo_paths(model, X_full, Y_full, norm_residuals, SIMS_PER_SEED, rng, vol_index, seed_id=seed)
                 seed_medoids.append(find_medoid(sims))
 
-                # Update Streamlit progress bar
                 progress = (i + 1) / ENSEMBLE_SEEDS
                 progress_bar.progress(progress)
                 status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS} seeds complete")
 
-            # Clear progress bar and show completion message
             progress_bar.empty()
             status_text.text("Forecast complete")
 
@@ -357,3 +357,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
