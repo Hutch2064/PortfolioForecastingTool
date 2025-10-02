@@ -101,7 +101,7 @@ def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFram
 def fetch_umich_sentiment(start=DEFAULT_START) -> pd.Series:
     """
     Fetch University of Michigan Sentiment Index (UMCSENT) from FRED, monthly.
-    Do NOT lag here; lag is applied uniformly with X.shift(1).
+    No lag applied here; lagging is handled uniformly in X.shift(1).
     """
     try:
         umcsent = pdr.DataReader("UMCSENT", "fred", start)
@@ -109,7 +109,7 @@ def fetch_umich_sentiment(start=DEFAULT_START) -> pd.Series:
         umcsent.name = "umcsent"
         return umcsent.astype(np.float32).squeeze()
     except Exception as e:
-        st.error(f"UMCSENT fetch failed: {e}.")
+        st.error(f"UMCSENT fetch failed: {e}. The feature will be missing unless you provide access.")
         return pd.Series(dtype=np.float32, name="umcsent")
 
 # ---------- Portfolio ----------
@@ -143,7 +143,7 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
     umcsent = fetch_umich_sentiment(start=returns.index.min().to_pydatetime().date())
     if not umcsent.empty:
         umcsent = umcsent.loc[df.index.min():df.index.max()]
-        df["umcsent"] = umcsent.reindex(df.index).astype(np.float32)
+        df["umcsent"] = umcsent.reindex(df.index).astype(np.float32).fillna(method="ffill").fillna(method="bfill")
 
     return df.dropna().astype(np.float32)
 
@@ -165,7 +165,7 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
         }
         model_params = {k: v for k, v in params.items() if k != "block_length"}
         model = LGBMRegressor(**model_params)
-        model.fit(train_X, train_Y)
+        model.fit(train_X, train_Y, feature_name=list(train_X.columns))
         preds = model.predict(test_X)
         actual_cum = (1 + test_Y).cumprod()
         pred_cum = (1 + preds).cumprod()
@@ -182,7 +182,7 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
     best_rmse = float(best_trial.value)
 
     final_model = LGBMRegressor(**lgbm_params, random_state=seed, n_jobs=1)
-    final_model.fit(X, Y)
+    final_model.fit(X, Y, feature_name=list(X.columns))
     preds = final_model.predict(X).astype(np.float32)
     residuals = (Y.values - preds).astype(np.float32)
     return final_model, residuals, preds, X.astype(np.float32), Y.astype(np.float32), best_params_full, best_rmse
@@ -302,17 +302,12 @@ def main():
                 st.error("Feature engineering returned no data.")
                 return
 
-            # Apply uniform one-month lag across ALL features
             Y = np.log(1 + port_rets.loc[df.index]).astype(np.float32)
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
 
-            # Debug print: confirm UMCSENT is included
-            st.write("Features used:", list(X.columns))
-
-            if "umcsent" not in X.columns:
-                st.error("UMCSENT missing from feature matrix. Check FRED fetch/alignment.")
-                return
+            # Debug check: print features included
+            st.write("Final Features:", list(X.columns))
 
             model, residuals, preds, X_full, Y_full, best_params, best_rmse = tune_and_fit_best_model(X, Y)
             block_length = int(best_params.get("block_length", 3))
@@ -362,6 +357,13 @@ def main():
 
             final_X = X_full.iloc[[-1]]
             plot_feature_attributions(model, X_full, final_X)
+
+            # ---- Debugging Printouts ----
+            st.write("DEBUG: Model feature names:", model.booster_.feature_name())
+            st.write("DEBUG: X_full columns:", list(X_full.columns))
+            explainer = shap.TreeExplainer(model)
+            shap_vals = explainer.shap_values(X_full)
+            st.write("DEBUG: SHAP values shape:", np.array(shap_vals).shape)
 
         except Exception as e:
             st.error(f"Error: {e}")
