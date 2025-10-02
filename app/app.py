@@ -143,7 +143,7 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
 
         # Rolling walk-forward validation
         r2_scores = []
-        for split in range(60, len(X) - horizon, horizon):  # start CV after 5 years (60m)
+        for split in range(240, len(X) - horizon, horizon):  # start CV after 5 years (60m)
             train_X, test_X = X.iloc[:split], X.iloc[split:split+horizon]
             train_Y, test_Y = Y.iloc[:split], Y.iloc[split:split+horizon]
             if len(test_Y) < horizon: 
