@@ -1,4 +1,4 @@
-import sys 
+import sys
 import warnings
 import random
 import os
@@ -9,7 +9,6 @@ from typing import List
 from lightgbm import LGBMRegressor
 from sklearn.multioutput import MultiOutputRegressor
 import matplotlib.pyplot as plt
-from sklearn.neighbors import NearestNeighbors
 import shap
 import math
 import streamlit as st
@@ -27,8 +26,6 @@ DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 10        # number of seeds in the ensemble
 SIMS_PER_SEED = 2000       # simulations per seed
 FORECAST_YEARS = 1         # 12-month horizon
-BLOCK_LENGTH = 6           # block length for residual bootstrap
-K_NEIGHBORS = 17           # fixed k for snapshot mode
 
 # ---------- Helpers ----------
 def to_weights(raw: List[float]) -> np.ndarray:
@@ -129,23 +126,6 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
     df["vol_12m"] = returns.rolling(12).std().astype(np.float32)
     return df.dropna().astype(np.float32)
 
-# ---------- Volatility Selection ----------
-def choose_best_vol_indicator(Y: pd.DataFrame) -> str:
-    candidates = ["vol_3m", "vol_6m", "vol_12m"]
-    best_col, best_score = None, -np.inf
-    realized_var = (Y["ret"] ** 2).dropna()
-    for col in candidates:
-        if col not in Y.columns:
-            continue
-        common = Y[[col]].join(realized_var, how="inner").dropna()
-        if common.empty:
-            continue
-        r = np.corrcoef(common[col], common["ret"] ** 2)[0,1]
-        score = r**2
-        if score > best_score:
-            best_score, best_col = score, col
-    return best_col if best_col else "vol_12m"
-
 # ---------- Forecast Model ----------
 def run_forecast_model(X: pd.DataFrame, Y: pd.DataFrame):
     base_model = LGBMRegressor(
@@ -168,6 +148,21 @@ def run_forecast_model(X: pd.DataFrame, Y: pd.DataFrame):
     residuals = (Y.values - preds).astype(np.float32)
     return model, residuals, preds, X.astype(np.float32), Y.astype(np.float32)
 
+# ---------- Volatility Model ----------
+def train_vol_model(X: pd.DataFrame, Y: pd.DataFrame):
+    # Target = squared returns as proxy for variance
+    vol_target = (Y["ret"] ** 2).astype(np.float32)
+    model = LGBMRegressor(
+        n_estimators=2000,
+        learning_rate=0.01,
+        max_depth=3,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        random_state=GLOBAL_SEED
+    )
+    model.fit(X, vol_target)
+    return model
+
 # ---------- Medoid ----------
 def find_medoid(paths: np.ndarray):
     median_series = np.median(paths, axis=0)
@@ -177,51 +172,26 @@ def find_medoid(paths: np.ndarray):
     best_idx = np.argmax(scores)
     return paths[best_idx]
 
-# ---------- Monte Carlo (Snapshot w/ Backtest Vol Scaling) ----------
-def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, best_vol_col, seed_id=None):
+# ---------- Monte Carlo (Snapshot with ML Vol Scaling) ----------
+def run_monte_carlo_paths(model, vol_model, X_base, Y_base, sims_per_seed, rng, seed_id=None):
     horizon_months = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
 
-    # Snapshot features (frozen at last point)
+    # Snapshot features
     snapshot_X = X_base.iloc[[-1]].values.astype(np.float32)
 
-    # Predicted return (frozen)
+    # Predict mean return
     base_preds = model.predict(snapshot_X).astype(np.float32).flatten()
     pred_ret = base_preds[0]
 
-    # Nearest neighbor conditioning (residual pool)
-    nn_model = NearestNeighbors(n_neighbors=K_NEIGHBORS, metric="euclidean", algorithm="ball_tree", n_jobs=1)
-    nn_model.fit(X_base.values.astype(np.float32))
-    _, neighbor_idxs = nn_model.kneighbors(snapshot_X, n_neighbors=K_NEIGHBORS)
-    neighbor_idxs = neighbor_idxs.flatten()
+    # Predict conditional variance -> vol
+    pred_var = vol_model.predict(snapshot_X).astype(np.float32).flatten()[0]
+    pred_vol = np.sqrt(abs(pred_var))
 
-    n_res = len(residuals)
+    # Generate shocks directly ~ N(0, pred_vol^2)
+    shocks = rng.normal(0, pred_vol, size=(sims_per_seed, horizon_months-1)).astype(np.float32)
 
-    # Historical unconditional volatility from backtest
-    hist_vol = Y_base["ret"].std(ddof=0)
-
-    # Draw block start indices for all paths
-    n_blocks = math.ceil((horizon_months - 1) / BLOCK_LENGTH)
-    start_indices = rng.choice(neighbor_idxs, size=(sims_per_seed, n_blocks))
-
-    # Build residual draws in one shot
-    residual_draws = np.zeros((sims_per_seed, horizon_months-1), dtype=np.float32)
-    col = 0
-    for j in range(n_blocks):
-        block_len = min(BLOCK_LENGTH, horizon_months-1-col)
-        idxs = (start_indices[:, j][:, None] + np.arange(block_len)[None, :]) % n_res
-        residual_draws[:, col:col+block_len] = residuals[idxs, 0]
-        col += block_len
-        if col >= horizon_months-1: break
-
-    # Scale residuals to unconditional backtest volatility
-    res_vol = residual_draws.std(ddof=0)
-    if res_vol > 0:
-        shocks = residual_draws * (hist_vol / res_vol)
-    else:
-        shocks = residual_draws
-
-    # Accumulate log paths
+    # Build log paths
     log_returns = pred_ret + shocks
     log_paths[:, 1:] = np.cumsum(log_returns, axis=1)
 
@@ -329,7 +299,7 @@ def main():
                 return
 
             model, residuals, preds, X_full, Y_full = run_forecast_model(X, Y)
-            best_vol_col = choose_best_vol_indicator(Y_full)
+            vol_model = train_vol_model(X_full, Y_full)
 
             seed_medoids = []
             progress_bar = st.progress(0)
@@ -337,7 +307,7 @@ def main():
 
             for i, seed in enumerate(range(ENSEMBLE_SEEDS)):
                 rng = np.random.default_rng(GLOBAL_SEED + seed)
-                sims = run_monte_carlo_paths(model, X_full, Y_full, residuals, SIMS_PER_SEED, rng, best_vol_col, seed_id=seed)
+                sims = run_monte_carlo_paths(model, vol_model, X_full, Y_full, SIMS_PER_SEED, rng, seed_id=seed)
                 seed_medoids.append(find_medoid(sims))
 
                 progress = (i + 1) / ENSEMBLE_SEEDS
@@ -395,4 +365,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
