@@ -25,7 +25,7 @@ np.random.seed(GLOBAL_SEED)
 # ---------- Config ----------
 DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 100        # number of seeds in the ensemble
-SIMS_PER_SEED = 1000       # simulations per seed
+SIMS_PER_SEED = 1000        # simulations per seed
 FORECAST_YEARS = 1          # 12-month horizon
 BLOCK_LENGTH = 6            # block length for residual bootstrap
 
@@ -127,7 +127,6 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
 
 # ---------- Optuna Hyperparameter Tuning ----------
 def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
-    # Train = all history except last 12 months
     train_X, test_X = X.iloc[:-12], X.iloc[-12:]
     train_Y, test_Y = Y.iloc[:-12], Y.iloc[-12:]
 
@@ -144,7 +143,13 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
         model = LGBMRegressor(**params)
         model.fit(train_X, train_Y)
         preds = model.predict(test_X)
-        return r2_score(test_Y, preds)
+
+        # ---- Compute 12-month horizon return (compounded log) ----
+        realized_12m = float(np.sum(test_Y))   # sum of log returns
+        predicted_12m = float(np.sum(preds))   # sum of predicted log returns
+
+        # Put into arrays for R²
+        return r2_score([realized_12m], [predicted_12m])
 
     study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=seed))
     study.optimize(objective, n_trials=50, show_progress_bar=False)
@@ -168,19 +173,15 @@ def find_medoid(paths: np.ndarray):
     best_idx = np.argmax(scores)
     return paths[best_idx]
 
-# ---------- Monte Carlo (pure block bootstrap; raw drift, no scaling) ----------
+# ---------- Monte Carlo ----------
 def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None):
     horizon_months = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
-
     n_res = len(residuals)
     n_blocks = math.ceil(horizon_months / BLOCK_LENGTH)
-
     snapshot_X = X_base.iloc[[-1]].values.astype(np.float32)
     last_X = np.repeat(snapshot_X, sims_per_seed, axis=0)
-
     block_starts = rng.integers(0, max(1, n_res - BLOCK_LENGTH), size=(sims_per_seed, n_blocks))
-
     t = 0
     base_pred = model.predict(last_X).astype(np.float32)
     for j in range(n_blocks):
@@ -191,7 +192,6 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
             log_paths[:, t] = (log_paths[:, t-1] if t > 0 else 0) + log_return_step
             t += 1
             if t >= horizon_months: break
-
     return np.exp(log_paths, dtype=np.float32)
 
 # ---------- Forecast Stats ----------
@@ -235,7 +235,6 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
     last_date = port_cum.index[-1]
     forecast_path = port_cum.iloc[-1] * (central / central[0])
     forecast_dates = pd.date_range(start=last_date, periods=len(central), freq="M")
-
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(port_cum.index, port_cum.values, label="Portfolio Backtest")
     ax.plot([last_date, *forecast_dates], [port_cum.iloc[-1], *forecast_path],
@@ -248,42 +247,31 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
 # ---------- Streamlit App ----------
 def main():
     st.title("Snapshot Portfolio Forecasting Tool with Optuna Auto-Tuning")
-
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
     start_capital = st.number_input("Starting Value ($)", min_value=1000.0, value=10000.0, step=1000.0)
-
     freq_map = {"M": "Monthly","Q": "Quarterly","S": "Semiannual","Y": "Yearly","N": "None"}
     rebalance_label = st.selectbox("Rebalance", list(freq_map.values()), index=0)
     rebalance_choice = [k for k,v in freq_map.items() if v == rebalance_label][0]
-
     if st.button("Run Forecast"):
         try:
             weights = to_weights([float(x) for x in weights_str.split(",")])
             tickers = [t.strip() for t in tickers.split(",") if t.strip()]
-
             prices = fetch_prices_monthly(tickers, start=DEFAULT_START)
             port_rets = portfolio_returns_monthly(prices, weights, rebalance_choice)
-
             df = build_features(port_rets)
             if df.empty:
                 st.error("Feature engineering returned no data.")
                 return
-
             Y = np.log(1 + port_rets.loc[df.index]).astype(np.float32)
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
-
-            # Optuna auto-tuning
             model, residuals, preds, X_full, Y_full, best_params, best_r2 = tune_and_fit_best_model(X, Y)
-
             st.write("**Best Params:**", best_params)
-            st.write("**OOS R² (last 12m):**", f"{best_r2:.4f}")
-
+            st.write("**OOS 12m R²:**", f"{best_r2:.4f}")
             seed_medoids = []
             progress_bar = st.progress(0)
             status_text = st.empty()
-
             for i, seed in enumerate(range(ENSEMBLE_SEEDS)):
                 rng = np.random.default_rng(GLOBAL_SEED + seed)
                 sims = run_monte_carlo_paths(model, X_full, Y_full, residuals, SIMS_PER_SEED, rng, seed_id=seed)
@@ -291,10 +279,8 @@ def main():
                 progress = (i+1)/ENSEMBLE_SEEDS
                 progress_bar.progress(progress)
                 status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS}")
-
             progress_bar.empty()
             final_medoid = find_medoid(np.vstack(seed_medoids))
-
             stats = compute_forecast_stats_from_path(final_medoid, start_capital, port_rets.index[-1])
             backtest_stats = {
                 "CAGR": annualized_return_monthly(port_rets),
@@ -302,7 +288,6 @@ def main():
                 "Sharpe": annualized_sharpe_monthly(port_rets),
                 "Max Drawdown": max_drawdown_from_rets(port_rets)
             }
-
             st.subheader("Results")
             col1, col2 = st.columns(2)
             with col1:
@@ -311,15 +296,11 @@ def main():
             with col2:
                 st.markdown("**Forecast**")
                 for k,v in stats.items(): st.metric(k, f"{v:.2%}" if 'Sharpe' not in k else f"{v:.2f}")
-
             ending_value = float(final_medoid[-1]) * start_capital
             st.metric("Forecasted Portfolio Value", f"${ending_value:,.2f}")
-
             plot_forecasts(port_rets, start_capital, final_medoid, rebalance_label)
-
             final_X = X_full.iloc[[-1]]
             plot_feature_attributions(model, X_full, final_X)
-
         except Exception as e:
             st.error(f"Error: {e}")
 
