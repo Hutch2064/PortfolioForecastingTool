@@ -9,6 +9,7 @@ from typing import List
 from lightgbm import LGBMRegressor
 from sklearn.multioutput import MultiOutputRegressor
 import matplotlib.pyplot as plt
+from sklearn.neighbors import NearestNeighbors
 import shap
 import math
 import streamlit as st
@@ -26,6 +27,7 @@ DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 10        # number of seeds in the ensemble
 SIMS_PER_SEED = 2000       # simulations per seed
 FORECAST_YEARS = 1         # 12-month horizon
+BLOCK_LENGTH = 6           # block length for residual bootstrap
 
 # ---------- Helpers ----------
 def to_weights(raw: List[float]) -> np.ndarray:
@@ -67,12 +69,12 @@ def compute_current_drawdown(returns: pd.Series) -> pd.Series:
 # ---------- Data Fetch ----------
 def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFrame:
     data = yf.download(
-        tickers,
-        start=start,
-        auto_adjust=False,
-        progress=False,
-        interval="1mo",
-        threads=False
+        tickers, 
+        start=start, 
+        auto_adjust=False, 
+        progress=False, 
+        interval="1mo", 
+        threads=False   # 👈 important fix for Streamlit Cloud
     )
     if data.empty:
         raise ValueError("No price data returned from Yahoo Finance.")
@@ -126,6 +128,23 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
     df["vol_12m"] = returns.rolling(12).std().astype(np.float32)
     return df.dropna().astype(np.float32)
 
+# ---------- Volatility Selection ----------
+def choose_best_vol_indicator(Y: pd.DataFrame) -> str:
+    candidates = ["vol_3m", "vol_6m", "vol_12m"]
+    best_col, best_score = None, -np.inf
+    realized_var = (Y["ret"] ** 2).dropna()
+    for col in candidates:
+        if col not in Y.columns:
+            continue
+        common = Y[[col]].join(realized_var, how="inner").dropna()
+        if common.empty: 
+            continue
+        r = np.corrcoef(common[col], common["ret"] ** 2)[0,1]
+        score = r**2
+        if score > best_score:
+            best_score, best_col = score, col
+    return best_col if best_col else "vol_12m"
+
 # ---------- Forecast Model ----------
 def run_forecast_model(X: pd.DataFrame, Y: pd.DataFrame):
     base_model = LGBMRegressor(
@@ -148,38 +167,6 @@ def run_forecast_model(X: pd.DataFrame, Y: pd.DataFrame):
     residuals = (Y.values - preds).astype(np.float32)
     return model, residuals, preds, X.astype(np.float32), Y.astype(np.float32)
 
-# ---------- Volatility Model ----------
-def train_vol_model(X: pd.DataFrame, Y: pd.DataFrame):
-    vol_target = (Y["ret"] ** 2).astype(np.float32)
-    model = LGBMRegressor(
-        n_estimators=2000,
-        learning_rate=0.01,
-        max_depth=3,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        random_state=GLOBAL_SEED
-    )
-    model.fit(X, vol_target)
-    return model
-
-# ---------- Forward Return Model (for tilt) ----------
-def build_forward_labels(returns: pd.Series) -> pd.Series:
-    return (returns.add(1).rolling(12).apply(np.prod, raw=True).shift(-12) - 1).dropna()
-
-def train_forward_model(X: pd.DataFrame, returns: pd.Series):
-    fwd_12m = build_forward_labels(returns)
-    X_fwd = X.loc[fwd_12m.index]
-    model = LGBMRegressor(
-        n_estimators=2000,
-        learning_rate=0.01,
-        max_depth=3,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        random_state=GLOBAL_SEED
-    )
-    model.fit(X_fwd, fwd_12m.values.astype(np.float32))
-    return model
-
 # ---------- Medoid ----------
 def find_medoid(paths: np.ndarray):
     median_series = np.median(paths, axis=0)
@@ -189,33 +176,47 @@ def find_medoid(paths: np.ndarray):
     best_idx = np.argmax(scores)
     return paths[best_idx]
 
-# ---------- Monte Carlo with Forward Tilt ----------
-def run_monte_carlo_paths(model, vol_model, fwd_model,
-                          X_base, Y_base, sims_per_seed, rng, seed_id=None):
+# ---------- Monte Carlo ----------
+def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, best_vol_col, k_neighbors=20, seed_id=None):
     horizon_months = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
+    log_paths[:, 0] = 0.0
 
-    snapshot_X = X_base.iloc[[-1]].values.astype(np.float32)
+    nn_model = NearestNeighbors(n_neighbors=k_neighbors, metric="euclidean", algorithm="ball_tree", n_jobs=1)
+    nn_model.fit(X_base.values.astype(np.float32))
+    _, precomputed_idxs = nn_model.kneighbors(X_base.values.astype(np.float32), n_neighbors=k_neighbors)
+    precomputed_idxs = np.sort(precomputed_idxs, axis=1)
 
-    # Predict conditional variance
-    pred_var = vol_model.predict(snapshot_X).astype(np.float32).flatten()[0]
-    pred_vol = np.sqrt(abs(pred_var))
+    last_X = np.repeat(X_base.iloc[[-1]].values.astype(np.float32), sims_per_seed, axis=0)
+    n_res = len(residuals)
 
-    # Historical drift baseline
-    realized_cagr = annualized_return_monthly(np.exp(Y_base["ret"]) - 1)
-    mu_monthly = (1 + realized_cagr) ** (1/12) - 1
-    mu_monthly_log_hist = np.log(1 + mu_monthly)
+    vol_index = list(Y_base.columns).index(best_vol_col)
 
-    # Forward tilt (ML predicted vs full historical CAGR)
-    ml_fwd12 = fwd_model.predict(snapshot_X)[0]
-    tilt_12m = ml_fwd12 - realized_cagr
-    tilt_monthly = np.log(1 + tilt_12m) / 12.0
+    n_blocks = math.ceil((horizon_months - 1) / BLOCK_LENGTH)
+    hist_idx_seq = rng.integers(0, len(precomputed_idxs), size=(sims_per_seed, n_blocks))
+    nn_idx_seq   = rng.integers(0, k_neighbors, size=(sims_per_seed, n_blocks))
 
-    mu_monthly_log = mu_monthly_log_hist + tilt_monthly
+    t = 1
+    for j in range(n_blocks):
+        if t >= horizon_months: break
+        chosen_start = precomputed_idxs[hist_idx_seq[:, j], nn_idx_seq[:, j]]
+        block_len = min(BLOCK_LENGTH, horizon_months - t)
 
-    shocks = rng.normal(0, pred_vol, size=(sims_per_seed, horizon_months-1)).astype(np.float32)
-    log_returns = mu_monthly_log + shocks
-    log_paths[:, 1:] = np.cumsum(log_returns, axis=1)
+        for b in range(block_len):
+            base_preds = model.predict(last_X).astype(np.float32)
+            shocks = residuals[(chosen_start + b) % n_res]
+
+            # volatility scaling
+            pred_vol = base_preds[:, vol_index]
+            hist_vol = Y_base.iloc[(chosen_start + b) % n_res, vol_index]
+            scaling = (pred_vol / hist_vol).clip(0.1, 10.0)
+
+            log_return_step = base_preds[:, 0] + shocks[:, 0] * scaling
+            log_paths[:, t] = log_paths[:, t-1] + log_return_step
+            next_indicators = base_preds[:, 1:] + shocks[:, 1:]
+            last_X = np.column_stack([base_preds[:, 0], next_indicators]).astype(np.float32)
+            t += 1
+            if t >= horizon_months: break
 
     return np.exp(log_paths, dtype=np.float32)
 
@@ -321,8 +322,9 @@ def main():
                 return
 
             model, residuals, preds, X_full, Y_full = run_forecast_model(X, Y)
-            vol_model = train_vol_model(X_full, Y_full)
-            fwd_model = train_forward_model(X_full, np.exp(Y_full["ret"]) - 1)
+
+            # choose best volatility column
+            best_vol_col = choose_best_vol_indicator(Y_full)
 
             seed_medoids = []
             progress_bar = st.progress(0)
@@ -330,21 +332,24 @@ def main():
 
             for i, seed in enumerate(range(ENSEMBLE_SEEDS)):
                 rng = np.random.default_rng(GLOBAL_SEED + seed)
-                sims = run_monte_carlo_paths(model, vol_model, fwd_model,
-                                             X_full, Y_full, SIMS_PER_SEED, rng, seed_id=seed)
+                sims = run_monte_carlo_paths(model, X_full, Y_full, residuals, SIMS_PER_SEED, rng, best_vol_col, seed_id=seed)
                 seed_medoids.append(find_medoid(sims))
 
+                # Update Streamlit progress bar
                 progress = (i + 1) / ENSEMBLE_SEEDS
                 progress_bar.progress(progress)
                 status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS} seeds complete")
 
+            # Clear progress bar and show completion message
             progress_bar.empty()
 
             seed_medoids = np.vstack(seed_medoids)
             final_medoid = find_medoid(seed_medoids)
 
+            # Forecast stats
             stats = compute_forecast_stats_from_path(final_medoid, start_capital, port_rets.index[-1])
 
+            # Backtest stats
             backtest_stats = {
                 "CAGR": annualized_return_monthly(port_rets),
                 "Volatility": annualized_vol_monthly(port_rets),
@@ -352,6 +357,7 @@ def main():
                 "Max Drawdown": max_drawdown_from_rets(port_rets)
             }
 
+            # Comparison dashboard
             st.subheader("Results")
             col1, col2, col3 = st.columns(3)
 
