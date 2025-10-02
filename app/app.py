@@ -162,12 +162,6 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
     preds = final_model.predict(X).astype(np.float32)
     residuals = (Y.values - preds).astype(np.float32)
 
-    # Scale residuals to match historical variance
-    hist_vol = Y.std(ddof=0)
-    res_vol = residuals.std(ddof=0)
-    if res_vol > 0:
-        residuals *= (hist_vol / res_vol)
-
     return final_model, residuals, preds, X.astype(np.float32), Y.astype(np.float32), best_params, best_rmse
 
 # ---------- Medoid ----------
@@ -179,7 +173,7 @@ def find_medoid(paths: np.ndarray):
     best_idx = np.argmax(scores)
     return paths[best_idx]
 
-# ---------- Monte Carlo ----------
+# ---------- Monte Carlo (drift+residual rescaling) ----------
 def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None):
     horizon_months = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
@@ -192,14 +186,23 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
 
     block_starts = rng.integers(0, max(1, n_res - BLOCK_LENGTH), size=(sims_per_seed, n_blocks))
 
+    # Historical volatility baseline
+    hist_vol = Y_base.std(ddof=0)
+
     t = 0
     base_pred = model.predict(last_X).astype(np.float32)
     for j in range(n_blocks):
         block_len = min(BLOCK_LENGTH, horizon_months - t)
         for b in range(block_len):
             shocks = residuals[(block_starts[:, j] + b) % n_res]
-            log_return_step = base_pred + shocks
-            log_paths[:, t] = (log_paths[:, t-1] if t > 0 else 0) + log_return_step
+            raw_step = base_pred + shocks
+
+            # Scale drift+residual step variance to match historical vol
+            step_vol = raw_step.std(ddof=0)
+            if step_vol > 0:
+                raw_step *= (hist_vol / step_vol)
+
+            log_paths[:, t] = (log_paths[:, t-1] if t > 0 else 0) + raw_step
             t += 1
             if t >= horizon_months: break
 
@@ -258,7 +261,7 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
 
 # ---------- Streamlit App ----------
 def main():
-    st.title("Snapshot Portfolio Forecasting Tool with Residual Vol Rescaling")
+    st.title("Snapshot Portfolio Forecasting Tool with Drift+Residual Vol Rescaling")
 
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
@@ -285,7 +288,7 @@ def main():
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
 
-            # Optuna auto-tuning (minimizing 12m RMSE, residuals rescaled)
+            # Optuna auto-tuning (minimizing 12m RMSE)
             model, residuals, preds, X_full, Y_full, best_params, best_rmse = tune_and_fit_best_model(X, Y)
 
             st.write("**Best Params:**", best_params)
