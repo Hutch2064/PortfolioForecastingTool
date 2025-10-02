@@ -200,7 +200,7 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
             log_return_step = drift_scaled + shocks[:, 0]
             log_paths[:, t] = log_paths[:, t-1] + log_return_step
             next_indicators = base_preds[:, 1:] + shocks[:, 1:]
-            last_X = np.column_stack([base_preds[:, 0], next_indicators]).astype(np.float32)
+            last_X = next_indicators.astype(np.float32)
             t += 1
             if t >= horizon_months: break
 
