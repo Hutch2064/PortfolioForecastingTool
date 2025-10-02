@@ -150,7 +150,6 @@ def run_forecast_model(X: pd.DataFrame, Y: pd.DataFrame):
 
 # ---------- Volatility Model ----------
 def train_vol_model(X: pd.DataFrame, Y: pd.DataFrame):
-    # Target = squared returns as proxy for variance
     vol_target = (Y["ret"] ** 2).astype(np.float32)
     model = LGBMRegressor(
         n_estimators=2000,
@@ -163,6 +162,24 @@ def train_vol_model(X: pd.DataFrame, Y: pd.DataFrame):
     model.fit(X, vol_target)
     return model
 
+# ---------- Forward Return Model (for tilt) ----------
+def build_forward_labels(returns: pd.Series) -> pd.Series:
+    return (returns.add(1).rolling(12).apply(np.prod, raw=True).shift(-12) - 1).dropna()
+
+def train_forward_model(X: pd.DataFrame, returns: pd.Series):
+    fwd_12m = build_forward_labels(returns)
+    X_fwd = X.loc[fwd_12m.index]
+    model = LGBMRegressor(
+        n_estimators=2000,
+        learning_rate=0.01,
+        max_depth=3,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        random_state=GLOBAL_SEED
+    )
+    model.fit(X_fwd, fwd_12m.values.astype(np.float32))
+    return model
+
 # ---------- Medoid ----------
 def find_medoid(paths: np.ndarray):
     median_series = np.median(paths, axis=0)
@@ -172,27 +189,31 @@ def find_medoid(paths: np.ndarray):
     best_idx = np.argmax(scores)
     return paths[best_idx]
 
-# ---------- Monte Carlo (Snapshot with ML Vol + Historical Drift) ----------
-def run_monte_carlo_paths(model, vol_model, X_base, Y_base, sims_per_seed, rng, seed_id=None):
+# ---------- Monte Carlo with Forward Tilt ----------
+def run_monte_carlo_paths(model, vol_model, fwd_model,
+                          X_base, Y_base, sims_per_seed, rng, seed_id=None):
     horizon_months = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
 
-    # Snapshot features
     snapshot_X = X_base.iloc[[-1]].values.astype(np.float32)
 
-    # Predict conditional variance -> vol
+    # Predict conditional variance
     pred_var = vol_model.predict(snapshot_X).astype(np.float32).flatten()[0]
     pred_vol = np.sqrt(abs(pred_var))
 
-    # Historical drift from backtest
+    # Historical drift baseline
     realized_cagr = annualized_return_monthly(np.exp(Y_base["ret"]) - 1)
     mu_monthly = (1 + realized_cagr) ** (1/12) - 1
-    mu_monthly_log = np.log(1 + mu_monthly)
+    mu_monthly_log_hist = np.log(1 + mu_monthly)
 
-    # Generate shocks directly ~ N(0, pred_vol^2)
+    # Forward tilt (ML predicted vs full historical CAGR)
+    ml_fwd12 = fwd_model.predict(snapshot_X)[0]
+    tilt_12m = ml_fwd12 - realized_cagr
+    tilt_monthly = np.log(1 + tilt_12m) / 12.0
+
+    mu_monthly_log = mu_monthly_log_hist + tilt_monthly
+
     shocks = rng.normal(0, pred_vol, size=(sims_per_seed, horizon_months-1)).astype(np.float32)
-
-    # Build log paths: drift + shocks
     log_returns = mu_monthly_log + shocks
     log_paths[:, 1:] = np.cumsum(log_returns, axis=1)
 
@@ -301,6 +322,7 @@ def main():
 
             model, residuals, preds, X_full, Y_full = run_forecast_model(X, Y)
             vol_model = train_vol_model(X_full, Y_full)
+            fwd_model = train_forward_model(X_full, np.exp(Y_full["ret"]) - 1)
 
             seed_medoids = []
             progress_bar = st.progress(0)
@@ -308,7 +330,8 @@ def main():
 
             for i, seed in enumerate(range(ENSEMBLE_SEEDS)):
                 rng = np.random.default_rng(GLOBAL_SEED + seed)
-                sims = run_monte_carlo_paths(model, vol_model, X_full, Y_full, SIMS_PER_SEED, rng, seed_id=seed)
+                sims = run_monte_carlo_paths(model, vol_model, fwd_model,
+                                             X_full, Y_full, SIMS_PER_SEED, rng, seed_id=seed)
                 seed_medoids.append(find_medoid(sims))
 
                 progress = (i + 1) / ENSEMBLE_SEEDS
@@ -366,6 +389,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
