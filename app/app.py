@@ -141,11 +141,15 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
     df["dd_state"] = compute_current_drawdown(returns)
 
     umcsent = fetch_umich_sentiment(start=returns.index.min().to_pydatetime().date())
-    if not umcsent.empty:
-        umcsent = umcsent.loc[df.index.min():df.index.max()]
-        df["umcsent"] = umcsent.reindex(df.index).astype(np.float32).fillna(method="ffill").fillna(method="bfill")
+    df["umcsent"] = umcsent.reindex(df.index).astype(np.float32)
+    df["umcsent"] = df["umcsent"].fillna(method="ffill").fillna(method="bfill").fillna(0)
 
-    return df.dropna().astype(np.float32)
+    # Debugging printout for UMCSENT
+    print("DEBUG: UMCSENT count:", df["umcsent"].count())
+    print("DEBUG: UMCSENT head:", df["umcsent"].head())
+    print("DEBUG: UMCSENT tail:", df["umcsent"].tail())
+
+    return df.astype(np.float32)
 
 # ---------- Optuna Hyperparameter Tuning ----------
 def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
@@ -306,7 +310,7 @@ def main():
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
 
-            # Debug check: print features included
+            # Debug check
             st.write("Final Features:", list(X.columns))
 
             model, residuals, preds, X_full, Y_full, best_params, best_rmse = tune_and_fit_best_model(X, Y)
