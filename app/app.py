@@ -137,7 +137,7 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
             "max_depth": trial.suggest_int("max_depth", 2, 6),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
-            "block_length": trial.suggest_int("block_length", 1, 12),  # 👈 now tunable
+            "block_length": trial.suggest_int("block_length", 1, 12),  # 👈 tunable
             "random_state": seed,
             "n_jobs": 1
         }
@@ -157,8 +157,10 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
     best_params = study.best_params
     best_rmse = study.best_value
 
-    final_model = LGBMRegressor(**{k: v for k, v in best_params.items() if k != "block_length"},
-                                random_state=seed, n_jobs=1)
+    block_length = best_params.get("block_length", 3)
+    lgbm_params = {k: v for k, v in best_params.items() if k != "block_length"}
+
+    final_model = LGBMRegressor(**lgbm_params, random_state=seed, n_jobs=1)
     final_model.fit(X, Y)
     preds = final_model.predict(X).astype(np.float32)
     residuals = (Y.values - preds).astype(np.float32)
