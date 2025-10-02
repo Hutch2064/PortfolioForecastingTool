@@ -129,19 +129,20 @@ def portfolio_returns_monthly(prices: pd.DataFrame, weights: np.ndarray, rebalan
 
 # ---------- Feature Builders ----------
 def build_features(returns: pd.Series) -> pd.DataFrame:
-    df = pd.DataFrame()
+    df = pd.DataFrame(index=returns.index)
     df["mom_3m"] = returns.rolling(3).apply(lambda x: (1+x).prod()-1, raw=True)
     df["mom_6m"] = returns.rolling(6).apply(lambda x: (1+x).prod()-1, raw=True)
     df["mom_12m"] = returns.rolling(12).apply(lambda x: (1+x).prod()-1, raw=True)
     df["dd_state"] = compute_current_drawdown(returns)
 
-    # Add lagged UM Sentiment
+    # Add lagged UM Sentiment, aligned to returns index
     umcsent = fetch_umich_sentiment()
     if not umcsent.empty:
-        umcsent = umcsent.loc[df.index.min():df.index.max()]
-        df["umcsent_lag1"] = umcsent.reindex(df.index).astype(np.float32)
+        umcsent = umcsent.reindex(df.index)  # align to returns dates
+        df["umcsent_lag1"] = umcsent.astype(np.float32)
 
-    return df.dropna().astype(np.float32)
+    # Drop rows only if all features are NaN (preserve partial cols)
+    return df.dropna(how="all").astype(np.float32)
 
 # ---------- Optuna Hyperparameter Tuning ----------
 def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
