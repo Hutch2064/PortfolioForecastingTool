@@ -150,6 +150,7 @@ def run_forecast_model(X: pd.DataFrame, Y: pd.DataFrame):
 
 # ---------- Volatility Model ----------
 def train_vol_model(X: pd.DataFrame, Y: pd.DataFrame):
+    # Target = squared returns as proxy for variance
     vol_target = (Y["ret"] ** 2).astype(np.float32)
     model = LGBMRegressor(
         n_estimators=2000,
@@ -171,32 +172,23 @@ def find_medoid(paths: np.ndarray):
     best_idx = np.argmax(scores)
     return paths[best_idx]
 
-# ---------- Monte Carlo (Snapshot with ML Vol Scaling + Excess Return Anchoring) ----------
-def run_monte_carlo_paths(model, vol_model, X_base, Y_base, preds, sims_per_seed, rng, seed_id=None):
+# ---------- Monte Carlo (Snapshot, Zero Drift, ML Vol) ----------
+def run_monte_carlo_paths(model, vol_model, X_base, Y_base, sims_per_seed, rng, seed_id=None):
     horizon_months = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
 
+    # Snapshot features
     snapshot_X = X_base.iloc[[-1]].values.astype(np.float32)
 
-    # Raw ML prediction at last point
-    base_preds = model.predict(snapshot_X).astype(np.float32).flatten()
-    pred_ret = base_preds[0]
-
-    # Anchor: historical mean + ML excess
-    hist_mean = Y_base["ret"].mean()
-    mean_pred_training = preds[:, 0].mean()
-    excess_pred = pred_ret - mean_pred_training
-    adjusted_ret = hist_mean + excess_pred
-
-    # Predict conditional variance
+    # Predict conditional variance -> vol
     pred_var = vol_model.predict(snapshot_X).astype(np.float32).flatten()[0]
     pred_vol = np.sqrt(abs(pred_var))
 
-    # Shocks ~ N(0, pred_vol^2)
+    # Generate shocks directly ~ N(0, pred_vol^2) with ZERO drift
     shocks = rng.normal(0, pred_vol, size=(sims_per_seed, horizon_months-1)).astype(np.float32)
 
-    # Log paths
-    log_returns = adjusted_ret + shocks
+    # Build log paths
+    log_returns = shocks
     log_paths[:, 1:] = np.cumsum(log_returns, axis=1)
 
     return np.exp(log_paths, dtype=np.float32)
@@ -311,7 +303,7 @@ def main():
 
             for i, seed in enumerate(range(ENSEMBLE_SEEDS)):
                 rng = np.random.default_rng(GLOBAL_SEED + seed)
-                sims = run_monte_carlo_paths(model, vol_model, X_full, Y_full, preds, SIMS_PER_SEED, rng, seed_id=seed)
+                sims = run_monte_carlo_paths(model, vol_model, X_full, Y_full, SIMS_PER_SEED, rng, seed_id=seed)
                 seed_medoids.append(find_medoid(sims))
 
                 progress = (i + 1) / ENSEMBLE_SEEDS
@@ -369,6 +361,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
