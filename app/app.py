@@ -178,7 +178,7 @@ def train_forward_model(X: pd.DataFrame, returns: pd.Series):
         random_state=GLOBAL_SEED
     )
     model.fit(X_fwd, fwd_12m.values.astype(np.float32))
-    return model, fwd_12m.mean()
+    return model, fwd_12m.var()  # return variance for Bayesian shrinkage
 
 # ---------- Medoid ----------
 def find_medoid(paths: np.ndarray):
@@ -190,7 +190,7 @@ def find_medoid(paths: np.ndarray):
     return paths[best_idx]
 
 # ---------- Monte Carlo with Forward Tilt ----------
-def run_monte_carlo_paths(model, vol_model, fwd_model, hist_fwd12_mean,
+def run_monte_carlo_paths(model, vol_model, fwd_model, fwd_var,
                           X_base, Y_base, sims_per_seed, rng, seed_id=None):
     horizon_months = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
@@ -201,20 +201,24 @@ def run_monte_carlo_paths(model, vol_model, fwd_model, hist_fwd12_mean,
     pred_var = vol_model.predict(snapshot_X).astype(np.float32).flatten()[0]
     pred_vol = np.sqrt(abs(pred_var))
 
-    # Historical drift
+    # Historical drift baseline
     realized_cagr = annualized_return_monthly(np.exp(Y_base["ret"]) - 1)
     mu_monthly = (1 + realized_cagr) ** (1/12) - 1
     mu_monthly_log_hist = np.log(1 + mu_monthly)
 
-    # Forward tilt
+    # Forward tilt (ML predicted vs full historical CAGR)
     ml_fwd12 = fwd_model.predict(snapshot_X)[0]
-    tilt_12m = ml_fwd12 - hist_fwd12_mean
-    tilt_monthly = np.log(1 + tilt_12m) / 12.0
+    tilt_12m = ml_fwd12 - realized_cagr
 
+    # Bayesian shrinkage
+    tau2 = 0.02**2  # prior variance (skepticism level)
+    shrinkage = fwd_var / (fwd_var + tau2)
+    tilt_12m_shrunk = shrinkage * tilt_12m
+
+    tilt_monthly = np.log(1 + tilt_12m_shrunk) / 12.0
     mu_monthly_log = mu_monthly_log_hist + tilt_monthly
 
     shocks = rng.normal(0, pred_vol, size=(sims_per_seed, horizon_months-1)).astype(np.float32)
-
     log_returns = mu_monthly_log + shocks
     log_paths[:, 1:] = np.cumsum(log_returns, axis=1)
 
@@ -323,7 +327,7 @@ def main():
 
             model, residuals, preds, X_full, Y_full = run_forecast_model(X, Y)
             vol_model = train_vol_model(X_full, Y_full)
-            fwd_model, hist_fwd12_mean = train_forward_model(X_full, np.exp(Y_full["ret"]) - 1)
+            fwd_model, fwd_var = train_forward_model(X_full, np.exp(Y_full["ret"]) - 1)
 
             seed_medoids = []
             progress_bar = st.progress(0)
@@ -331,7 +335,7 @@ def main():
 
             for i, seed in enumerate(range(ENSEMBLE_SEEDS)):
                 rng = np.random.default_rng(GLOBAL_SEED + seed)
-                sims = run_monte_carlo_paths(model, vol_model, fwd_model, hist_fwd12_mean,
+                sims = run_monte_carlo_paths(model, vol_model, fwd_model, fwd_var,
                                              X_full, Y_full, SIMS_PER_SEED, rng, seed_id=seed)
                 seed_medoids.append(find_medoid(sims))
 
@@ -390,6 +394,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
