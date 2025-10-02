@@ -25,9 +25,9 @@ np.random.seed(GLOBAL_SEED)
 
 # ---------- Config ----------
 DEFAULT_START = "2000-01-01"
-ENSEMBLE_SEEDS = 100
-SIMS_PER_SEED = 10000
-FORECAST_YEARS = 1
+ENSEMBLE_SEEDS = 100        # number of seeds in the ensemble
+SIMS_PER_SEED = 10000       # simulations per seed
+FORECAST_YEARS = 1          # 12-month horizon
 
 # ---------- Helpers ----------
 def to_weights(raw: List[float]) -> np.ndarray:
@@ -67,6 +67,7 @@ def compute_current_drawdown(returns: pd.Series) -> pd.Series:
     return (cum / roll_max - 1.0).astype(np.float32)
 
 # ---------- Data Fetch ----------
+@st.cache_data(show_spinner=False)
 def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFrame:
     data = yf.download(
         tickers,
@@ -96,17 +97,20 @@ def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFram
     non_na_start = max(valid_starts)
     return close.loc[non_na_start:]
 
+@st.cache_data(show_spinner=False)
 def fetch_umich_sentiment(start=DEFAULT_START) -> pd.Series:
-    """Fetch University of Michigan Sentiment Index from FRED, monthly, lag 1 month."""
+    """
+    Fetch University of Michigan Sentiment Index (UMCSENT) from FRED, monthly.
+    DO NOT lag here; we will lag uniformly with X.shift(1) later so it behaves like all other features.
+    """
     try:
         umcsent = pdr.DataReader("UMCSENT", "fred", start)
         umcsent = umcsent.resample("M").last().ffill()
-        umcsent = umcsent.shift(1)  # lagged one month
         umcsent.name = "umcsent"
-        return umcsent
+        return umcsent.astype(np.float32).squeeze()
     except Exception as e:
-        st.warning(f"Could not fetch UMCSENT from FRED: {e}")
-        return pd.Series(dtype=np.float32)
+        st.error(f"UMCSENT fetch failed: {e}. The feature will be missing unless you provide access.")
+        return pd.Series(dtype=np.float32, name="umcsent")
 
 # ---------- Portfolio ----------
 def portfolio_returns_monthly(prices: pd.DataFrame, weights: np.ndarray, rebalance: str) -> pd.Series:
@@ -130,22 +134,25 @@ def portfolio_returns_monthly(prices: pd.DataFrame, weights: np.ndarray, rebalan
 
 # ---------- Feature Builders ----------
 def build_features(returns: pd.Series) -> pd.DataFrame:
+    # Build on same index as returns
     df = pd.DataFrame(index=returns.index)
     df["mom_3m"] = returns.rolling(3).apply(lambda x: (1+x).prod()-1, raw=True)
     df["mom_6m"] = returns.rolling(6).apply(lambda x: (1+x).prod()-1, raw=True)
     df["mom_12m"] = returns.rolling(12).apply(lambda x: (1+x).prod()-1, raw=True)
     df["dd_state"] = compute_current_drawdown(returns)
 
-    # Add UM Sentiment
-    umcsent = fetch_umich_sentiment()
+    # Add UM Sentiment aligned to the same index (no extra lag here)
+    umcsent = fetch_umich_sentiment(start=returns.index.min().to_pydatetime().date())
     if not umcsent.empty:
         umcsent = umcsent.loc[df.index.min():df.index.max()]
         df["umcsent"] = umcsent.reindex(df.index).astype(np.float32)
 
+    # Drop rows with any NaNs (due to rolling windows or missing UMCSENT)
     return df.dropna().astype(np.float32)
 
 # ---------- Optuna Hyperparameter Tuning ----------
 def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
+    # Hold out last 12 months for objective
     train_X, test_X = X.iloc[:-12], X.iloc[-12:]
     train_Y, test_Y = Y.iloc[:-12], Y.iloc[-12:]
 
@@ -156,7 +163,7 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
             "max_depth": trial.suggest_int("max_depth", 2, 6),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
-            "block_length": trial.suggest_int("block_length", 1, 12),
+            "block_length": trial.suggest_int("block_length", 1, 12),  # tunable
             "random_state": seed,
             "n_jobs": 1
         }
@@ -247,6 +254,7 @@ def plot_feature_attributions(model, X, final_X):
     shap_mean_hist = np.abs(shap_values_hist).mean(axis=0)
     shap_values_fore = explainer.shap_values(final_X)
     shap_mean_fore = np.abs(shap_values_fore).reshape(-1)
+
     features = X.columns
     x_pos = np.arange(len(features))
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -292,23 +300,33 @@ def main():
             tickers = [t.strip() for t in tickers.split(",") if t.strip()]
             prices = fetch_prices_monthly(tickers, start=DEFAULT_START)
             port_rets = portfolio_returns_monthly(prices, weights, rebalance_choice)
+
             df = build_features(port_rets)
             if df.empty:
                 st.error("Feature engineering returned no data.")
                 return
+
+            # Uniform one-month lag across ALL features (including UMCSENT)
             Y = np.log(1 + port_rets.loc[df.index]).astype(np.float32)
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
 
-            # debug line to confirm features
+            # HARD CHECK: make sure umcsent is present
             st.write("Features used:", list(X.columns))
+            if "umcsent" not in X.columns:
+                st.error("UMCSENT is missing from the training matrix. "
+                         "This typically means the FRED fetch failed or alignment dropped it. "
+                         "Fix the data source (FRED/network/API) so the feature is available.")
+                return
 
             model, residuals, preds, X_full, Y_full, best_params, best_rmse = tune_and_fit_best_model(X, Y)
             block_length = int(best_params.get("block_length", 3))
+
             st.write("**Best Params:**")
             st.json(best_params)
             st.write("**OOS 12m RMSE:**", f"{best_rmse:.6f}")
             st.write("**Optimal Block Length:**", block_length)
+
             seed_medoids = []
             progress_bar = st.progress(0)
             status_text = st.empty()
@@ -322,6 +340,7 @@ def main():
                 status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS}")
             progress_bar.empty()
             final_medoid = find_median_ending_medoid(np.vstack(seed_medoids))
+
             stats = compute_forecast_stats_from_path(final_medoid, start_capital, port_rets.index[-1])
             backtest_stats = {
                 "CAGR": annualized_return_monthly(port_rets),
@@ -329,19 +348,26 @@ def main():
                 "Sharpe": annualized_sharpe_monthly(port_rets),
                 "Max Drawdown": max_drawdown_from_rets(port_rets)
             }
+
             st.subheader("Results")
             col1, col2 = st.columns(2)
             with col1:
                 st.markdown("**Backtest**")
-                for k,v in backtest_stats.items(): st.metric(k, f"{v:.2%}" if 'Sharpe' not in k else f"{v:.2f}")
+                for k,v in backtest_stats.items():
+                    st.metric(k, f"{v:.2%}" if 'Sharpe' not in k else f"{v:.2f}")
             with col2:
                 st.markdown("**Forecast**")
-                for k,v in stats.items(): st.metric(k, f"{v:.2%}" if 'Sharpe' not in k else f"{v:.2f}")
+                for k,v in stats.items():
+                    st.metric(k, f"{v:.2%}" if 'Sharpe' not in k else f"{v:.2f}")
+
             ending_value = float(final_medoid[-1]) * start_capital
             st.metric("Forecasted Portfolio Value", f"${ending_value:,.2f}")
+
             plot_forecasts(port_rets, start_capital, final_medoid, rebalance_label)
+
             final_X = X_full.iloc[[-1]]
             plot_feature_attributions(model, X_full, final_X)
+
         except Exception as e:
             st.error(f"Error: {e}")
 
