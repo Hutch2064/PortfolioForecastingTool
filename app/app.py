@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import shap
 import math
 import streamlit as st
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 warnings.filterwarnings("ignore")
 
@@ -179,21 +180,14 @@ def run_monte_carlo_paths(model, vol_model, X_base, Y_base, sims_per_seed, rng, 
     mu_monthly = (1 + realized_cagr) ** (1/12) - 1
     mu_monthly_log = np.log(1 + mu_monthly)
 
-    # Start features from snapshot
     current_features = X_base.iloc[[-1]].copy().values
 
     for step in range(1, horizon_months):
-        # Predict variance -> vol
         pred_var = vol_model.predict(current_features).astype(np.float32)[0]
         pred_vol = np.sqrt(abs(pred_var))
-
-        # Vectorized shocks
         shocks = rng.normal(0, pred_vol, sims_per_seed).astype(np.float32)
-
-        # Update log paths
         log_paths[:, step] = log_paths[:, step-1] + mu_monthly_log + shocks
 
-        # Approximate new features efficiently with mean path only
         avg_path = np.exp(log_paths.mean(axis=0)) - 1
         feat_df = build_features(pd.Series(avg_path))
         if not feat_df.empty:
@@ -309,14 +303,22 @@ def main():
             progress_bar = st.progress(0)
             status_text = st.empty()
 
-            for i, seed in enumerate(range(ENSEMBLE_SEEDS)):
-                rng = np.random.default_rng(GLOBAL_SEED + seed)
-                sims = run_monte_carlo_paths(model, vol_model, X_full, Y_full, SIMS_PER_SEED, rng, seed_id=seed)
-                seed_medoids.append(find_medoid(sims))
-
-                progress = (i + 1) / ENSEMBLE_SEEDS
-                progress_bar.progress(progress)
-                status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS} seeds complete")
+            # Parallelize across seeds
+            with ProcessPoolExecutor() as executor:
+                futures = {
+                    executor.submit(run_monte_carlo_paths,
+                                    model, vol_model, X_full, Y_full,
+                                    SIMS_PER_SEED,
+                                    np.random.default_rng(GLOBAL_SEED + seed),
+                                    seed): seed
+                    for seed in range(ENSEMBLE_SEEDS)
+                }
+                for i, f in enumerate(as_completed(futures)):
+                    sims = f.result()
+                    seed_medoids.append(find_medoid(sims))
+                    progress = (i + 1) / ENSEMBLE_SEEDS
+                    progress_bar.progress(progress)
+                    status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS} seeds complete")
 
             progress_bar.empty()
 
@@ -369,6 +371,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
