@@ -190,7 +190,11 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
     last_X = np.repeat(X_base.iloc[[-1]].values.astype(np.float32), sims_per_seed, axis=0)
     n_res = len(residuals)
 
-    vol_index = list(Y_base.columns).index(best_vol_col)
+    # Compute historical drift (log monthly mean)
+    hist_monthly = np.exp(Y_base["ret"]) - 1
+    hist_cagr = annualized_return_monthly(hist_monthly)
+    mu_hist_monthly = (1 + hist_cagr) ** (1/12) - 1
+    mu_hist_log = np.log(1 + mu_hist_monthly)
 
     n_blocks = math.ceil((horizon_months - 1) / BLOCK_LENGTH)
     hist_idx_seq = rng.integers(0, len(precomputed_idxs), size=(sims_per_seed, n_blocks))
@@ -206,12 +210,16 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
             base_preds = model.predict(last_X).astype(np.float32)
             shocks = residuals[(chosen_start + b) % n_res]
 
-            # volatility scaling
-            pred_vol = base_preds[:, vol_index]
-            hist_vol = Y_base.iloc[(chosen_start + b) % n_res, vol_index]
-            scaling = (pred_vol / hist_vol).clip(0.1, 10.0)
+            # --- Drift normalization ---
+            mean_pred_drift = np.mean(base_preds[:, 0])
+            if mean_pred_drift != 0:
+                drift_scaled = base_preds[:, 0] * (mu_hist_log / mean_pred_drift)
+            else:
+                drift_scaled = mu_hist_log
 
-            log_return_step = base_preds[:, 0] + shocks[:, 0] * scaling
+            # --- Raw residuals (no vol scaling) ---
+            log_return_step = drift_scaled + shocks[:, 0]
+
             log_paths[:, t] = log_paths[:, t-1] + log_return_step
             next_indicators = base_preds[:, 1:] + shocks[:, 1:]
             last_X = np.column_stack([base_preds[:, 0], next_indicators]).astype(np.float32)
@@ -395,6 +403,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
