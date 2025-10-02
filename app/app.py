@@ -9,7 +9,6 @@ from typing import List
 from lightgbm import LGBMRegressor
 from sklearn.multioutput import MultiOutputRegressor
 import matplotlib.pyplot as plt
-from sklearn.neighbors import NearestNeighbors
 import shap
 import math
 import streamlit as st
@@ -74,7 +73,7 @@ def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFram
         auto_adjust=False, 
         progress=False, 
         interval="1mo", 
-        threads=False   # 👈 important fix for Streamlit Cloud
+        threads=False   # 👈 fix for Streamlit Cloud
     )
     if data.empty:
         raise ValueError("No price data returned from Yahoo Finance.")
@@ -119,30 +118,24 @@ def portfolio_returns_monthly(prices: pd.DataFrame, weights: np.ndarray, rebalan
 # ---------- Feature Builders ----------
 def build_features(returns: pd.Series) -> pd.DataFrame:
     df = pd.DataFrame()
-    df["mom_3m"] = returns.rolling(3).apply(lambda x: (1+x).prod()-1, raw=True).astype(np.float32)
-    df["mom_6m"] = returns.rolling(6).apply(lambda x: (1+x).prod()-1, raw=True).astype(np.float32)
-    df["mom_12m"] = returns.rolling(12).apply(lambda x: (1+x).prod()-1, raw=True).astype(np.float32)
+    df["mom_3m"] = returns.rolling(3).apply(lambda x: (1+x).prod()-1, raw=True)
+    df["mom_6m"] = returns.rolling(6).apply(lambda x: (1+x).prod()-1, raw=True)
+    df["mom_12m"] = returns.rolling(12).apply(lambda x: (1+x).prod()-1, raw=True)
     df["dd_state"] = compute_current_drawdown(returns)
     return df.dropna().astype(np.float32)
 
 # ---------- Forecast Model ----------
-def run_forecast_model(X: pd.DataFrame, Y: pd.DataFrame):
+def run_forecast_model(X: pd.DataFrame, Y: pd.Series):
     base_model = LGBMRegressor(
-        n_estimators=5000,
+        n_estimators=2000,
         learning_rate=0.01,
         max_depth=3,
-        reg_alpha=0.1,
-        reg_lambda=0.1,
         subsample=0.8,
         colsample_bytree=0.8,
         n_jobs=1,
-        random_state=GLOBAL_SEED,
-        bagging_seed=GLOBAL_SEED,
-        feature_fraction_seed=GLOBAL_SEED,
-        data_random_seed=GLOBAL_SEED
+        random_state=GLOBAL_SEED
     )
-    model = MultiOutputRegressor(base_model)
-    model.fit(X, Y)
+    model = base_model.fit(X, Y)
     preds = model.predict(X).astype(np.float32)
     residuals = (Y.values - preds).astype(np.float32)
     return model, residuals, preds, X.astype(np.float32), Y.astype(np.float32)
@@ -156,52 +149,40 @@ def find_medoid(paths: np.ndarray):
     best_idx = np.argmax(scores)
     return paths[best_idx]
 
-# ---------- Monte Carlo ----------
-def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, port_rets, k_neighbors=20, seed_id=None):
+# ---------- Monte Carlo (pure block bootstrap) ----------
+def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None):
     horizon_months = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
-    log_paths[:, 0] = 0.0
 
-    nn_model = NearestNeighbors(n_neighbors=k_neighbors, metric="euclidean", algorithm="ball_tree", n_jobs=1)
-    nn_model.fit(X_base.values.astype(np.float32))
-    _, precomputed_idxs = nn_model.kneighbors(X_base.values.astype(np.float32), n_neighbors=k_neighbors)
-    precomputed_idxs = np.sort(precomputed_idxs, axis=1)
-
-    last_X = np.repeat(X_base.iloc[[-1]].values.astype(np.float32), sims_per_seed, axis=0)
-    n_res = len(residuals)
-
-    # Compute historical drift (log monthly mean from actual portfolio returns)
-    hist_cagr = annualized_return_monthly(port_rets)
+    # Compute historical drift (monthly log return from CAGR)
+    hist_cagr = annualized_return_monthly(Y_base)
     mu_hist_monthly = (1 + hist_cagr) ** (1/12) - 1
     mu_hist_log = np.log(1 + mu_hist_monthly)
 
-    n_blocks = math.ceil((horizon_months - 1) / BLOCK_LENGTH)
-    hist_idx_seq = rng.integers(0, len(precomputed_idxs), size=(sims_per_seed, n_blocks))
-    nn_idx_seq   = rng.integers(0, k_neighbors, size=(sims_per_seed, n_blocks))
+    n_res = len(residuals)
+    n_blocks = math.ceil(horizon_months / BLOCK_LENGTH)
 
-    t = 1
+    # Pre-sample block starts
+    block_starts = rng.integers(0, n_res - BLOCK_LENGTH, size=(sims_per_seed, n_blocks))
+
+    last_X = np.repeat(X_base.iloc[[-1]].values.astype(np.float32), sims_per_seed, axis=0)
+
+    t = 0
     for j in range(n_blocks):
-        if t >= horizon_months: break
-        chosen_start = precomputed_idxs[hist_idx_seq[:, j], nn_idx_seq[:, j]]
         block_len = min(BLOCK_LENGTH, horizon_months - t)
-
         for b in range(block_len):
-            base_preds = model.predict(last_X).astype(np.float32)
-            shocks = residuals[(chosen_start + b) % n_res]
+            base_preds = model.predict(last_X).astype(np.float32).reshape(-1, 1)
 
-            # --- Drift normalization ---
+            # Drift normalization
             mean_pred_drift = np.mean(base_preds[:, 0])
-            if mean_pred_drift != 0:
-                drift_scaled = base_preds[:, 0] * (mu_hist_log / mean_pred_drift)
-            else:
-                drift_scaled = mu_hist_log
+            drift_scaled = base_preds[:, 0] * (mu_hist_log / mean_pred_drift) if mean_pred_drift != 0 else mu_hist_log
 
-            # --- Raw residuals (no vol scaling) ---
-            log_return_step = drift_scaled + shocks[:, 0]
+            # Raw residuals
+            shocks = residuals[(block_starts[:, j] + b) % n_res]
+            log_return_step = drift_scaled + shocks
 
-            log_paths[:, t] = log_paths[:, t-1] + log_return_step
-            next_indicators = base_preds[:, 1:] + shocks[:, 1:]
-            last_X = np.column_stack([base_preds[:, 0], next_indicators]).astype(np.float32)
+            log_paths[:, t] = (log_paths[:, t-1] if t > 0 else 0) + log_return_step
+            last_X = np.repeat(X_base.iloc[[-1]].values.astype(np.float32), sims_per_seed, axis=0)
             t += 1
             if t >= horizon_months: break
 
@@ -222,37 +203,6 @@ def compute_forecast_stats_from_path(path: np.ndarray, start_capital: float, las
         "Max Drawdown": max_drawdown_from_rets(monthly)
     }
 
-# ---------- Improvement Calculator ----------
-def percent_improvement(forecast, backtest, higher_is_better=True):
-    if np.isnan(forecast) or np.isnan(backtest) or backtest == 0:
-        return "N/A"
-    if higher_is_better:
-        improvement = (forecast - backtest) / abs(backtest)
-    else:
-        improvement = (backtest - forecast) / abs(backtest)
-    sign = "+" if improvement >= 0 else ""
-    return f"{sign}{improvement*100:.1f}%"
-
-# ---------- Feature Attribution ----------
-def plot_feature_attributions(model, X, final_X):
-    np.random.seed(GLOBAL_SEED)
-    explainer = shap.TreeExplainer(model.estimators_[0])
-    shap_values_hist = explainer.shap_values(X)
-    shap_mean_hist = np.abs(shap_values_hist).mean(axis=0)
-    shap_values_fore = explainer.shap_values(final_X)
-    shap_mean_fore = np.abs(shap_values_fore).mean(axis=0)
-    features = X.columns
-    x_pos = np.arange(len(features))
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.bar(x_pos - 0.2, shap_mean_hist, width=0.4, color="blue", label="Backtest Avg")
-    ax.bar(x_pos + 0.2, shap_mean_fore, width=0.4, color="red", label="Forecast Avg")
-    ax.set_xticks(x_pos)
-    ax.set_xticklabels(features, rotation=45, ha="right")
-    ax.set_ylabel("Average |SHAP Value|")
-    ax.set_title("Feature Contributions: Backtest vs Forecast")
-    ax.legend()
-    st.pyplot(fig)
-
 # ---------- Plot Forecasts ----------
 def plot_forecasts(port_rets, start_capital, central, rebalance_label):
     port_cum = (1 + port_rets).cumprod() * start_capital
@@ -264,26 +214,20 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
     ax.plot(port_cum.index, port_cum.values, color="blue", label="Portfolio Backtest")
     ax.plot([last_date, *forecast_dates], [port_cum.iloc[-1], *forecast_path],
             color="red", linewidth=2, label="Forecast")
-    ax.set_title(f"Portfolio Forecast (Backtest + 1Y Forecast)")
+    ax.set_title(f"Portfolio Forecast (Backtest + 1Y Snapshot Forecast)")
     ax.set_xlabel("Date"); ax.set_ylabel("Balance ($)")
     ax.legend()
     st.pyplot(fig)
 
 # ---------- Streamlit App ----------
 def main():
-    st.title("Portfolio Forecasting Tool")
+    st.title("Snapshot Portfolio Forecasting Tool")
 
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
     start_capital = st.number_input("Starting Value ($)", min_value=1000.0, value=10000.0, step=1000.0)
 
-    freq_map = {
-        "M": "Monthly",
-        "Q": "Quarterly",
-        "S": "Semiannual",
-        "Y": "Yearly",
-        "N": "None"
-    }
+    freq_map = {"M": "Monthly","Q": "Quarterly","S": "Semiannual","Y": "Yearly","N": "None"}
     rebalance_label = st.selectbox("Rebalance", list(freq_map.values()), index=0)
     rebalance_choice = [k for k,v in freq_map.items() if v == rebalance_label][0]
 
@@ -296,17 +240,13 @@ def main():
             port_rets = portfolio_returns_monthly(prices, weights, rebalance_choice)
 
             df = build_features(port_rets)
-            if df is None or df.empty:
-                st.error("Feature engineering returned no data. Check tickers or date range.")
+            if df.empty:
+                st.error("Feature engineering returned no data.")
                 return
 
-            Y = pd.DataFrame({"ret": np.log(1 + port_rets).astype(np.float32)})
+            Y = np.log(1 + port_rets.loc[df.index]).astype(np.float32)  # target = log returns
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
-
-            if X.empty or Y.empty:
-                st.error("Not enough samples after feature building.")
-                return
 
             model, residuals, preds, X_full, Y_full = run_forecast_model(X, Y)
 
@@ -316,24 +256,16 @@ def main():
 
             for i, seed in enumerate(range(ENSEMBLE_SEEDS)):
                 rng = np.random.default_rng(GLOBAL_SEED + seed)
-                sims = run_monte_carlo_paths(model, X_full, Y_full, residuals, SIMS_PER_SEED, rng, port_rets, seed_id=seed)
+                sims = run_monte_carlo_paths(model, X_full, Y_full, residuals, SIMS_PER_SEED, rng, seed_id=seed)
                 seed_medoids.append(find_medoid(sims))
-
-                # Update Streamlit progress bar
-                progress = (i + 1) / ENSEMBLE_SEEDS
+                progress = (i+1)/ENSEMBLE_SEEDS
                 progress_bar.progress(progress)
-                status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS} seeds complete")
+                status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS}")
 
-            # Clear progress bar and show completion message
             progress_bar.empty()
+            final_medoid = find_medoid(np.vstack(seed_medoids))
 
-            seed_medoids = np.vstack(seed_medoids)
-            final_medoid = find_medoid(seed_medoids)
-
-            # Forecast stats
             stats = compute_forecast_stats_from_path(final_medoid, start_capital, port_rets.index[-1])
-
-            # Backtest stats
             backtest_stats = {
                 "CAGR": annualized_return_monthly(port_rets),
                 "Volatility": annualized_vol_monthly(port_rets),
@@ -341,38 +273,19 @@ def main():
                 "Max Drawdown": max_drawdown_from_rets(port_rets)
             }
 
-            # Comparison dashboard
             st.subheader("Results")
-            col1, col2, col3 = st.columns(3)
-
+            col1, col2 = st.columns(2)
             with col1:
                 st.markdown("**Backtest**")
-                st.metric("CAGR", f"{backtest_stats['CAGR']:.2%}")
-                st.metric("Volatility", f"{backtest_stats['Volatility']:.2%}")
-                st.metric("Sharpe", f"{backtest_stats['Sharpe']:.2f}")
-                st.metric("Max Drawdown", f"{backtest_stats['Max Drawdown']:.2%}")
-
+                for k,v in backtest_stats.items(): st.metric(k, f"{v:.2%}" if 'Sharpe' not in k else f"{v:.2f}")
             with col2:
                 st.markdown("**Forecast**")
-                st.metric("CAGR", f"{stats['CAGR']:.2%}")
-                st.metric("Volatility", f"{stats['Volatility']:.2%}")
-                st.metric("Sharpe", f"{stats['Sharpe']:.2f}")
-                st.metric("Max Drawdown", f"{stats['Max Drawdown']:.2%}")
-
-            with col3:
-                st.markdown("**Comparison**")
-                st.metric("CAGR", percent_improvement(stats["CAGR"], backtest_stats["CAGR"], higher_is_better=True))
-                st.metric("Volatility", percent_improvement(stats["Volatility"], backtest_stats["Volatility"], higher_is_better=False))
-                st.metric("Sharpe", percent_improvement(stats["Sharpe"], backtest_stats["Sharpe"], higher_is_better=True))
-                st.metric("Max Drawdown", percent_improvement(stats["Max Drawdown"], backtest_stats["Max Drawdown"], higher_is_better=True))
+                for k,v in stats.items(): st.metric(k, f"{v:.2%}" if 'Sharpe' not in k else f"{v:.2f}")
 
             ending_value = float(final_medoid[-1]) * start_capital
             st.metric("Forecasted Portfolio Value", f"${ending_value:,.2f}")
 
             plot_forecasts(port_rets, start_capital, final_medoid, rebalance_label)
-
-            final_X = X_full.iloc[[-1]]
-            plot_feature_attributions(model, X_full, final_X)
 
         except Exception as e:
             st.error(f"Error: {e}")
