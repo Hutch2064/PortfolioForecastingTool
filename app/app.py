@@ -25,7 +25,7 @@ np.random.seed(GLOBAL_SEED)
 # ---------- Config ----------
 DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 100        # number of seeds in the ensemble
-SIMS_PER_SEED = 10000       # simulations per seed
+SIMS_PER_SEED = 1000       # simulations per seed
 FORECAST_YEARS = 1          # 12-month horizon
 BLOCK_LENGTH = 6            # block length for residual bootstrap
 
