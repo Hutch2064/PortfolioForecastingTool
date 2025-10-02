@@ -126,9 +126,9 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
 # ---------- Forecast Model (single target: log return) ----------
 def run_forecast_model(X: pd.DataFrame, Y: pd.Series):
     base_model = LGBMRegressor(
-        n_estimators=10000,
+        n_estimators=1000,
         learning_rate=0.05,
-        max_depth=7,
+        max_depth=3,
         subsample=0.8,
         colsample_bytree=0.8,
         n_jobs=1,
