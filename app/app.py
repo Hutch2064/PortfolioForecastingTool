@@ -25,7 +25,7 @@ np.random.seed(GLOBAL_SEED)
 # ---------- Config ----------
 DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 100        # number of seeds in the ensemble
-SIMS_PER_SEED = 1000       # simulations per seed
+SIMS_PER_SEED = 1000        # simulations per seed
 FORECAST_YEARS = 1          # 12-month horizon
 BLOCK_LENGTH = 3            # block length for residual bootstrap
 
@@ -69,11 +69,11 @@ def compute_current_drawdown(returns: pd.Series) -> pd.Series:
 # ---------- Data Fetch ----------
 def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFrame:
     data = yf.download(
-        tickers, 
-        start=start, 
-        auto_adjust=False, 
-        progress=False, 
-        interval="1mo", 
+        tickers,
+        start=start,
+        auto_adjust=False,
+        progress=False,
+        interval="1mo",
         threads=False   # 👈 fix for Streamlit Cloud
     )
     if data.empty:
@@ -162,6 +162,12 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
     preds = final_model.predict(X).astype(np.float32)
     residuals = (Y.values - preds).astype(np.float32)
 
+    # Scale residuals to match historical variance
+    hist_vol = Y.std(ddof=0)
+    res_vol = residuals.std(ddof=0)
+    if res_vol > 0:
+        residuals *= (hist_vol / res_vol)
+
     return final_model, residuals, preds, X.astype(np.float32), Y.astype(np.float32), best_params, best_rmse
 
 # ---------- Medoid ----------
@@ -173,7 +179,7 @@ def find_medoid(paths: np.ndarray):
     best_idx = np.argmax(scores)
     return paths[best_idx]
 
-# ---------- Monte Carlo (pure block bootstrap; raw drift, no scaling) ----------
+# ---------- Monte Carlo ----------
 def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None):
     horizon_months = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
@@ -252,7 +258,7 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
 
 # ---------- Streamlit App ----------
 def main():
-    st.title("Snapshot Portfolio Forecasting Tool with Optuna Auto-Tuning (12m RMSE)")
+    st.title("Snapshot Portfolio Forecasting Tool with Residual Vol Rescaling")
 
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
@@ -279,7 +285,7 @@ def main():
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
 
-            # Optuna auto-tuning (now minimizing 12m RMSE)
+            # Optuna auto-tuning (minimizing 12m RMSE, residuals rescaled)
             model, residuals, preds, X_full, Y_full, best_params, best_rmse = tune_and_fit_best_model(X, Y)
 
             st.write("**Best Params:**", best_params)
