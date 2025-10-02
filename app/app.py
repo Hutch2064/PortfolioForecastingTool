@@ -101,7 +101,7 @@ def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFram
 def fetch_umich_sentiment(start=DEFAULT_START) -> pd.Series:
     """
     Fetch University of Michigan Sentiment Index (UMCSENT) from FRED, monthly.
-    DO NOT lag here; we will lag uniformly with X.shift(1) later so it behaves like all other features.
+    Do NOT lag here; lag is applied uniformly with X.shift(1).
     """
     try:
         umcsent = pdr.DataReader("UMCSENT", "fred", start)
@@ -109,7 +109,7 @@ def fetch_umich_sentiment(start=DEFAULT_START) -> pd.Series:
         umcsent.name = "umcsent"
         return umcsent.astype(np.float32).squeeze()
     except Exception as e:
-        st.error(f"UMCSENT fetch failed: {e}. The feature will be missing unless you provide access.")
+        st.error(f"UMCSENT fetch failed: {e}.")
         return pd.Series(dtype=np.float32, name="umcsent")
 
 # ---------- Portfolio ----------
@@ -134,25 +134,21 @@ def portfolio_returns_monthly(prices: pd.DataFrame, weights: np.ndarray, rebalan
 
 # ---------- Feature Builders ----------
 def build_features(returns: pd.Series) -> pd.DataFrame:
-    # Build on same index as returns
     df = pd.DataFrame(index=returns.index)
     df["mom_3m"] = returns.rolling(3).apply(lambda x: (1+x).prod()-1, raw=True)
     df["mom_6m"] = returns.rolling(6).apply(lambda x: (1+x).prod()-1, raw=True)
     df["mom_12m"] = returns.rolling(12).apply(lambda x: (1+x).prod()-1, raw=True)
     df["dd_state"] = compute_current_drawdown(returns)
 
-    # Add UM Sentiment aligned to the same index (no extra lag here)
     umcsent = fetch_umich_sentiment(start=returns.index.min().to_pydatetime().date())
     if not umcsent.empty:
         umcsent = umcsent.loc[df.index.min():df.index.max()]
         df["umcsent"] = umcsent.reindex(df.index).astype(np.float32)
 
-    # Drop rows with any NaNs (due to rolling windows or missing UMCSENT)
     return df.dropna().astype(np.float32)
 
 # ---------- Optuna Hyperparameter Tuning ----------
 def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
-    # Hold out last 12 months for objective
     train_X, test_X = X.iloc[:-12], X.iloc[-12:]
     train_Y, test_Y = Y.iloc[:-12], Y.iloc[-12:]
 
@@ -163,7 +159,7 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
             "max_depth": trial.suggest_int("max_depth", 2, 6),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
-            "block_length": trial.suggest_int("block_length", 1, 12),  # tunable
+            "block_length": trial.suggest_int("block_length", 1, 12),
             "random_state": seed,
             "n_jobs": 1
         }
@@ -306,17 +302,16 @@ def main():
                 st.error("Feature engineering returned no data.")
                 return
 
-            # Uniform one-month lag across ALL features (including UMCSENT)
+            # Apply uniform one-month lag across ALL features
             Y = np.log(1 + port_rets.loc[df.index]).astype(np.float32)
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
 
-            # HARD CHECK: make sure umcsent is present
+            # Debug print: confirm UMCSENT is included
             st.write("Features used:", list(X.columns))
+
             if "umcsent" not in X.columns:
-                st.error("UMCSENT is missing from the training matrix. "
-                         "This typically means the FRED fetch failed or alignment dropped it. "
-                         "Fix the data source (FRED/network/API) so the feature is available.")
+                st.error("UMCSENT missing from feature matrix. Check FRED fetch/alignment.")
                 return
 
             model, residuals, preds, X_full, Y_full, best_params, best_rmse = tune_and_fit_best_model(X, Y)
