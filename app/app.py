@@ -13,7 +13,7 @@ import math
 import streamlit as st
 from sklearn.metrics import mean_squared_error
 import optuna
-from pandas_datareader import data as pdr  # 👈 for FRED sentiment
+from pandas_datareader import data as pdr  # for FRED sentiment
 
 warnings.filterwarnings("ignore")
 
@@ -25,9 +25,9 @@ np.random.seed(GLOBAL_SEED)
 
 # ---------- Config ----------
 DEFAULT_START = "2000-01-01"
-ENSEMBLE_SEEDS = 100        # number of seeds in the ensemble
-SIMS_PER_SEED = 10000       # simulations per seed
-FORECAST_YEARS = 1          # 12-month horizon
+ENSEMBLE_SEEDS = 100
+SIMS_PER_SEED = 10000
+FORECAST_YEARS = 1
 
 # ---------- Helpers ----------
 def to_weights(raw: List[float]) -> np.ndarray:
@@ -74,7 +74,7 @@ def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFram
         auto_adjust=False,
         progress=False,
         interval="1mo",
-        threads=False   # 👈 fix for Streamlit Cloud
+        threads=False
     )
     if data.empty:
         raise ValueError("No price data returned from Yahoo Finance.")
@@ -97,11 +97,12 @@ def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFram
     return close.loc[non_na_start:]
 
 def fetch_umich_sentiment(start=DEFAULT_START) -> pd.Series:
-    """Fetch University of Michigan Sentiment Index from FRED, monthly, and lag it by 1 month."""
+    """Fetch University of Michigan Sentiment Index from FRED, monthly, lag 1 month."""
     try:
         umcsent = pdr.DataReader("UMCSENT", "fred", start)
         umcsent = umcsent.resample("M").last().ffill()
-        umcsent = umcsent.shift(1)  # 👈 lag by 1 month
+        umcsent = umcsent.shift(1)  # lagged one month
+        umcsent.name = "umcsent"
         return umcsent
     except Exception as e:
         st.warning(f"Could not fetch UMCSENT from FRED: {e}")
@@ -135,14 +136,13 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
     df["mom_12m"] = returns.rolling(12).apply(lambda x: (1+x).prod()-1, raw=True)
     df["dd_state"] = compute_current_drawdown(returns)
 
-    # Add lagged UM Sentiment, aligned to returns index
+    # Add UM Sentiment
     umcsent = fetch_umich_sentiment()
     if not umcsent.empty:
-        umcsent = umcsent.reindex(df.index)  # align to returns dates
-        df["umcsent_lag1"] = umcsent.astype(np.float32)
+        umcsent = umcsent.loc[df.index.min():df.index.max()]
+        df["umcsent"] = umcsent.reindex(df.index).astype(np.float32)
 
-    # Drop rows only if all features are NaN (preserve partial cols)
-    return df.dropna(how="all").astype(np.float32)
+    return df.dropna().astype(np.float32)
 
 # ---------- Optuna Hyperparameter Tuning ----------
 def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
@@ -299,6 +299,10 @@ def main():
             Y = np.log(1 + port_rets.loc[df.index]).astype(np.float32)
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
+
+            # debug line to confirm features
+            st.write("Features used:", list(X.columns))
+
             model, residuals, preds, X_full, Y_full, best_params, best_rmse = tune_and_fit_best_model(X, Y)
             block_length = int(best_params.get("block_length", 3))
             st.write("**Best Params:**")
