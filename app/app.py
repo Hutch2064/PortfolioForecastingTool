@@ -11,8 +11,8 @@ import matplotlib.pyplot as plt
 import shap
 import math
 import streamlit as st
-from itertools import product
 from sklearn.metrics import r2_score
+import optuna
 
 warnings.filterwarnings("ignore")
 
@@ -125,32 +125,32 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
     df["dd_state"] = compute_current_drawdown(returns)
     return df.dropna().astype(np.float32)
 
-# ---------- Hyperparameter Tuning ----------
+# ---------- Optuna Hyperparameter Tuning ----------
 def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
     # Train = all history except last 12 months
     train_X, test_X = X.iloc[:-12], X.iloc[-12:]
     train_Y, test_Y = Y.iloc[:-12], Y.iloc[-12:]
 
-    param_grid = {
-        "n_estimators": [2000, 4000, 6000, 8000],
-        "max_depth": [2, 3, 4, 5],
-        "learning_rate": [0.005, 0.01, 0.02, 0.05],
-        "subsample": [0.6, 0.8, 1.0],
-        "colsample_bytree": [0.6, 0.8, 1.0]
-    }
-
-    keys, values = zip(*param_grid.items())
-    combos = [dict(zip(keys, v)) for v in product(*values)]
-
-    best_params, best_r2 = None, -np.inf
-
-    for params in combos:
-        model = LGBMRegressor(**params, random_state=seed, n_jobs=1)
+    def objective(trial):
+        params = {
+            "n_estimators": trial.suggest_int("n_estimators", 1000, 8000),
+            "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.2, log=True),
+            "max_depth": trial.suggest_int("max_depth", 2, 6),
+            "subsample": trial.suggest_float("subsample", 0.5, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+            "random_state": seed,
+            "n_jobs": 1
+        }
+        model = LGBMRegressor(**params)
         model.fit(train_X, train_Y)
         preds = model.predict(test_X)
-        r2 = r2_score(test_Y, preds)
-        if r2 > best_r2:
-            best_r2, best_params = r2, params
+        return r2_score(test_Y, preds)
+
+    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=seed))
+    study.optimize(objective, n_trials=50, show_progress_bar=False)
+
+    best_params = study.best_params
+    best_r2 = study.best_value
 
     final_model = LGBMRegressor(**best_params, random_state=seed, n_jobs=1)
     final_model.fit(X, Y)
@@ -247,7 +247,7 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
 
 # ---------- Streamlit App ----------
 def main():
-    st.title("Snapshot Portfolio Forecasting Tool with Auto-Tuning")
+    st.title("Snapshot Portfolio Forecasting Tool with Optuna Auto-Tuning")
 
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
@@ -274,7 +274,7 @@ def main():
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
 
-            # Auto-tuning step
+            # Optuna auto-tuning
             model, residuals, preds, X_full, Y_full, best_params, best_r2 = tune_and_fit_best_model(X, Y)
 
             st.write("**Best Params:**", best_params)
