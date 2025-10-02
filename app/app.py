@@ -70,11 +70,11 @@ def compute_current_drawdown(returns: pd.Series) -> pd.Series:
 # ---------- Data Fetch ----------
 def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFrame:
     data = yf.download(
-        tickers,
-        start=start,
-        auto_adjust=False,
-        progress=False,
-        interval="1mo",
+        tickers, 
+        start=start, 
+        auto_adjust=False, 
+        progress=False, 
+        interval="1mo", 
         threads=False
     )
     if data.empty:
@@ -138,7 +138,7 @@ def choose_best_vol_indicator(Y: pd.DataFrame) -> str:
         if col not in Y.columns:
             continue
         common = Y[[col]].join(realized_var, how="inner").dropna()
-        if common.empty:
+        if common.empty: 
             continue
         r = np.corrcoef(common[col], common["ret"] ** 2)[0,1]
         score = r**2
@@ -177,20 +177,15 @@ def find_medoid(paths: np.ndarray):
     best_idx = np.argmax(scores)
     return paths[best_idx]
 
-# ---------- Monte Carlo (Fast Snapshot Version) ----------
+# ---------- Monte Carlo (Snapshot Version, no vol scaling) ----------
 def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, best_vol_col, seed_id=None):
     horizon_months = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
+    log_paths[:, 0] = 0.0
 
-    # Snapshot features (frozen at last point)
     snapshot_X = X_base.iloc[[-1]].values.astype(np.float32)
 
-    # Predicted return + vol at snapshot
-    base_preds = model.predict(snapshot_X).astype(np.float32).flatten()
-    pred_ret = base_preds[0]
-    pred_vol = base_preds[list(Y_base.columns).index(best_vol_col)]
-
-    # Nearest neighbor conditioning (residual pool)
+    # Nearest neighbors for residual conditioning
     nn_model = NearestNeighbors(n_neighbors=K_NEIGHBORS, metric="euclidean", algorithm="ball_tree", n_jobs=1)
     nn_model.fit(X_base.values.astype(np.float32))
     _, neighbor_idxs = nn_model.kneighbors(snapshot_X, n_neighbors=K_NEIGHBORS)
@@ -198,29 +193,24 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
 
     n_res = len(residuals)
 
-    # Draw block start indices for all paths
     n_blocks = math.ceil((horizon_months - 1) / BLOCK_LENGTH)
-    start_indices = rng.choice(neighbor_idxs, size=(sims_per_seed, n_blocks))
 
-    # Build residual draws in one shot
-    residual_draws = np.zeros((sims_per_seed, horizon_months-1), dtype=np.float32)
-    hist_vols = np.zeros_like(residual_draws)
-    col = 0
-    for j in range(n_blocks):
-        block_len = min(BLOCK_LENGTH, horizon_months-1-col)
-        idxs = (start_indices[:, j][:, None] + np.arange(block_len)[None, :]) % n_res
-        residual_draws[:, col:col+block_len] = residuals[idxs, 0]
-        hist_vols[:, col:col+block_len] = Y_base.iloc[idxs.flatten(), list(Y_base.columns).index(best_vol_col)].values.reshape(idxs.shape)
-        col += block_len
-        if col >= horizon_months-1: break
+    for path in range(sims_per_seed):
+        t = 1
+        for j in range(n_blocks):
+            if t >= horizon_months: break
+            start_idx = rng.choice(neighbor_idxs)
+            block_len = min(BLOCK_LENGTH, horizon_months - t)
 
-    # Residual scaling (vectorized)
-    scaling = (pred_vol / hist_vols).clip(0.1, 10.0)
-    shocks = residual_draws * scaling
+            for b in range(block_len):
+                base_preds = model.predict(snapshot_X).astype(np.float32).flatten()
+                shocks = residuals[(start_idx + b) % n_res, 0]
 
-    # Accumulate log paths
-    log_returns = pred_ret + shocks
-    log_paths[:, 1:] = np.cumsum(log_returns, axis=1)
+                # no volatility scaling
+                log_return_step = base_preds[0] + shocks
+                log_paths[path, t] = log_paths[path, t-1] + log_return_step
+                t += 1
+                if t >= horizon_months: break
 
     return np.exp(log_paths, dtype=np.float32)
 
@@ -326,6 +316,7 @@ def main():
                 return
 
             model, residuals, preds, X_full, Y_full = run_forecast_model(X, Y)
+
             best_vol_col = choose_best_vol_indicator(Y_full)
 
             seed_medoids = []
