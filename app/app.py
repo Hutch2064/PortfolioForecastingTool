@@ -22,10 +22,10 @@ np.random.seed(GLOBAL_SEED)
 
 # ---------- Config ----------
 DEFAULT_START = "2000-01-01"
-ENSEMBLE_SEEDS = 10        # number of seeds in the ensemble
-SIMS_PER_SEED = 2000       # simulations per seed
+ENSEMBLE_SEEDS = 20        # number of seeds in the ensemble
+SIMS_PER_SEED = 5000       # simulations per seed
 FORECAST_YEARS = 1         # 12-month horizon
-BLOCK_LENGTH = 6           # block length for residual bootstrap
+BLOCK_LENGTH = 3           # block length for residual bootstrap
 
 # ---------- Helpers ----------
 def to_weights(raw: List[float]) -> np.ndarray:
@@ -126,7 +126,7 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
 # ---------- Forecast Model (single target: log return) ----------
 def run_forecast_model(X: pd.DataFrame, Y: pd.Series):
     base_model = LGBMRegressor(
-        n_estimators=2000,
+        n_estimators=5000,
         learning_rate=0.01,
         max_depth=3,
         subsample=0.8,
