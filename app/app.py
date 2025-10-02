@@ -128,7 +128,7 @@ def run_forecast_model(X: pd.DataFrame, Y: pd.Series):
     base_model = LGBMRegressor(
         n_estimators=5000,
         learning_rate=0.05,
-        max_depth=5,
+        max_depth=7,
         subsample=0.8,
         colsample_bytree=0.8,
         n_jobs=1,
