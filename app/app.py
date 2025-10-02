@@ -10,8 +10,8 @@ from lightgbm import LGBMRegressor
 from sklearn.multioutput import MultiOutputRegressor
 import matplotlib.pyplot as plt
 import shap
+import math
 import streamlit as st
-from concurrent.futures import ProcessPoolExecutor, as_completed
 
 warnings.filterwarnings("ignore")
 
@@ -26,7 +26,6 @@ DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 10        # number of seeds in the ensemble
 SIMS_PER_SEED = 2000       # simulations per seed
 FORECAST_YEARS = 1         # 12-month horizon
-BLOCK_LENGTH = 3           # batch length for efficiency
 
 # ---------- Helpers ----------
 def to_weights(raw: List[float]) -> np.ndarray:
@@ -130,17 +129,20 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
 # ---------- Forecast Model ----------
 def run_forecast_model(X: pd.DataFrame, Y: pd.DataFrame):
     base_model = LGBMRegressor(
-        n_estimators=3000,
+        n_estimators=5000,
         learning_rate=0.01,
         max_depth=3,
         reg_alpha=0.1,
         reg_lambda=0.1,
         subsample=0.8,
         colsample_bytree=0.8,
-        n_jobs=-1,
-        random_state=GLOBAL_SEED
+        n_jobs=1,
+        random_state=GLOBAL_SEED,
+        bagging_seed=GLOBAL_SEED,
+        feature_fraction_seed=GLOBAL_SEED,
+        data_random_seed=GLOBAL_SEED
     )
-    model = MultiOutputRegressor(base_model, n_jobs=-1)
+    model = MultiOutputRegressor(base_model)
     model.fit(X, Y)
     preds = model.predict(X).astype(np.float32)
     residuals = (Y.values - preds).astype(np.float32)
@@ -148,14 +150,14 @@ def run_forecast_model(X: pd.DataFrame, Y: pd.DataFrame):
 
 # ---------- Volatility Model ----------
 def train_vol_model(X: pd.DataFrame, Y: pd.DataFrame):
+    # Target = squared returns as proxy for variance
     vol_target = (Y["ret"] ** 2).astype(np.float32)
     model = LGBMRegressor(
-        n_estimators=1000,
+        n_estimators=2000,
         learning_rate=0.01,
         max_depth=3,
         subsample=0.8,
         colsample_bytree=0.8,
-        n_jobs=-1,
         random_state=GLOBAL_SEED
     )
     model.fit(X, vol_target)
@@ -170,33 +172,29 @@ def find_medoid(paths: np.ndarray):
     best_idx = np.argmax(scores)
     return paths[best_idx]
 
-# ---------- Monte Carlo (Fast Dynamic Vol) ----------
+# ---------- Monte Carlo (Snapshot with ML Vol + Historical Drift) ----------
 def run_monte_carlo_paths(model, vol_model, X_base, Y_base, sims_per_seed, rng, seed_id=None):
     horizon_months = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
 
+    # Snapshot features
+    snapshot_X = X_base.iloc[[-1]].values.astype(np.float32)
+
+    # Predict conditional variance -> vol
+    pred_var = vol_model.predict(snapshot_X).astype(np.float32).flatten()[0]
+    pred_vol = np.sqrt(abs(pred_var))
+
+    # Historical drift from backtest
     realized_cagr = annualized_return_monthly(np.exp(Y_base["ret"]) - 1)
     mu_monthly = (1 + realized_cagr) ** (1/12) - 1
     mu_monthly_log = np.log(1 + mu_monthly)
 
-    # cache last snapshot features
-    base_features = X_base.iloc[[-1]].copy().values
+    # Generate shocks directly ~ N(0, pred_vol^2)
+    shocks = rng.normal(0, pred_vol, size=(sims_per_seed, horizon_months-1)).astype(np.float32)
 
-    for step in range(1, horizon_months, BLOCK_LENGTH):
-        # predict volatility once per block
-        pred_var = vol_model.predict(base_features).astype(np.float32)[0]
-        pred_vol = np.sqrt(abs(pred_var))
-
-        block_len = min(BLOCK_LENGTH, horizon_months - step)
-        shocks = rng.normal(mu_monthly_log, pred_vol, size=(sims_per_seed, block_len)).astype(np.float32)
-
-        log_paths[:, step:step+block_len] = log_paths[:, step-1][:, None] + np.cumsum(shocks, axis=1)
-
-        # update features using mean path approximation
-        avg_path = np.exp(log_paths.mean(axis=0)) - 1
-        feat_df = build_features(pd.Series(avg_path))
-        if not feat_df.empty:
-            base_features = feat_df.iloc[[-1]].values
+    # Build log paths: drift + shocks
+    log_returns = mu_monthly_log + shocks
+    log_paths[:, 1:] = np.cumsum(log_returns, axis=1)
 
     return np.exp(log_paths, dtype=np.float32)
 
@@ -222,7 +220,7 @@ def percent_improvement(forecast, backtest, higher_is_better=True):
     if higher_is_better:
         improvement = (forecast - backtest) / abs(backtest)
     else:
-        improvement = (backtest - forecast) / abs(forecast)
+        improvement = (backtest - forecast) / abs(backtest)
     sign = "+" if improvement >= 0 else ""
     return f"{sign}{improvement*100:.1f}%"
 
@@ -308,21 +306,14 @@ def main():
             progress_bar = st.progress(0)
             status_text = st.empty()
 
-            with ProcessPoolExecutor() as executor:
-                futures = {
-                    executor.submit(run_monte_carlo_paths,
-                                    model, vol_model, X_full, Y_full,
-                                    SIMS_PER_SEED,
-                                    np.random.default_rng(GLOBAL_SEED + seed),
-                                    seed): seed
-                    for seed in range(ENSEMBLE_SEEDS)
-                }
-                for i, f in enumerate(as_completed(futures)):
-                    sims = f.result()
-                    seed_medoids.append(find_medoid(sims))
-                    progress = (i + 1) / ENSEMBLE_SEEDS
-                    progress_bar.progress(progress)
-                    status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS} seeds complete")
+            for i, seed in enumerate(range(ENSEMBLE_SEEDS)):
+                rng = np.random.default_rng(GLOBAL_SEED + seed)
+                sims = run_monte_carlo_paths(model, vol_model, X_full, Y_full, SIMS_PER_SEED, rng, seed_id=seed)
+                seed_medoids.append(find_medoid(sims))
+
+                progress = (i + 1) / ENSEMBLE_SEEDS
+                progress_bar.progress(progress)
+                status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS} seeds complete")
 
             progress_bar.empty()
 
@@ -375,6 +366,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
