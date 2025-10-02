@@ -126,7 +126,6 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
 
 # ---------- Optuna Hyperparameter Tuning ----------
 def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
-    # Train = all history except last 12 months
     train_X, test_X = X.iloc[:-12], X.iloc[-12:]
     train_Y, test_Y = Y.iloc[:-12], Y.iloc[-12:]
 
@@ -145,7 +144,6 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
         model.fit(train_X, train_Y)
         preds = model.predict(test_X)
 
-        # Use 12-month cumulative returns RMSE
         actual_cum = (1 + test_Y).cumprod()
         pred_cum = (1 + preds).cumprod()
         rmse = np.sqrt(mean_squared_error(actual_cum, pred_cum))
@@ -154,10 +152,11 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
     study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=seed))
     study.optimize(objective, n_trials=50, show_progress_bar=False)
 
-    best_params = study.best_params
-    best_rmse = study.best_value
+    best_trial = study.best_trial
+    best_params = best_trial.params   # 👈 guarantees block_length is preserved
+    best_rmse = best_trial.value
 
-    block_length = best_params.get("block_length", 3)
+    block_length = best_params["block_length"]
     lgbm_params = {k: v for k, v in best_params.items() if k != "block_length"}
 
     final_model = LGBMRegressor(**lgbm_params, random_state=seed, n_jobs=1)
