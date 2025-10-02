@@ -172,7 +172,7 @@ def find_medoid(paths: np.ndarray):
     best_idx = np.argmax(scores)
     return paths[best_idx]
 
-# ---------- Monte Carlo (Snapshot, Zero Drift, ML Vol) ----------
+# ---------- Monte Carlo (Snapshot with ML Vol + Historical Drift) ----------
 def run_monte_carlo_paths(model, vol_model, X_base, Y_base, sims_per_seed, rng, seed_id=None):
     horizon_months = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
@@ -184,11 +184,16 @@ def run_monte_carlo_paths(model, vol_model, X_base, Y_base, sims_per_seed, rng, 
     pred_var = vol_model.predict(snapshot_X).astype(np.float32).flatten()[0]
     pred_vol = np.sqrt(abs(pred_var))
 
-    # Generate shocks directly ~ N(0, pred_vol^2) with ZERO drift
+    # Historical drift from backtest
+    realized_cagr = annualized_return_monthly(np.exp(Y_base["ret"]) - 1)
+    mu_monthly = (1 + realized_cagr) ** (1/12) - 1
+    mu_monthly_log = np.log(1 + mu_monthly)
+
+    # Generate shocks directly ~ N(0, pred_vol^2)
     shocks = rng.normal(0, pred_vol, size=(sims_per_seed, horizon_months-1)).astype(np.float32)
 
-    # Build log paths
-    log_returns = shocks
+    # Build log paths: drift + shocks
+    log_returns = mu_monthly_log + shocks
     log_paths[:, 1:] = np.cumsum(log_returns, axis=1)
 
     return np.exp(log_paths, dtype=np.float32)
@@ -361,6 +366,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
