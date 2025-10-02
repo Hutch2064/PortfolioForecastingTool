@@ -11,6 +11,8 @@ import matplotlib.pyplot as plt
 import shap
 import math
 import streamlit as st
+from itertools import product
+from sklearn.metrics import r2_score
 
 warnings.filterwarnings("ignore")
 
@@ -24,8 +26,8 @@ np.random.seed(GLOBAL_SEED)
 DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 100        # number of seeds in the ensemble
 SIMS_PER_SEED = 10000       # simulations per seed
-FORECAST_YEARS = 1         # 12-month horizon
-BLOCK_LENGTH = 6           # block length for residual bootstrap
+FORECAST_YEARS = 1          # 12-month horizon
+BLOCK_LENGTH = 6            # block length for residual bootstrap
 
 # ---------- Helpers ----------
 def to_weights(raw: List[float]) -> np.ndarray:
@@ -123,21 +125,39 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
     df["dd_state"] = compute_current_drawdown(returns)
     return df.dropna().astype(np.float32)
 
-# ---------- Forecast Model (single target: log return) ----------
-def run_forecast_model(X: pd.DataFrame, Y: pd.Series):
-    base_model = LGBMRegressor(
-        n_estimators=2000,
-        learning_rate=0.05,
-        max_depth=3,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        n_jobs=1,
-        random_state=GLOBAL_SEED
-    )
-    model = base_model.fit(X, Y)
-    preds = model.predict(X).astype(np.float32)
+# ---------- Hyperparameter Tuning ----------
+def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
+    # Train = all history except last 12 months
+    train_X, test_X = X.iloc[:-12], X.iloc[-12:]
+    train_Y, test_Y = Y.iloc[:-12], Y.iloc[-12:]
+
+    param_grid = {
+        "n_estimators": [2000, 4000, 6000, 8000],
+        "max_depth": [2, 3, 4, 5],
+        "learning_rate": [0.005, 0.01, 0.02, 0.05],
+        "subsample": [0.6, 0.8, 1.0],
+        "colsample_bytree": [0.6, 0.8, 1.0]
+    }
+
+    keys, values = zip(*param_grid.items())
+    combos = [dict(zip(keys, v)) for v in product(*values)]
+
+    best_params, best_r2 = None, -np.inf
+
+    for params in combos:
+        model = LGBMRegressor(**params, random_state=seed, n_jobs=1)
+        model.fit(train_X, train_Y)
+        preds = model.predict(test_X)
+        r2 = r2_score(test_Y, preds)
+        if r2 > best_r2:
+            best_r2, best_params = r2, params
+
+    final_model = LGBMRegressor(**best_params, random_state=seed, n_jobs=1)
+    final_model.fit(X, Y)
+    preds = final_model.predict(X).astype(np.float32)
     residuals = (Y.values - preds).astype(np.float32)
-    return model, residuals, preds, X.astype(np.float32), Y.astype(np.float32)
+
+    return final_model, residuals, preds, X.astype(np.float32), Y.astype(np.float32), best_params, best_r2
 
 # ---------- Medoid ----------
 def find_medoid(paths: np.ndarray):
@@ -156,21 +176,18 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
     n_res = len(residuals)
     n_blocks = math.ceil(horizon_months / BLOCK_LENGTH)
 
-    # Snapshot features kept constant across the forecast
-    snapshot_X = X_base.iloc[[-1]].values.astype(np.float32)          # shape (1, n_features)
-    last_X = np.repeat(snapshot_X, sims_per_seed, axis=0)              # shape (sims, n_features)
+    snapshot_X = X_base.iloc[[-1]].values.astype(np.float32)
+    last_X = np.repeat(snapshot_X, sims_per_seed, axis=0)
 
-    # Pre-sample block starts (random block bootstrap)
     block_starts = rng.integers(0, max(1, n_res - BLOCK_LENGTH), size=(sims_per_seed, n_blocks))
 
     t = 0
-    # Compute base drift once (since snapshot features are constant)
-    base_pred = model.predict(last_X).astype(np.float32)               # shape (sims,)
+    base_pred = model.predict(last_X).astype(np.float32)
     for j in range(n_blocks):
         block_len = min(BLOCK_LENGTH, horizon_months - t)
         for b in range(block_len):
-            shocks = residuals[(block_starts[:, j] + b) % n_res]       # shape (sims,)
-            log_return_step = base_pred + shocks                       # raw drift + residual
+            shocks = residuals[(block_starts[:, j] + b) % n_res]
+            log_return_step = base_pred + shocks
             log_paths[:, t] = (log_paths[:, t-1] if t > 0 else 0) + log_return_step
             t += 1
             if t >= horizon_months: break
@@ -192,14 +209,12 @@ def compute_forecast_stats_from_path(path: np.ndarray, start_capital: float, las
         "Max Drawdown": max_drawdown_from_rets(monthly)
     }
 
-# ---------- SHAP: Backtest vs Forecast Snapshot ----------
+# ---------- SHAP ----------
 def plot_feature_attributions(model, X, final_X):
-    # model: single-output LGBMRegressor
     explainer = shap.TreeExplainer(model)
-    shap_values_hist = explainer.shap_values(X)              # (n_samples, n_features)
+    shap_values_hist = explainer.shap_values(X)
     shap_mean_hist = np.abs(shap_values_hist).mean(axis=0)
-
-    shap_values_fore = explainer.shap_values(final_X)        # (1, n_features)
+    shap_values_fore = explainer.shap_values(final_X)
     shap_mean_fore = np.abs(shap_values_fore).reshape(-1)
 
     features = X.columns
@@ -232,7 +247,7 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
 
 # ---------- Streamlit App ----------
 def main():
-    st.title("Snapshot Portfolio Forecasting Tool")
+    st.title("Snapshot Portfolio Forecasting Tool with Auto-Tuning")
 
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
@@ -255,12 +270,15 @@ def main():
                 st.error("Feature engineering returned no data.")
                 return
 
-            # target = log returns, features = lagged indicators
-            Y = np.log(1 + port_rets.loc[df.index]).astype(np.float32)  # Series
+            Y = np.log(1 + port_rets.loc[df.index]).astype(np.float32)
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
 
-            model, residuals, preds, X_full, Y_full = run_forecast_model(X, Y)
+            # Auto-tuning step
+            model, residuals, preds, X_full, Y_full, best_params, best_r2 = tune_and_fit_best_model(X, Y)
+
+            st.write("**Best Params:**", best_params)
+            st.write("**OOS R² (last 12m):**", f"{best_r2:.4f}")
 
             seed_medoids = []
             progress_bar = st.progress(0)
@@ -299,7 +317,6 @@ def main():
 
             plot_forecasts(port_rets, start_capital, final_medoid, rebalance_label)
 
-            # SHAP: backtest vs forecast snapshot
             final_X = X_full.iloc[[-1]]
             plot_feature_attributions(model, X_full, final_X)
 
