@@ -119,7 +119,6 @@ def portfolio_returns_monthly(prices: pd.DataFrame, weights: np.ndarray, rebalan
 # ---------- Feature Builders ----------
 def build_features(returns: pd.Series) -> pd.DataFrame:
     df = pd.DataFrame()
-    # Target (Y) will still use returns, but not as predictor
     df["mom_3m"] = returns.rolling(3).apply(lambda x: (1+x).prod()-1, raw=True).astype(np.float32)
     df["mom_6m"] = returns.rolling(6).apply(lambda x: (1+x).prod()-1, raw=True).astype(np.float32)
     df["mom_12m"] = returns.rolling(12).apply(lambda x: (1+x).prod()-1, raw=True).astype(np.float32)
@@ -158,7 +157,7 @@ def find_medoid(paths: np.ndarray):
     return paths[best_idx]
 
 # ---------- Monte Carlo ----------
-def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, k_neighbors=20, seed_id=None):
+def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, port_rets, k_neighbors=20, seed_id=None):
     horizon_months = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
     log_paths[:, 0] = 0.0
@@ -171,9 +170,8 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
     last_X = np.repeat(X_base.iloc[[-1]].values.astype(np.float32), sims_per_seed, axis=0)
     n_res = len(residuals)
 
-    # Historical drift
-    hist_monthly = Y_base["ret"].apply(lambda x: np.exp(x)-1)
-    hist_cagr = annualized_return_monthly(hist_monthly)
+    # Compute historical drift (log monthly mean from actual portfolio returns)
+    hist_cagr = annualized_return_monthly(port_rets)
     mu_hist_monthly = (1 + hist_cagr) ** (1/12) - 1
     mu_hist_log = np.log(1 + mu_hist_monthly)
 
@@ -191,16 +189,19 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
             base_preds = model.predict(last_X).astype(np.float32)
             shocks = residuals[(chosen_start + b) % n_res]
 
+            # --- Drift normalization ---
             mean_pred_drift = np.mean(base_preds[:, 0])
             if mean_pred_drift != 0:
                 drift_scaled = base_preds[:, 0] * (mu_hist_log / mean_pred_drift)
             else:
                 drift_scaled = mu_hist_log
 
+            # --- Raw residuals (no vol scaling) ---
             log_return_step = drift_scaled + shocks[:, 0]
+
             log_paths[:, t] = log_paths[:, t-1] + log_return_step
             next_indicators = base_preds[:, 1:] + shocks[:, 1:]
-            last_X = next_indicators.astype(np.float32)
+            last_X = np.column_stack([base_preds[:, 0], next_indicators]).astype(np.float32)
             t += 1
             if t >= horizon_months: break
 
@@ -299,8 +300,7 @@ def main():
                 st.error("Feature engineering returned no data. Check tickers or date range.")
                 return
 
-            # Y includes log returns
-            Y = pd.DataFrame({"ret": np.log(1 + port_rets).astype(np.float32)}).loc[df.index]
+            Y = pd.DataFrame({"ret": np.log(1 + port_rets).astype(np.float32)})
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
 
@@ -316,20 +316,24 @@ def main():
 
             for i, seed in enumerate(range(ENSEMBLE_SEEDS)):
                 rng = np.random.default_rng(GLOBAL_SEED + seed)
-                sims = run_monte_carlo_paths(model, X_full, Y_full, residuals, SIMS_PER_SEED, rng, seed_id=seed)
+                sims = run_monte_carlo_paths(model, X_full, Y_full, residuals, SIMS_PER_SEED, rng, port_rets, seed_id=seed)
                 seed_medoids.append(find_medoid(sims))
 
+                # Update Streamlit progress bar
                 progress = (i + 1) / ENSEMBLE_SEEDS
                 progress_bar.progress(progress)
                 status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS} seeds complete")
 
+            # Clear progress bar and show completion message
             progress_bar.empty()
 
             seed_medoids = np.vstack(seed_medoids)
             final_medoid = find_medoid(seed_medoids)
 
+            # Forecast stats
             stats = compute_forecast_stats_from_path(final_medoid, start_capital, port_rets.index[-1])
 
+            # Backtest stats
             backtest_stats = {
                 "CAGR": annualized_return_monthly(port_rets),
                 "Volatility": annualized_vol_monthly(port_rets),
@@ -337,6 +341,7 @@ def main():
                 "Max Drawdown": max_drawdown_from_rets(port_rets)
             }
 
+            # Comparison dashboard
             st.subheader("Results")
             col1, col2, col3 = st.columns(3)
 
