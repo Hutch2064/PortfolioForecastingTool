@@ -123,27 +123,7 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
     df["mom_6m"] = returns.rolling(6).apply(lambda x: (1+x).prod()-1, raw=True).astype(np.float32)
     df["mom_12m"] = returns.rolling(12).apply(lambda x: (1+x).prod()-1, raw=True).astype(np.float32)
     df["dd_state"] = compute_current_drawdown(returns)
-    df["vol_3m"] = returns.rolling(3).std().astype(np.float32)
-    df["vol_6m"] = returns.rolling(6).std().astype(np.float32)
-    df["vol_12m"] = returns.rolling(12).std().astype(np.float32)
     return df.dropna().astype(np.float32)
-
-# ---------- Volatility Selection ----------
-def choose_best_vol_indicator(Y: pd.DataFrame) -> str:
-    candidates = ["vol_3m", "vol_6m", "vol_12m"]
-    best_col, best_score = None, -np.inf
-    realized_var = (Y["ret"] ** 2).dropna()
-    for col in candidates:
-        if col not in Y.columns:
-            continue
-        common = Y[[col]].join(realized_var, how="inner").dropna()
-        if common.empty: 
-            continue
-        r = np.corrcoef(common[col], common["ret"] ** 2)[0,1]
-        score = r**2
-        if score > best_score:
-            best_score, best_col = score, col
-    return best_col if best_col else "vol_12m"
 
 # ---------- Forecast Model ----------
 def run_forecast_model(X: pd.DataFrame, Y: pd.DataFrame):
@@ -177,7 +157,7 @@ def find_medoid(paths: np.ndarray):
     return paths[best_idx]
 
 # ---------- Monte Carlo ----------
-def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, best_vol_col, k_neighbors=20, seed_id=None):
+def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, k_neighbors=20, seed_id=None):
     horizon_months = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
     log_paths[:, 0] = 0.0
@@ -331,16 +311,13 @@ def main():
 
             model, residuals, preds, X_full, Y_full = run_forecast_model(X, Y)
 
-            # choose best volatility column
-            best_vol_col = choose_best_vol_indicator(Y_full)
-
             seed_medoids = []
             progress_bar = st.progress(0)
             status_text = st.empty()
 
             for i, seed in enumerate(range(ENSEMBLE_SEEDS)):
                 rng = np.random.default_rng(GLOBAL_SEED + seed)
-                sims = run_monte_carlo_paths(model, X_full, Y_full, residuals, SIMS_PER_SEED, rng, best_vol_col, seed_id=seed)
+                sims = run_monte_carlo_paths(model, X_full, Y_full, residuals, SIMS_PER_SEED, rng, seed_id=seed)
                 seed_medoids.append(find_medoid(sims))
 
                 # Update Streamlit progress bar
@@ -403,7 +380,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
 
 
