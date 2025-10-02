@@ -141,7 +141,7 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
             "random_state": seed,
             "n_jobs": 1
         }
-        model = LGBMRegressor(**params)
+        model = LGBMRegressor(**{k: v for k, v in params.items() if k != "block_length"})
         model.fit(train_X, train_Y)
         preds = model.predict(test_X)
 
