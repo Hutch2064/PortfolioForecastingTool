@@ -125,11 +125,9 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
     df["dd_state"] = compute_current_drawdown(returns)
     return df.dropna().astype(np.float32)
 
-# ---------- Optuna Hyperparameter Tuning with 12m R² ----------
+# ---------- Optuna with Rolling CV ----------
 def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
-    # Train = all history except last 12 months
-    train_X, test_X = X.iloc[:-12], X.iloc[-12:]
-    train_Y, test_Y = Y.iloc[:-12], Y.iloc[-12:]
+    horizon = 12  # forecast horizon in months
 
     def objective(trial):
         params = {
@@ -142,20 +140,26 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
             "n_jobs": 1
         }
         model = LGBMRegressor(**params)
-        model.fit(train_X, train_Y)
 
-        # --- Compute rolling 12-month realized vs predicted ---
-        realized, predicted = [], []
-        for start in range(len(test_X) - 12 + 1):
-            end = start + 12
-            y_real = float(np.sum(test_Y.iloc[start:end]))
-            y_pred = float(np.sum(model.predict(test_X.iloc[start:end])))
-            realized.append(y_real); predicted.append(y_pred)
+        # Rolling walk-forward validation
+        r2_scores = []
+        for split in range(60, len(X) - horizon, horizon):  # start CV after 5 years (60m)
+            train_X, test_X = X.iloc[:split], X.iloc[split:split+horizon]
+            train_Y, test_Y = Y.iloc[:split], Y.iloc[split:split+horizon]
+            if len(test_Y) < horizon: 
+                continue
 
-        if len(realized) < 2:  # avoid invalid R²
-            return -np.inf
+            model.fit(train_X, train_Y)
+            preds = model.predict(test_X)
 
-        return r2_score(realized, predicted)
+            # Compare *cumulative 12m* return
+            pred_cum = np.sum(preds)
+            true_cum = np.sum(test_Y.values)
+            ss_res = (true_cum - pred_cum) ** 2
+            ss_tot = np.sum((test_Y.values - test_Y.mean())**2)
+            r2_scores.append(1 - ss_res/ss_tot if ss_tot > 0 else -np.inf)
+
+        return np.mean(r2_scores) if r2_scores else -np.inf
 
     study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=seed))
     study.optimize(objective, n_trials=50, show_progress_bar=False)
@@ -179,7 +183,7 @@ def find_medoid(paths: np.ndarray):
     best_idx = np.argmax(scores)
     return paths[best_idx]
 
-# ---------- Monte Carlo (block bootstrap; raw drift, no scaling) ----------
+# ---------- Monte Carlo (block bootstrap, snapshot drift) ----------
 def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None):
     horizon_months = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
@@ -258,7 +262,7 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
 
 # ---------- Streamlit App ----------
 def main():
-    st.title("Snapshot Portfolio Forecasting Tool with Optuna Auto-Tuning (12m R²)")
+    st.title("Snapshot Portfolio Forecasting Tool with Optuna + Rolling CV")
 
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
@@ -285,12 +289,11 @@ def main():
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
 
-            # Optuna auto-tuning (with progress bar)
-            st.write("Running Optuna tuning...")
+            # Optuna auto-tuning with rolling CV
             model, residuals, preds, X_full, Y_full, best_params, best_r2 = tune_and_fit_best_model(X, Y)
 
             st.write("**Best Params:**", best_params)
-            st.write("**OOS 12m R² (rolling):**", f"{best_r2:.4f}")
+            st.write("**Rolling OOS R² (12m horizon):**", f"{best_r2:.4f}")
 
             seed_medoids = []
             progress_bar = st.progress(0)
