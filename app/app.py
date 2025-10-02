@@ -126,6 +126,7 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
 
 # ---------- Optuna Hyperparameter Tuning ----------
 def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
+    # Train = all history except last 12 months
     train_X, test_X = X.iloc[:-12], X.iloc[-12:]
     train_Y, test_Y = Y.iloc[:-12], Y.iloc[-12:]
 
@@ -140,10 +141,13 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
             "random_state": seed,
             "n_jobs": 1
         }
-        model = LGBMRegressor(**{k: v for k, v in params.items() if k != "block_length"})
+        # Only pass model params into LGBM (exclude block_length)
+        model_params = {k: v for k, v in params.items() if k != "block_length"}
+        model = LGBMRegressor(**model_params)
         model.fit(train_X, train_Y)
         preds = model.predict(test_X)
 
+        # Use 12-month cumulative returns RMSE
         actual_cum = (1 + test_Y).cumprod()
         pred_cum = (1 + preds).cumprod()
         rmse = np.sqrt(mean_squared_error(actual_cum, pred_cum))
@@ -152,19 +156,25 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
     study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=seed))
     study.optimize(objective, n_trials=50, show_progress_bar=False)
 
+    # --- Ensure block_length is preserved & displayed ---
     best_trial = study.best_trial
-    best_params = best_trial.params   # 👈 guarantees block_length is preserved
+    best_params_full = best_trial.params                      # includes block_length
+    best_block_length = best_params_full["block_length"]
+    lgbm_params = {k: v for k, v in best_params_full.items() if k != "block_length"}
+
+    # Display dict that *includes* block_length so it cannot disappear
+    best_params_display = dict(lgbm_params)
+    best_params_display["block_length"] = best_block_length
+
     best_rmse = best_trial.value
 
-    block_length = best_params["block_length"]
-    lgbm_params = {k: v for k, v in best_params.items() if k != "block_length"}
-
+    # Fit final model on all data (model params only)
     final_model = LGBMRegressor(**lgbm_params, random_state=seed, n_jobs=1)
     final_model.fit(X, Y)
     preds = final_model.predict(X).astype(np.float32)
     residuals = (Y.values - preds).astype(np.float32)
 
-    return final_model, residuals, preds, X.astype(np.float32), Y.astype(np.float32), best_params, best_rmse
+    return final_model, residuals, preds, X.astype(np.float32), Y.astype(np.float32), best_params_display, best_rmse
 
 # ---------- Medoid ----------
 def find_medoid(paths: np.ndarray):
@@ -188,6 +198,7 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
 
     block_starts = rng.integers(0, max(1, n_res - block_length), size=(sims_per_seed, n_blocks))
 
+    # Target historical volatility (std of log returns)
     hist_vol = Y_base.std(ddof=0)
 
     t = 0
@@ -197,6 +208,7 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
         for b in range(block_len):
             shocks = residuals[(block_starts[:, j] + b) % n_res]
             raw_step = base_pred + shocks
+            # Scale drift+shock to match historical volatility each step
             step_vol = raw_step.std(ddof=0)
             if step_vol > 0:
                 raw_step *= (hist_vol / step_vol)
@@ -286,6 +298,7 @@ def main():
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
 
+            # Optuna tuning
             model, residuals, preds, X_full, Y_full, best_params, best_rmse = tune_and_fit_best_model(X, Y)
             block_length = best_params.get("block_length", 3)
 
