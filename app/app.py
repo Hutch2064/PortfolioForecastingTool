@@ -13,6 +13,7 @@ import math
 import streamlit as st
 from sklearn.metrics import mean_squared_error
 import optuna
+from pandas_datareader import data as pdr  # 👈 for FRED sentiment
 
 warnings.filterwarnings("ignore")
 
@@ -25,7 +26,7 @@ np.random.seed(GLOBAL_SEED)
 # ---------- Config ----------
 DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 100        # number of seeds in the ensemble
-SIMS_PER_SEED = 10000        # simulations per seed
+SIMS_PER_SEED = 10000       # simulations per seed
 FORECAST_YEARS = 1          # 12-month horizon
 
 # ---------- Helpers ----------
@@ -95,6 +96,17 @@ def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFram
     non_na_start = max(valid_starts)
     return close.loc[non_na_start:]
 
+def fetch_umich_sentiment(start=DEFAULT_START) -> pd.Series:
+    """Fetch University of Michigan Sentiment Index from FRED, monthly, and lag it by 1 month."""
+    try:
+        umcsent = pdr.DataReader("UMCSENT", "fred", start)
+        umcsent = umcsent.resample("M").last().ffill()
+        umcsent = umcsent.shift(1)  # 👈 lag by 1 month
+        return umcsent
+    except Exception as e:
+        st.warning(f"Could not fetch UMCSENT from FRED: {e}")
+        return pd.Series(dtype=np.float32)
+
 # ---------- Portfolio ----------
 def portfolio_returns_monthly(prices: pd.DataFrame, weights: np.ndarray, rebalance: str) -> pd.Series:
     rets = prices.pct_change().dropna(how="all").astype(np.float32)
@@ -122,11 +134,17 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
     df["mom_6m"] = returns.rolling(6).apply(lambda x: (1+x).prod()-1, raw=True)
     df["mom_12m"] = returns.rolling(12).apply(lambda x: (1+x).prod()-1, raw=True)
     df["dd_state"] = compute_current_drawdown(returns)
+
+    # Add lagged UM Sentiment
+    umcsent = fetch_umich_sentiment()
+    if not umcsent.empty:
+        umcsent = umcsent.loc[df.index.min():df.index.max()]
+        df["umcsent_lag1"] = umcsent.reindex(df.index).astype(np.float32)
+
     return df.dropna().astype(np.float32)
 
 # ---------- Optuna Hyperparameter Tuning ----------
 def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
-    # Train = all history except last 12 months
     train_X, test_X = X.iloc[:-12], X.iloc[-12:]
     train_Y, test_Y = Y.iloc[:-12], Y.iloc[-12:]
 
@@ -167,19 +185,13 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
 
 # ---------- Median-Ending Subset Medoid ----------
 def find_median_ending_medoid(paths: np.ndarray):
-    # Step 1: find median ending value
     endings = paths[:, -1]
     median_ending = np.median(endings)
-
-    # Step 2: select subset close to median (within 1% tolerance)
     tol = 0.01 * median_ending
     subset_idx = np.where(np.abs(endings - median_ending) <= tol)[0]
     if len(subset_idx) == 0:
         subset_idx = np.argsort(np.abs(endings - median_ending))[:max(1, len(paths)//20)]
-
     subset = paths[subset_idx]
-
-    # Step 3: compute medoid of subset
     median_series = np.median(subset, axis=0)
     diffs = np.abs(subset - median_series)
     closest = np.argmin(diffs, axis=0)
@@ -263,7 +275,7 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
 
 # ---------- Streamlit App ----------
 def main():
-    st.title("Snapshot Portfolio Forecasting Tool with Median-Ending Medoid")
+    st.title("Snapshot Portfolio Forecasting Tool with Median-Ending Medoid + UMCSENT")
 
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
