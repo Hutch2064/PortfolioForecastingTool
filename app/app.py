@@ -136,13 +136,10 @@ def run_forecast_model(X: pd.DataFrame, Y: pd.DataFrame):
         reg_lambda=0.1,
         subsample=0.8,
         colsample_bytree=0.8,
-        n_jobs=1,
-        random_state=GLOBAL_SEED,
-        bagging_seed=GLOBAL_SEED,
-        feature_fraction_seed=GLOBAL_SEED,
-        data_random_seed=GLOBAL_SEED
+        n_jobs=-1,
+        random_state=GLOBAL_SEED
     )
-    model = MultiOutputRegressor(base_model)
+    model = MultiOutputRegressor(base_model, n_jobs=-1)
     model.fit(X, Y)
     preds = model.predict(X).astype(np.float32)
     residuals = (Y.values - preds).astype(np.float32)
@@ -150,7 +147,6 @@ def run_forecast_model(X: pd.DataFrame, Y: pd.DataFrame):
 
 # ---------- Volatility Model ----------
 def train_vol_model(X: pd.DataFrame, Y: pd.DataFrame):
-    # Target = squared returns as proxy for variance
     vol_target = (Y["ret"] ** 2).astype(np.float32)
     model = LGBMRegressor(
         n_estimators=2000,
@@ -158,6 +154,7 @@ def train_vol_model(X: pd.DataFrame, Y: pd.DataFrame):
         max_depth=3,
         subsample=0.8,
         colsample_bytree=0.8,
+        n_jobs=-1,
         random_state=GLOBAL_SEED
     )
     model.fit(X, vol_target)
@@ -172,29 +169,35 @@ def find_medoid(paths: np.ndarray):
     best_idx = np.argmax(scores)
     return paths[best_idx]
 
-# ---------- Monte Carlo (Snapshot with ML Vol + Historical Drift) ----------
+# ---------- Monte Carlo (Optimized Dynamic Vol) ----------
 def run_monte_carlo_paths(model, vol_model, X_base, Y_base, sims_per_seed, rng, seed_id=None):
     horizon_months = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
 
-    # Snapshot features
-    snapshot_X = X_base.iloc[[-1]].values.astype(np.float32)
-
-    # Predict conditional variance -> vol
-    pred_var = vol_model.predict(snapshot_X).astype(np.float32).flatten()[0]
-    pred_vol = np.sqrt(abs(pred_var))
-
-    # Historical drift from backtest
+    # Drift from realized CAGR
     realized_cagr = annualized_return_monthly(np.exp(Y_base["ret"]) - 1)
     mu_monthly = (1 + realized_cagr) ** (1/12) - 1
     mu_monthly_log = np.log(1 + mu_monthly)
 
-    # Generate shocks directly ~ N(0, pred_vol^2)
-    shocks = rng.normal(0, pred_vol, size=(sims_per_seed, horizon_months-1)).astype(np.float32)
+    # Start features from snapshot
+    current_features = X_base.iloc[[-1]].copy().values
 
-    # Build log paths: drift + shocks
-    log_returns = mu_monthly_log + shocks
-    log_paths[:, 1:] = np.cumsum(log_returns, axis=1)
+    for step in range(1, horizon_months):
+        # Predict variance -> vol
+        pred_var = vol_model.predict(current_features).astype(np.float32)[0]
+        pred_vol = np.sqrt(abs(pred_var))
+
+        # Vectorized shocks
+        shocks = rng.normal(0, pred_vol, sims_per_seed).astype(np.float32)
+
+        # Update log paths
+        log_paths[:, step] = log_paths[:, step-1] + mu_monthly_log + shocks
+
+        # Approximate new features efficiently with mean path only
+        avg_path = np.exp(log_paths.mean(axis=0)) - 1
+        feat_df = build_features(pd.Series(avg_path))
+        if not feat_df.empty:
+            current_features = feat_df.iloc[[-1]].values
 
     return np.exp(log_paths, dtype=np.float32)
 
@@ -366,6 +369,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
