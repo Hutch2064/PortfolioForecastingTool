@@ -1,4 +1,4 @@
-import sys
+import sys 
 import warnings
 import random
 import os
@@ -177,7 +177,7 @@ def find_medoid(paths: np.ndarray):
     best_idx = np.argmax(scores)
     return paths[best_idx]
 
-# ---------- Monte Carlo (Fast Snapshot Version, No Scaling) ----------
+# ---------- Monte Carlo (Snapshot w/ Backtest Vol Scaling) ----------
 def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, best_vol_col, seed_id=None):
     horizon_months = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
@@ -197,6 +197,9 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
 
     n_res = len(residuals)
 
+    # Historical unconditional volatility from backtest
+    hist_vol = Y_base["ret"].std(ddof=0)
+
     # Draw block start indices for all paths
     n_blocks = math.ceil((horizon_months - 1) / BLOCK_LENGTH)
     start_indices = rng.choice(neighbor_idxs, size=(sims_per_seed, n_blocks))
@@ -211,8 +214,12 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
         col += block_len
         if col >= horizon_months-1: break
 
-    # Apply raw residuals (no scaling)
-    shocks = residual_draws
+    # Scale residuals to unconditional backtest volatility
+    res_vol = residual_draws.std(ddof=0)
+    if res_vol > 0:
+        shocks = residual_draws * (hist_vol / res_vol)
+    else:
+        shocks = residual_draws
 
     # Accumulate log paths
     log_returns = pred_ret + shocks
@@ -388,3 +395,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
