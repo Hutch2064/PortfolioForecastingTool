@@ -13,7 +13,7 @@ import math
 import streamlit as st
 from sklearn.metrics import mean_squared_error
 import optuna
-from pandas_datareader import data as pdr  # FRED data
+from pandas_datareader import data as pdr  # FRED macros
 
 warnings.filterwarnings("ignore")
 
@@ -25,8 +25,8 @@ np.random.seed(GLOBAL_SEED)
 
 # ---------- Config ----------
 DEFAULT_START = "2000-01-01"
-ENSEMBLE_SEEDS = 100        # number of seeds in the ensemble
-SIMS_PER_SEED = 10000       # simulations per seed
+ENSEMBLE_SEEDS = 50         # smaller for testing, raise to 100 for production
+SIMS_PER_SEED = 2000        # smaller for testing, raise to 10000
 FORECAST_YEARS = 1          # 12-month horizon
 
 # ---------- Helpers ----------
@@ -97,15 +97,15 @@ def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFram
     non_na_start = max(valid_starts)
     return close.loc[non_na_start:]
 
-def fetch_fred_series(series_id: str, start=DEFAULT_START) -> pd.Series:
+def fetch_fred_series(series: str, start=DEFAULT_START) -> pd.Series:
     try:
-        s = pdr.DataReader(series_id, "fred", start)
-        s = s.resample("M").last().ffill()
-        s.name = series_id.lower()
-        return s.astype(np.float32).squeeze()
+        s = pdr.DataReader(series, "fred", start)
+        s = s.resample("M").last().astype(np.float32)
+        s.name = series.lower()
+        return s
     except Exception as e:
-        st.error(f"{series_id} fetch failed: {e}")
-        return pd.Series(dtype=np.float32, name=series_id.lower())
+        print(f"Fetch failed for {series}: {e}")
+        return pd.Series(dtype=np.float32, name=series.lower())
 
 # ---------- Portfolio ----------
 def portfolio_returns_monthly(prices: pd.DataFrame, weights: np.ndarray, rebalance: str) -> pd.Series:
@@ -135,29 +135,19 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
     df["mom_12m"] = returns.rolling(12).apply(lambda x: (1+x).prod()-1, raw=True)
     df["dd_state"] = compute_current_drawdown(returns)
 
-    start_date = returns.index.min().to_pydatetime().date()
+    # Fetch macros
+    umcsent = fetch_fred_series("UMCSENT").pct_change().rename("umcsent")
+    t10y3mm = fetch_fred_series("T10Y3MM").rename("t10y3mm")
+    sahm = fetch_fred_series("SAHMREALTIME").rename("sahmrealtime")
+    m2 = fetch_fred_series("M2SL").pct_change(12).rename("m2sl_yoy")
 
-    # UM Sentiment (% change, lagged)
-    umcsent = fetch_fred_series("UMCSENT", start=start_date).pct_change().shift(1)
-    df["umcsent"] = umcsent.reindex(df.index).ffill().bfill()
+    feats = pd.concat([df, umcsent, t10y3mm, sahm, m2], axis=1)
+    feats = feats.dropna(how="any")
 
-    # T10Y3MM (level, lagged)
-    t10y3mm = fetch_fred_series("T10Y3MM", start=start_date).shift(1)
-    df["t10y3mm"] = t10y3mm.reindex(df.index).ffill().bfill()
+    print("DEBUG feature counts:")
+    print(feats.count())
 
-    # SAHM rule (% already, lagged)
-    sahm = fetch_fred_series("SAHMREALTIME", start=start_date).shift(1)
-    df["sahmrealtime"] = sahm.reindex(df.index).ffill().bfill()
-
-    # M2SL (YoY % change, lagged)
-    m2 = fetch_fred_series("M2SL", start=start_date).pct_change(12).shift(1)
-    df["m2sl_yoy"] = m2.reindex(df.index).ffill().bfill()
-
-    # Debugging
-    for col in ["umcsent", "t10y3mm", "sahmrealtime", "m2sl_yoy"]:
-        print(f"DEBUG {col} count:", df[col].count(), "head:", df[col].head().tolist())
-
-    return df.dropna().astype(np.float32)
+    return feats.astype(np.float32)
 
 # ---------- Optuna Hyperparameter Tuning ----------
 def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
@@ -166,7 +156,7 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
 
     def objective(trial):
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 1000, 8000),
+            "n_estimators": trial.suggest_int("n_estimators", 1000, 4000),
             "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.2, log=True),
             "max_depth": trial.suggest_int("max_depth", 2, 6),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
@@ -185,7 +175,7 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
         return rmse
 
     study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=seed))
-    study.optimize(objective, n_trials=50, show_progress_bar=False)
+    study.optimize(objective, n_trials=25, show_progress_bar=False)
 
     best_trial = study.best_trial
     best_params_full = dict(best_trial.params)
@@ -292,7 +282,7 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
 
 # ---------- Streamlit App ----------
 def main():
-    st.title("Snapshot Portfolio Forecasting Tool with Macro Features")
+    st.title("Snapshot Portfolio Forecasting Tool with UMCSENT, T10Y3MM, SAHM, M2")
 
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
@@ -370,7 +360,7 @@ def main():
             plot_feature_attributions(model, X_full, final_X)
 
             # Debugging
-            st.write("DEBUG: Model features:", model.booster_.feature_name())
+            st.write("DEBUG: Model feature names:", model.booster_.feature_name())
             st.write("DEBUG: X_full columns:", list(X_full.columns))
 
         except Exception as e:
