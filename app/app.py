@@ -148,7 +148,6 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
 
 # ---------- Optuna Hyperparameter Tuning ----------
 def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
-    # Train = all history except last 12 months
     train_X, test_X = X.iloc[:-12], X.iloc[-12:]
     train_Y, test_Y = Y.iloc[:-12], Y.iloc[-12:]
 
@@ -167,41 +166,48 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
         model = LGBMRegressor(**model_params)
         model.fit(train_X, train_Y)
         preds = model.predict(test_X)
+
+        # RMSE
         actual_cum = (1 + test_Y).cumprod()
         pred_cum = (1 + preds).cumprod()
         rmse = np.sqrt(mean_squared_error(actual_cum, pred_cum))
-        return rmse
 
-    study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=seed))
+        # Directional Accuracy
+        actual_dir = np.sign(test_Y.values)
+        pred_dir = np.sign(preds)
+        directional_acc = (actual_dir == pred_dir).mean()
+
+        return rmse, -directional_acc  # minimize RMSE, maximize DA
+
+    study = optuna.create_study(
+        directions=["minimize", "minimize"],
+        sampler=optuna.samplers.TPESampler(seed=seed)
+    )
     study.optimize(objective, n_trials=50, show_progress_bar=False)
 
-    best_trial = study.best_trial
+    best_trial = study.best_trials[0]  # first Pareto-optimal
     best_params_full = dict(best_trial.params)
     best_params_full["block_length"] = int(best_params_full["block_length"])
     lgbm_params = {k: v for k, v in best_params_full.items() if k != "block_length"}
-    best_rmse = float(best_trial.value)
+    best_rmse = float(best_trial.values[0])
+    best_da = -float(best_trial.values[1])
 
     final_model = LGBMRegressor(**lgbm_params, random_state=seed, n_jobs=1)
     final_model.fit(X, Y)
     preds = final_model.predict(X).astype(np.float32)
     residuals = (Y.values - preds).astype(np.float32)
-    return final_model, residuals, preds, X.astype(np.float32), Y.astype(np.float32), best_params_full, best_rmse
+
+    return final_model, residuals, preds, X.astype(np.float32), Y.astype(np.float32), best_params_full, best_rmse, best_da
 
 # ---------- Median-Ending Subset Medoid ----------
 def find_median_ending_medoid(paths: np.ndarray):
-    # Step 1: find median ending value
     endings = paths[:, -1]
     median_ending = np.median(endings)
-
-    # Step 2: select subset close to median (within 1% tolerance)
     tol = 0.01 * median_ending
     subset_idx = np.where(np.abs(endings - median_ending) <= tol)[0]
     if len(subset_idx) == 0:
         subset_idx = np.argsort(np.abs(endings - median_ending))[:max(1, len(paths)//20)]
-
     subset = paths[subset_idx]
-
-    # Step 3: compute medoid of subset
     median_series = np.median(subset, axis=0)
     diffs = np.abs(subset - median_series)
     closest = np.argmin(diffs, axis=0)
@@ -285,7 +291,7 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
 
 # ---------- Streamlit App ----------
 def main():
-    st.title("Portfolio Forecasting Tool")
+    st.title("Snapshot Portfolio Forecasting Tool with Median-Ending Medoid + Macro Indicators + Multi-Objective Optuna")
 
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
@@ -308,11 +314,12 @@ def main():
             Y = np.log(1 + port_rets.loc[df.index]).astype(np.float32)
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
-            model, residuals, preds, X_full, Y_full, best_params, best_rmse = tune_and_fit_best_model(X, Y)
+            model, residuals, preds, X_full, Y_full, best_params, best_rmse, best_da = tune_and_fit_best_model(X, Y)
             block_length = int(best_params.get("block_length", 3))
             st.write("**Best Params:**")
             st.json(best_params)
             st.write("**OOS 12m RMSE:**", f"{best_rmse:.6f}")
+            st.write("**OOS 12m Directional Accuracy:**", f"{best_da:.2%}")
             st.write("**Optimal Block Length:**", block_length)
             seed_medoids = []
             progress_bar = st.progress(0)
@@ -324,7 +331,7 @@ def main():
                 seed_medoids.append(find_median_ending_medoid(sims))
                 progress = (i+1)/ENSEMBLE_SEEDS
                 progress_bar.progress(progress)
-                status_text.text(f"Running forecasts... {i+1}%/{ENSEMBLE_SEEDS}%")
+                status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS}")
             progress_bar.empty()
             final_medoid = find_median_ending_medoid(np.vstack(seed_medoids))
             stats = compute_forecast_stats_from_path(final_medoid, start_capital, port_rets.index[-1])
