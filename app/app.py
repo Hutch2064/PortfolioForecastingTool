@@ -286,14 +286,18 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
 
     return np.exp(log_paths, dtype=np.float32)
 
-# ---------- NEW: Maximum Likelihood Path (optimized) ----------
+# ---------- NEW: Maximum Likelihood Path (Corrected) ----------
 def find_max_likelihood_path(paths: np.ndarray, residuals: np.ndarray, df: int):
     mu, sigma = residuals.mean(), residuals.std(ddof=0)
-    log_returns = np.diff(np.log(paths + 1e-9), axis=1)  # shape (n_paths, horizon-1)
-    logpdfs = student_t.logpdf(log_returns, df, loc=mu, scale=sigma)
-    loglik_per_path = logpdfs.sum(axis=1)
-    best_idx = np.argmax(loglik_per_path)
-    return paths[best_idx]
+    best_ll, best_path = -np.inf, None
+    for path in paths:
+        # Compute monthly returns from path
+        returns = np.diff(path) / path[:-1]
+        # Log-likelihood of returns under Student-t residual distribution
+        loglik = student_t.logpdf(returns, df, loc=mu, scale=sigma).sum()
+        if loglik > best_ll:
+            best_ll, best_path = loglik, path
+    return best_path
 
 # ---------- Forecast Stats ----------
 def compute_forecast_stats_from_path(path: np.ndarray, start_capital: float, last_date: pd.Timestamp):
