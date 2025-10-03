@@ -243,7 +243,7 @@ def tune_across_recent_oos_years(X: pd.DataFrame, Y: pd.Series, years_back: int 
     n_years = len(years)
     for i, y in enumerate(years):
         train_X, train_Y, test_X, test_Y, = _split_train_test_for_year(X, Y, y)
-        if len(train_X < 24 or len(test_X) < 6: 
+        if len(train_X) < 24 or len(test_X) < 6: 
             continue
         best_params, rmse, da = _tune_on_explicit_split(train_X, train_Y, test_X, test_Y, seed=seed, n_trials=n_trials)
         details.append({"year": y, "rmse": rmse, "da": da, "best_params": best_params})
