@@ -143,23 +143,50 @@ def portfolio_returns_monthly(prices: pd.DataFrame, weights: np.ndarray, rebalan
 
 # ---------- Feature Builders ----------
 def build_features(returns: pd.Series, fred_panel: pd.DataFrame) -> pd.DataFrame:
+    # Technicals on portfolio returns (monthly)
     df = pd.DataFrame(index=returns.index)
-    df["mom_3m"] = returns.rolling(3).apply(lambda x: (1+x).prod()-1, raw=True)
-    df["mom_6m"] = returns.rolling(6).apply(lambda x: (1+x).prod()-1, raw=True)
-    df["mom_12m"] = returns.rolling(12).apply(lambda x: (1+x).prod()-1, raw=True)
+    df["mom_3m"]  = returns.rolling(3,  min_periods=3).apply(lambda x: (1+x).prod()-1, raw=True)
+    df["mom_6m"]  = returns.rolling(6,  min_periods=6).apply(lambda x: (1+x).prod()-1, raw=True)
+    df["mom_12m"] = returns.rolling(12, min_periods=12).apply(lambda x: (1+x).prod()-1, raw=True)
     df["dd_state"] = compute_current_drawdown(returns)
 
-    # Join FRED macro panel
-    df = df.join(fred_panel, how="left").ffill()
+    # Align FRED panel to the same monthly index, then transform like your working code
+    fred_aligned = fred_panel.reindex(df.index).ffill()
 
-    # Transformations
-    if "Sentiment" in df.columns:
-        df["Sentiment"] = df["Sentiment"].pct_change().fillna(0)
-    if "M2" in df.columns:
-        df["M2"] = df["M2"].pct_change().fillna(0)
+    # Copy so we don't mutate cached panel
+    mac = fred_aligned.copy()
+    if "Sentiment" in mac.columns:
+        mac["Sentiment"] = mac["Sentiment"].pct_change().fillna(0.0)
+    if "M2" in mac.columns:
+        mac["M2"] = mac["M2"].pct_change().fillna(0.0)
+    # T10Y3M and SAHM kept in levels
 
-    # ✅ Fix: Do NOT cut with first_valids/max(). Just dropna at the end
-    df = df.dropna()
+    # Merge tech + macro
+    df = pd.concat([df, mac], axis=1)
+
+    # Drop columns that are entirely NaN (just in case a fetch failed)
+    df = df.dropna(axis=1, how="all")
+
+    # EXACTLY like your old align: choose the latest first-valid across all columns
+    first_valids = []
+    for c in df.columns:
+        fv = df[c].first_valid_index()
+        if fv is not None:
+            first_valids.append(fv)
+    if not first_valids:
+        return pd.DataFrame()
+
+    valid_start = max(first_valids)
+    df = df.loc[valid_start:].ffill().bfill()
+
+    # Final safety: if any rows still have NaN, drop just those rows
+    df = df.dropna(how="any")
+
+    # Debug visibility (so we can see what’s going on)
+    st.write("DEBUG feature matrix shape:", df.shape)
+    st.write("DEBUG first_valid per column:",
+             {c: (df[c].first_valid_index()) for c in df.columns})
+    st.write("DEBUG columns:", list(df.columns))
 
     return df.astype(np.float32)
 
@@ -324,6 +351,7 @@ def main():
             Y = Y.loc[X.index]
 
             st.write("Final Features:", list(X.columns))
+            st.write("Training rows:", len(X))
 
             model, residuals, preds, X_full, Y_full, best_params, best_rmse = tune_and_fit_best_model(X, Y)
             block_length = int(best_params.get("block_length", 3))
@@ -345,6 +373,7 @@ def main():
                 progress_bar.progress(progress)
                 status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS}")
             progress_bar.empty()
+
             final_medoid = find_median_ending_medoid(np.vstack(seed_medoids))
 
             stats = compute_forecast_stats_from_path(final_medoid, start_capital, port_rets.index[-1])
