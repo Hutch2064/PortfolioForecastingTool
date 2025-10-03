@@ -13,7 +13,7 @@ import math
 import streamlit as st
 from sklearn.metrics import mean_squared_error
 import optuna
-from pandas_datareader import data as pdr  # for FRED sentiment
+from pandas_datareader import data as pdr  # FRED data
 
 warnings.filterwarnings("ignore")
 
@@ -97,21 +97,15 @@ def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFram
     non_na_start = max(valid_starts)
     return close.loc[non_na_start:]
 
-@st.cache_data(show_spinner=False)
-def fetch_umich_sentiment(start=DEFAULT_START) -> pd.Series:
-    """
-    Fetch University of Michigan Sentiment Index (UMCSENT) from FRED.
-    Convert to % change (MoM) so it’s dynamic like other features.
-    """
+def fetch_fred_series(series_id: str, start=DEFAULT_START) -> pd.Series:
     try:
-        umcsent = pdr.DataReader("UMCSENT", "fred", start)
-        umcsent = umcsent.resample("M").last().ffill()
-        umcsent = umcsent.pct_change()  # <-- % change
-        umcsent.name = "umcsent_pct"
-        return umcsent.astype(np.float32).squeeze()
+        s = pdr.DataReader(series_id, "fred", start)
+        s = s.resample("M").last().ffill()
+        s.name = series_id.lower()
+        return s.astype(np.float32).squeeze()
     except Exception as e:
-        st.error(f"UMCSENT fetch failed: {e}. The feature will be missing unless you provide access.")
-        return pd.Series(dtype=np.float32, name="umcsent_pct")
+        st.error(f"{series_id} fetch failed: {e}")
+        return pd.Series(dtype=np.float32, name=series_id.lower())
 
 # ---------- Portfolio ----------
 def portfolio_returns_monthly(prices: pd.DataFrame, weights: np.ndarray, rebalance: str) -> pd.Series:
@@ -141,8 +135,27 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
     df["mom_12m"] = returns.rolling(12).apply(lambda x: (1+x).prod()-1, raw=True)
     df["dd_state"] = compute_current_drawdown(returns)
 
-    umcsent = fetch_umich_sentiment(start=returns.index.min().to_pydatetime().date())
-    df["umcsent_pct"] = umcsent.reindex(df.index).fillna(0).astype(np.float32)
+    start_date = returns.index.min().to_pydatetime().date()
+
+    # UM Sentiment (% change, lagged)
+    umcsent = fetch_fred_series("UMCSENT", start=start_date).pct_change().shift(1)
+    df["umcsent"] = umcsent.reindex(df.index).ffill().bfill()
+
+    # T10Y3MM (level, lagged)
+    t10y3mm = fetch_fred_series("T10Y3MM", start=start_date).shift(1)
+    df["t10y3mm"] = t10y3mm.reindex(df.index).ffill().bfill()
+
+    # SAHM rule (% already, lagged)
+    sahm = fetch_fred_series("SAHMREALTIME", start=start_date).shift(1)
+    df["sahmrealtime"] = sahm.reindex(df.index).ffill().bfill()
+
+    # M2SL (YoY % change, lagged)
+    m2 = fetch_fred_series("M2SL", start=start_date).pct_change(12).shift(1)
+    df["m2sl_yoy"] = m2.reindex(df.index).ffill().bfill()
+
+    # Debugging
+    for col in ["umcsent", "t10y3mm", "sahmrealtime", "m2sl_yoy"]:
+        print(f"DEBUG {col} count:", df[col].count(), "head:", df[col].head().tolist())
 
     return df.dropna().astype(np.float32)
 
@@ -251,13 +264,6 @@ def plot_feature_attributions(model, X, final_X):
     shap_mean_fore = np.abs(shap_values_fore).reshape(-1)
 
     features = X.columns
-    # ---- Debugging ----
-    st.write("DEBUG: Feature means:", X.mean())
-    st.write("DEBUG: Feature std devs:", X.std())
-    for name, val in zip(features, shap_mean_hist):
-        st.write(f"DEBUG SHAP mean |{name}|: {val:.6f}")
-
-    # ---- Plot ----
     x_pos = np.arange(len(features))
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.bar(x_pos - 0.2, shap_mean_hist, width=0.4, label="Backtest Avg")
@@ -286,7 +292,7 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
 
 # ---------- Streamlit App ----------
 def main():
-    st.title("Snapshot Portfolio Forecasting Tool with Median-Ending Medoid + UMCSENT % Change")
+    st.title("Snapshot Portfolio Forecasting Tool with Macro Features")
 
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
@@ -362,6 +368,10 @@ def main():
 
             final_X = X_full.iloc[[-1]]
             plot_feature_attributions(model, X_full, final_X)
+
+            # Debugging
+            st.write("DEBUG: Model features:", model.booster_.feature_name())
+            st.write("DEBUG: X_full columns:", list(X_full.columns))
 
         except Exception as e:
             st.error(f"Error: {e}")
