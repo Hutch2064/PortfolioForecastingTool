@@ -291,7 +291,7 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
 
 # ---------- Streamlit App ----------
 def main():
-    st.title("Snapshot Portfolio Forecasting Tool with Median-Ending Medoid + Macro Indicators + Multi-Objective Optuna")
+    st.title("Portfolio Forecasting Tool")
 
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
@@ -331,7 +331,7 @@ def main():
                 seed_medoids.append(find_median_ending_medoid(sims))
                 progress = (i+1)/ENSEMBLE_SEEDS
                 progress_bar.progress(progress)
-                status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS}")
+                status_text.text(f"Running forecasts... {i+1}%/{ENSEMBLE_SEEDS}%")
             progress_bar.empty()
             final_medoid = find_median_ending_medoid(np.vstack(seed_medoids))
             stats = compute_forecast_stats_from_path(final_medoid, start_capital, port_rets.index[-1])
