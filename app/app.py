@@ -198,8 +198,6 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
 
 # ---------- NEW: helpers for multi-year OOS tuning ----------
 def _oos_years_available(idx: pd.DatetimeIndex, max_years=5) -> List[int]:
-    """Return the last up-to-5 full calendar years available in the index."""
-    # Determine complete years (Jan..Dec present)
     years = sorted(set(idx.year))
     complete_years = []
     for y in years:
@@ -209,7 +207,6 @@ def _oos_years_available(idx: pd.DatetimeIndex, max_years=5) -> List[int]:
     return complete_years[-max_years:] if len(complete_years) > max_years else complete_years
 
 def _split_train_test_for_year(X: pd.DataFrame, Y: pd.Series, test_year: int):
-    """Train: up to Dec of previous year. Test: Jan..Dec of test_year."""
     train_end = pd.Timestamp(f"{test_year-1}-12-31")
     test_start = pd.Timestamp(f"{test_year}-01-01")
     test_end = pd.Timestamp(f"{test_year}-12-31")
@@ -218,6 +215,43 @@ def _split_train_test_for_year(X: pd.DataFrame, Y: pd.Series, test_year: int):
     test_X = X.loc[test_start:test_end]
     test_Y = Y.loc[test_X.index]
     return train_X, train_Y, test_X, test_Y
+
+# ---- missing helpers added here ----
+def _median_params(param_dicts: List[dict]) -> dict:
+    if not param_dicts: return {}
+    all_keys = set().union(*[d.keys() for d in param_dicts])
+    consensus = {}
+    for k in all_keys:
+        vals = [d[k] for d in param_dicts if k in d]
+        if not vals: continue
+        if isinstance(vals[0], (int, np.integer)):
+            consensus[k] = int(np.round(np.median(vals)))
+        elif isinstance(vals[0], (float, np.floating)):
+            consensus[k] = float(np.median(vals))
+        else:
+            counts = {}
+            for v in vals:
+                counts[v] = counts.get(v, 0) + 1
+            consensus[k] = max(counts.items(), key=lambda x: x[1])[0]
+    consensus["random_state"] = GLOBAL_SEED
+    consensus["n_jobs"] = 1
+    return consensus
+
+def _eval_params_on_split(params: dict, train_X, train_Y, test_X, test_Y, seed=GLOBAL_SEED):
+    lgbm_params = {k:v for k,v in params.items() if k not in ("df",)}
+    lgbm_params["random_state"] = seed
+    lgbm_params["n_jobs"] = 1
+    model = LGBMRegressor(**lgbm_params)
+    model.fit(train_X, train_Y)
+    preds = model.predict(test_X)
+    actual_cum = (1 + test_Y).cumprod()
+    pred_cum = (1 + preds).cumprod()
+    rmse = np.sqrt(mean_squared_error(actual_cum, pred_cum))
+    actual_dir = np.sign(test_Y.values)
+    pred_dir = np.sign(preds)
+    directional_acc = (actual_dir == pred_dir).mean()
+    return rmse, directional_acc
+# -----------------------------------
 
 def tune_across_recent_oos_years(X: pd.DataFrame, Y: pd.Series, years_back: int = 5, seed: int = GLOBAL_SEED, n_trials: int = 50):
     years = _oos_years_available(Y.index, max_years=years_back)
@@ -370,7 +404,7 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
 
 # ---------- Streamlit App ----------
 def main():
-    st.title("Portfolio Forecasting Tool (Multivariate Student-t Residuals)")
+    st.title("Portfolio Forecasting Tool")
 
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
