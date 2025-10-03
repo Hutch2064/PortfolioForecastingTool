@@ -286,18 +286,13 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
 
     return np.exp(log_paths, dtype=np.float32)
 
-# ---------- NEW: Maximum Likelihood Path (Corrected) ----------
-def find_max_likelihood_path(paths: np.ndarray, residuals: np.ndarray, df: int):
-    mu, sigma = residuals.mean(), residuals.std(ddof=0)
-    best_ll, best_path = -np.inf, None
-    for path in paths:
-        # Compute monthly returns from path
-        returns = np.diff(path) / path[:-1]
-        # Log-likelihood of returns under Student-t residual distribution
-        loglik = student_t.logpdf(returns, df, loc=mu, scale=sigma).sum()
-        if loglik > best_ll:
-            best_ll, best_path = loglik, path
-    return best_path
+# ---------- NEW: Medoid Path ----------
+def find_medoid_path(paths: np.ndarray) -> np.ndarray:
+    # Compute pairwise distances in Euclidean space
+    from sklearn.metrics import pairwise_distances
+    dists = pairwise_distances(paths, metric="euclidean")
+    medoid_index = np.argmin(dists.sum(axis=1))
+    return paths[medoid_index]
 
 # ---------- Forecast Stats ----------
 def compute_forecast_stats_from_path(path: np.ndarray, start_capital: float, last_date: pd.Timestamp):
@@ -350,7 +345,7 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
 
 # ---------- Streamlit App ----------
 def main():
-    st.title("Portfolio Forecasting Tool (Maximum Likelihood Path)")
+    st.title("Portfolio Forecasting Tool (Medoid Path)")
 
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
@@ -406,9 +401,9 @@ def main():
                 status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS}")
             progress_bar.empty()
 
-            # NEW: Maximum likelihood path across all sims
+            # NEW: Medoid path across all sims
             all_paths = np.vstack(all_paths)
-            final_path = find_max_likelihood_path(all_paths, residuals, df_opt)
+            final_path = find_medoid_path(all_paths)
 
             stats = compute_forecast_stats_from_path(final_path, start_capital, port_rets.index[-1])
             backtest_stats = {
