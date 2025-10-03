@@ -377,6 +377,11 @@ def main():
 
     if st.button("Run Forecast"):
         try:
+            # clear caches/session memory before heavy run
+            st.cache_data.clear()
+            st.cache_resource.clear()
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
             weights = to_weights([float(x) for x in weights_str.split(",")])
             tickers = [t.strip() for t in tickers.split(",") if t.strip()]
             prices = fetch_prices_monthly(tickers, start=DEFAULT_START)
