@@ -9,7 +9,6 @@ from typing import List
 from lightgbm import LGBMRegressor
 import matplotlib.pyplot as plt
 import shap
-import math
 import streamlit as st
 from sklearn.metrics import mean_squared_error
 import optuna
@@ -25,7 +24,7 @@ np.random.seed(GLOBAL_SEED)
 # ---------- Config ----------
 DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 100        # number of seeds in the ensemble
-SIMS_PER_SEED = 10000        # simulations per seed
+SIMS_PER_SEED = 10000       # simulations per seed
 FORECAST_YEARS = 1          # 12-month horizon
 
 # ---------- Helpers ----------
@@ -73,7 +72,7 @@ def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFram
         auto_adjust=False,
         progress=False,
         interval="1mo",
-        threads=False   # 👈 fix for Streamlit Cloud
+        threads=False
     )
     if data.empty:
         raise ValueError("No price data returned from Yahoo Finance.")
@@ -158,12 +157,10 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
             "max_depth": trial.suggest_int("max_depth", 2, 6),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
-            "block_length": trial.suggest_int("block_length", 1, 12),
             "random_state": seed,
             "n_jobs": 1
         }
-        model_params = {k: v for k, v in params.items() if k != "block_length"}
-        model = LGBMRegressor(**model_params)
+        model = LGBMRegressor(**params)
         model.fit(train_X, train_Y)
         preds = model.predict(test_X)
 
@@ -177,7 +174,7 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
         pred_dir = np.sign(preds)
         directional_acc = (actual_dir == pred_dir).mean()
 
-        return rmse, -directional_acc  # minimize RMSE, maximize DA
+        return rmse, -directional_acc
 
     study = optuna.create_study(
         directions=["minimize", "minimize"],
@@ -185,14 +182,12 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
     )
     study.optimize(objective, n_trials=50, show_progress_bar=False)
 
-    best_trial = study.best_trials[0]  # first Pareto-optimal
+    best_trial = study.best_trials[0]
     best_params_full = dict(best_trial.params)
-    best_params_full["block_length"] = int(best_params_full["block_length"])
-    lgbm_params = {k: v for k, v in best_params_full.items() if k != "block_length"}
     best_rmse = float(best_trial.values[0])
     best_da = -float(best_trial.values[1])
 
-    final_model = LGBMRegressor(**lgbm_params, random_state=seed, n_jobs=1)
+    final_model = LGBMRegressor(**best_params_full, random_state=seed, n_jobs=1)
     final_model.fit(X, Y)
     preds = final_model.predict(X).astype(np.float32)
     residuals = (Y.values - preds).astype(np.float32)
@@ -215,29 +210,25 @@ def find_median_ending_medoid(paths: np.ndarray):
     best_idx = np.argmax(scores)
     return subset[best_idx]
 
-# ---------- Monte Carlo ----------
-def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, block_length, seed_id=None):
+# ---------- Monte Carlo (Multivariate Gaussian Residuals) ----------
+def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None):
     horizon_months = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
-    n_res = len(residuals)
-    n_blocks = math.ceil(horizon_months / block_length)
+
+    # Fit Gaussian to residuals
+    mu = residuals.mean()
+    sigma = residuals.std(ddof=0)
+    cov = np.array([[sigma**2]], dtype=np.float32)
+
     snapshot_X = X_base.iloc[[-1]].values.astype(np.float32)
     last_X = np.repeat(snapshot_X, sims_per_seed, axis=0)
-    block_starts = rng.integers(0, max(1, n_res - block_length), size=(sims_per_seed, n_blocks))
-    hist_vol = Y_base.std(ddof=0)
-    t = 0
     base_pred = model.predict(last_X).astype(np.float32)
-    for j in range(n_blocks):
-        block_len = min(block_length, horizon_months - t)
-        for b in range(block_len):
-            shocks = residuals[(block_starts[:, j] + b) % n_res]
-            raw_step = base_pred + shocks
-            step_vol = raw_step.std(ddof=0)
-            if step_vol > 0:
-                raw_step *= (hist_vol / step_vol)
-            log_paths[:, t] = (log_paths[:, t-1] if t > 0 else 0) + raw_step
-            t += 1
-            if t >= horizon_months: break
+
+    for t in range(horizon_months):
+        shocks = rng.multivariate_normal([mu], cov, size=sims_per_seed).reshape(-1).astype(np.float32)
+        raw_step = base_pred + shocks
+        log_paths[:, t] = (log_paths[:, t-1] if t > 0 else 0) + raw_step
+
     return np.exp(log_paths, dtype=np.float32)
 
 # ---------- Forecast Stats ----------
@@ -291,7 +282,7 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
 
 # ---------- Streamlit App ----------
 def main():
-    st.title("Portfolio Forecasting Tool")
+    st.title("Portfolio Forecasting Tool (Multivariate Gaussian Residuals)")
 
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
@@ -315,23 +306,22 @@ def main():
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
             model, residuals, preds, X_full, Y_full, best_params, best_rmse, best_da = tune_and_fit_best_model(X, Y)
-            block_length = int(best_params.get("block_length", 3))
             st.write("**Best Params:**")
             st.json(best_params)
             st.write("**OOS 12m RMSE:**", f"{best_rmse:.6f}")
             st.write("**OOS 12m Directional Accuracy:**", f"{best_da:.2%}")
-            st.write("**Optimal Block Length:**", block_length)
+
             seed_medoids = []
             progress_bar = st.progress(0)
             status_text = st.empty()
             for i, seed in enumerate(range(ENSEMBLE_SEEDS)):
                 rng = np.random.default_rng(GLOBAL_SEED + seed)
                 sims = run_monte_carlo_paths(model, X_full, Y_full, residuals,
-                                             SIMS_PER_SEED, rng, block_length, seed_id=seed)
+                                             SIMS_PER_SEED, rng, seed_id=seed)
                 seed_medoids.append(find_median_ending_medoid(sims))
                 progress = (i+1)/ENSEMBLE_SEEDS
                 progress_bar.progress(progress)
-                status_text.text(f"Running forecasts... {i+1}%/{ENSEMBLE_SEEDS}%")
+                status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS}")
             progress_bar.empty()
             final_medoid = find_median_ending_medoid(np.vstack(seed_medoids))
             stats = compute_forecast_stats_from_path(final_medoid, start_capital, port_rets.index[-1])
@@ -350,12 +340,4 @@ def main():
                 st.markdown("**Forecast**")
                 for k,v in stats.items(): st.metric(k, f"{v:.2%}" if 'Sharpe' not in k else f"{v:.2f}")
             ending_value = float(final_medoid[-1]) * start_capital
-            st.metric("Forecasted Portfolio Value", f"${ending_value:,.2f}")
-            plot_forecasts(port_rets, start_capital, final_medoid, rebalance_label)
-            final_X = X_full.iloc[[-1]]
-            plot_feature_attributions(model, X_full, final_X)
-        except Exception as e:
-            st.error(f"Error: {e}")
-
-if __name__ == "__main__":
-    main()
+            st.metric("
