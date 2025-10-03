@@ -219,122 +219,62 @@ def _split_train_test_for_year(X: pd.DataFrame, Y: pd.Series, test_year: int):
     test_Y = Y.loc[test_X.index]
     return train_X, train_Y, test_X, test_Y
 
-def _tune_on_explicit_split(train_X, train_Y, test_X, test_Y, seed=GLOBAL_SEED, n_trials=50):
-    def objective(trial):
-        params = {
-            "n_estimators": trial.suggest_int("n_estimators", 1000, 8000),
-            "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.2, log=True),
-            "max_depth": trial.suggest_int("max_depth", 2, 6),
-            "subsample": trial.suggest_float("subsample", 0.5, 1.0),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
-            "df": trial.suggest_int("df", 3, 30),
-            "random_state": seed,
-            "n_jobs": 1
-        }
-        model_params = {k: v for k, v in params.items() if k != "df"}
-        model = LGBMRegressor(**model_params)
-        model.fit(train_X, train_Y)
-        preds = model.predict(test_X)
-
-        actual_cum = (1 + test_Y).cumprod()
-        pred_cum = (1 + preds).cumprod()
-        rmse = np.sqrt(mean_squared_error(actual_cum, pred_cum))
-
-        actual_dir = np.sign(test_Y.values)
-        pred_dir = np.sign(preds)
-        directional_acc = (actual_dir == pred_dir).mean()
-
-        return rmse, -directional_acc
-
-    # Create Optuna study
-    study = optuna.create_study(
-        directions=["minimize", "minimize"],
-        sampler=optuna.samplers.TPESampler(seed=seed)
-    )
-
-    # ---- Progress bar setup ----
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-
-    def callback(study, trial):
-        completion = (trial.number + 1) / n_trials
-        percent = int(completion * 100)
-        progress_bar.progress(completion)
-        status_text.text(f"Tuning... {percent}%")
-
-    # Run optimization with callback so bar updates every trial
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=False, callbacks=[callback])
-
-    progress_bar.empty()
-    status_text.text("Tuning Complete")
-
-    best = study.best_trials[0]
-    return dict(best.params), float(best.values[0]), -float(best.values[1])
-
-def _median_params(param_dicts: List[dict]) -> dict:
-    """Per-parameter median across runs (ints rounded)."""
-    if not param_dicts:
-        return {}
-    all_keys = set().union(*[d.keys() for d in param_dicts])
-    consensus = {}
-    for k in all_keys:
-        vals = [d[k] for d in param_dicts if k in d]
-        if not vals:
-            continue
-        # numeric?
-        if isinstance(vals[0], (int, np.integer)):
-            consensus[k] = int(np.round(np.median(vals)))
-        elif isinstance(vals[0], (float, np.floating)):
-            consensus[k] = float(np.median(vals))
-        else:
-            # fall back to most frequent
-            counts = {}
-            for v in vals:
-                counts[v] = counts.get(v, 0) + 1
-            consensus[k] = max(counts.items(), key=lambda x: x[1])[0]
-    # enforce determinism helpers
-    consensus["random_state"] = GLOBAL_SEED
-    consensus["n_jobs"] = 1
-    return consensus
-
-def _eval_params_on_split(params: dict, train_X, train_Y, test_X, test_Y, seed=GLOBAL_SEED):
-    lgbm_params = {k:v for k,v in params.items() if k not in ("df",)}
-    lgbm_params["random_state"] = seed
-    lgbm_params["n_jobs"] = 1
-    model = LGBMRegressor(**lgbm_params)
-    model.fit(train_X, train_Y)
-    preds = model.predict(test_X)
-    actual_cum = (1 + test_Y).cumprod()
-    pred_cum = (1 + preds).cumprod()
-    rmse = np.sqrt(mean_squared_error(actual_cum, pred_cum))
-    actual_dir = np.sign(test_Y.values)
-    pred_dir = np.sign(preds)
-    directional_acc = (actual_dir == pred_dir).mean()
-    return rmse, directional_acc
-
 def tune_across_recent_oos_years(X: pd.DataFrame, Y: pd.Series, years_back: int = 5, seed: int = GLOBAL_SEED, n_trials: int = 50):
-    """
-    Repeats one-year OOS tuning for each of the last 'years_back' full calendar years.
-    Returns:
-      consensus_params (median per-parameter),
-      details (list of dicts with year/rmse/da/best_params),
-      last_oos_metrics_of_consensus (rmse, da on most recent split using consensus params)
-    """
     years = _oos_years_available(Y.index, max_years=years_back)
     param_runs, details = [], []
+
+    total_jobs = len(years) * n_trials
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    completed = 0
+
     for y in years:
         train_X, train_Y, test_X, test_Y = _split_train_test_for_year(X, Y, y)
-        # require some history
         if len(train_X) < 24 or len(test_X) < 6:
             continue
-        best_params, rmse, da = _tune_on_explicit_split(train_X, train_Y, test_X, test_Y, seed=seed, n_trials=n_trials)
-        details.append({"year": y, "rmse": rmse, "da": da, "best_params": best_params})
-        param_runs.append(best_params)
 
-    # median-per-parameter across available runs
+        def objective(trial):
+            nonlocal completed
+            params = {
+                "n_estimators": trial.suggest_int("n_estimators", 1000, 8000),
+                "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.2, log=True),
+                "max_depth": trial.suggest_int("max_depth", 2, 6),
+                "subsample": trial.suggest_float("subsample", 0.5, 1.0),
+                "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+                "df": trial.suggest_int("df", 3, 30),
+                "random_state": seed,
+                "n_jobs": 1
+            }
+            model_params = {k:v for k,v in params.items() if k != "df"}
+            model = LGBMRegressor(**model_params)
+            model.fit(train_X, train_Y)
+            preds = model.predict(test_X)
+
+            actual_cum = (1 + test_Y).cumprod()
+            pred_cum = (1 + preds).cumprod()
+            rmse = np.sqrt(mean_squared_error(actual_cum, pred_cum))
+
+            actual_dir = np.sign(test_Y.values)
+            pred_dir = np.sign(preds)
+            directional_acc = (actual_dir == pred_dir).mean()
+
+            completed += 1
+            percent = int((completed / total_jobs) * 100)
+            progress_bar.progress(completed / total_jobs)
+            status_text.text(f"Tuning... {percent}%")
+            return rmse, -directional_acc
+
+        study = optuna.create_study(
+            directions=["minimize", "minimize"],
+            sampler=optuna.samplers.TPESampler(seed=seed)
+        )
+        study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+
+        best = study.best_trials[0]
+        details.append({"year": y, "rmse": float(best.values[0]), "da": -float(best.values[1]), "best_params": dict(best.params)})
+        param_runs.append(dict(best.params))
+
     consensus_params = _median_params(param_runs)
-
-    # Evaluate consensus on the most recent OOS split (last year in 'years')
     last_rmse, last_da = np.nan, np.nan
     if years:
         last_year = years[-1]
