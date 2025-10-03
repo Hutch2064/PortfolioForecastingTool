@@ -100,17 +100,18 @@ def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFram
 @st.cache_data(show_spinner=False)
 def fetch_umich_sentiment(start=DEFAULT_START) -> pd.Series:
     """
-    Fetch University of Michigan Sentiment Index (UMCSENT) from FRED, monthly.
-    No lag applied here; lagging is handled uniformly in X.shift(1).
+    Fetch University of Michigan Sentiment Index (UMCSENT) from FRED.
+    Convert to % change (MoM) so it’s dynamic like other features.
     """
     try:
         umcsent = pdr.DataReader("UMCSENT", "fred", start)
         umcsent = umcsent.resample("M").last().ffill()
-        umcsent.name = "umcsent"
+        umcsent = umcsent.pct_change()  # <-- % change
+        umcsent.name = "umcsent_pct"
         return umcsent.astype(np.float32).squeeze()
     except Exception as e:
         st.error(f"UMCSENT fetch failed: {e}. The feature will be missing unless you provide access.")
-        return pd.Series(dtype=np.float32, name="umcsent")
+        return pd.Series(dtype=np.float32, name="umcsent_pct")
 
 # ---------- Portfolio ----------
 def portfolio_returns_monthly(prices: pd.DataFrame, weights: np.ndarray, rebalance: str) -> pd.Series:
@@ -141,15 +142,9 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
     df["dd_state"] = compute_current_drawdown(returns)
 
     umcsent = fetch_umich_sentiment(start=returns.index.min().to_pydatetime().date())
-    df["umcsent"] = umcsent.reindex(df.index).astype(np.float32)
-    df["umcsent"] = df["umcsent"].fillna(method="ffill").fillna(method="bfill").fillna(0)
+    df["umcsent_pct"] = umcsent.reindex(df.index).fillna(0).astype(np.float32)
 
-    # Debugging printout for UMCSENT
-    print("DEBUG: UMCSENT count:", df["umcsent"].count())
-    print("DEBUG: UMCSENT head:", df["umcsent"].head())
-    print("DEBUG: UMCSENT tail:", df["umcsent"].tail())
-
-    return df.astype(np.float32)
+    return df.dropna().astype(np.float32)
 
 # ---------- Optuna Hyperparameter Tuning ----------
 def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
@@ -256,6 +251,13 @@ def plot_feature_attributions(model, X, final_X):
     shap_mean_fore = np.abs(shap_values_fore).reshape(-1)
 
     features = X.columns
+    # ---- Debugging ----
+    st.write("DEBUG: Feature means:", X.mean())
+    st.write("DEBUG: Feature std devs:", X.std())
+    for name, val in zip(features, shap_mean_hist):
+        st.write(f"DEBUG SHAP mean |{name}|: {val:.6f}")
+
+    # ---- Plot ----
     x_pos = np.arange(len(features))
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.bar(x_pos - 0.2, shap_mean_hist, width=0.4, label="Backtest Avg")
@@ -284,7 +286,7 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
 
 # ---------- Streamlit App ----------
 def main():
-    st.title("Snapshot Portfolio Forecasting Tool with Median-Ending Medoid + UMCSENT")
+    st.title("Snapshot Portfolio Forecasting Tool with Median-Ending Medoid + UMCSENT % Change")
 
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
@@ -310,7 +312,6 @@ def main():
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
 
-            # Debug check
             st.write("Final Features:", list(X.columns))
 
             model, residuals, preds, X_full, Y_full, best_params, best_rmse = tune_and_fit_best_model(X, Y)
@@ -361,13 +362,6 @@ def main():
 
             final_X = X_full.iloc[[-1]]
             plot_feature_attributions(model, X_full, final_X)
-
-            # ---- Debugging Printouts ----
-            st.write("DEBUG: Model feature names:", model.booster_.feature_name())
-            st.write("DEBUG: X_full columns:", list(X_full.columns))
-            explainer = shap.TreeExplainer(model)
-            shap_vals = explainer.shap_values(X_full)
-            st.write("DEBUG: SHAP values shape:", np.array(shap_vals).shape)
 
         except Exception as e:
             st.error(f"Error: {e}")
