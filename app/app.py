@@ -147,7 +147,7 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
     return df.astype(np.float32)
 
 # ---------- Optuna Hyperparameter Tuning (single split, kept for compatibility) ----------
-def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
+def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED, n_trials=50):
     train_X, test_X = X.iloc[:-12], X.iloc[-12:]
     train_Y, test_Y = Y.iloc[:-12], Y.iloc[-12:]
 
@@ -158,7 +158,7 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
             "max_depth": trial.suggest_int("max_depth", 2, 6),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
-            "df": trial.suggest_int("df", 3, 30),   # <-- tune degrees of freedom
+            "df": trial.suggest_int("df", 3, 30),   # Student-t df
             "random_state": seed,
             "n_jobs": 1
         }
@@ -167,21 +167,36 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
         model.fit(train_X, train_Y)
         preds = model.predict(test_X)
 
+        # RMSE
         actual_cum = (1 + test_Y).cumprod()
         pred_cum = (1 + preds).cumprod()
         rmse = np.sqrt(mean_squared_error(actual_cum, pred_cum))
 
+        # Directional Accuracy
         actual_dir = np.sign(test_Y.values)
         pred_dir = np.sign(preds)
         directional_acc = (actual_dir == pred_dir).mean()
 
         return rmse, -directional_acc
 
+    # Create study
     study = optuna.create_study(
         directions=["minimize", "minimize"],
         sampler=optuna.samplers.TPESampler(seed=seed)
     )
-    study.optimize(objective, n_trials=50, show_progress_bar=False)
+
+    # Progress bar in Streamlit
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    for i in range(n_trials):
+        study.optimize(objective, n_trials=1, show_progress_bar=False)  # run 1 trial at a time
+        progress = (i+1) / n_trials
+        progress_bar.progress(progress)
+        status_text.text(f"Tuning progress: {i+1}/{n_trials} trials complete")
+
+    progress_bar.empty()
+    status_text.text("Tuning complete ✅")
 
     best_trial = study.best_trials[0]
     best_params_full = dict(best_trial.params)
@@ -195,7 +210,6 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
     residuals = (Y.values - preds).astype(np.float32)
 
     return final_model, residuals, preds, X.astype(np.float32), Y.astype(np.float32), best_params_full, best_rmse, best_da
-
 # ---------- NEW: helpers for multi-year OOS tuning ----------
 def _oos_years_available(idx: pd.DatetimeIndex, max_years=5) -> List[int]:
     """Return the last up-to-5 full calendar years available in the index."""
