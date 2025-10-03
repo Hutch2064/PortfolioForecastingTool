@@ -1,4 +1,10 @@
-as pd
+import sys
+import warnings
+import random
+import os
+import gc
+import numpy as np
+import pandas as pd
 import yfinance as yf
 from typing import List
 from lightgbm import LGBMRegressor
@@ -371,11 +377,6 @@ def main():
 
     if st.button("Run Forecast"):
         try:
-            # clear caches/session memory before heavy run
-            st.cache_data.clear()
-            st.cache_resource.clear()
-            for key in list(st.session_state.keys()):
-                del st.session_state[key]
             weights = to_weights([float(x) for x in weights_str.split(",")])
             tickers = [t.strip() for t in tickers.split(",") if t.strip()]
             prices = fetch_prices_monthly(tickers, start=DEFAULT_START)
@@ -448,3 +449,19 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
