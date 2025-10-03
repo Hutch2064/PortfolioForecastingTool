@@ -220,7 +220,6 @@ def _split_train_test_for_year(X: pd.DataFrame, Y: pd.Series, test_year: int):
     return train_X, train_Y, test_X, test_Y
 
 def _tune_on_explicit_split(train_X, train_Y, test_X, test_Y, seed=GLOBAL_SEED, n_trials=50):
-    """Run the same Optuna objective but on an explicit train/test split."""
     def objective(trial):
         params = {
             "n_estimators": trial.suggest_int("n_estimators", 1000, 8000),
@@ -232,7 +231,7 @@ def _tune_on_explicit_split(train_X, train_Y, test_X, test_Y, seed=GLOBAL_SEED, 
             "random_state": seed,
             "n_jobs": 1
         }
-        model_params = {k:v for k,v in params.items() if k != "df"}
+        model_params = {k: v for k, v in params.items() if k != "df"}
         model = LGBMRegressor(**model_params)
         model.fit(train_X, train_Y)
         preds = model.predict(test_X)
@@ -247,11 +246,28 @@ def _tune_on_explicit_split(train_X, train_Y, test_X, test_Y, seed=GLOBAL_SEED, 
 
         return rmse, -directional_acc
 
+    # Create Optuna study
     study = optuna.create_study(
         directions=["minimize", "minimize"],
         sampler=optuna.samplers.TPESampler(seed=seed)
     )
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+
+    # ---- Progress bar setup ----
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    def callback(study, trial):
+        completion = (trial.number + 1) / n_trials
+        percent = int(completion * 100)
+        progress_bar.progress(completion)
+        status_text.text(f"Tuning... {percent}%")
+
+    # Run optimization with callback so bar updates every trial
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False, callbacks=[callback])
+
+    progress_bar.empty()
+    status_text.text("Tuning Complete")
+
     best = study.best_trials[0]
     return dict(best.params), float(best.values[0]), -float(best.values[1])
 
