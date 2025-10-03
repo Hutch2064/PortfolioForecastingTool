@@ -286,7 +286,7 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
 
     return np.exp(log_paths, dtype=np.float32)
 
-# ---------- NEW: Two-Stage Median-Ending Medoid ----------
+# ---------- Median-Ending Subset Medoid (from first script) ----------
 def find_median_ending_medoid(paths: np.ndarray):
     endings = paths[:, -1]
     median_ending = np.median(endings)
@@ -301,10 +301,6 @@ def find_median_ending_medoid(paths: np.ndarray):
     scores = np.bincount(closest, minlength=subset.shape[0])
     best_idx = np.argmax(scores)
     return subset[best_idx]
-
-def find_global_medoid(seed_paths: List[np.ndarray]) -> np.ndarray:
-    medoids = [find_median_ending_medoid(batch) for batch in seed_paths if len(batch) > 0]
-    return find_median_ending_medoid(np.array(medoids))
 
 # ---------- Forecast Stats ----------
 def compute_forecast_stats_from_path(path: np.ndarray, start_capital: float, last_date: pd.Timestamp):
@@ -357,7 +353,7 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
 
 # ---------- Streamlit App ----------
 def main():
-    st.title("Portfolio Forecasting Tool (Two-Stage Median-Ending Medoid)")
+    st.title("Portfolio Forecasting Tool (Median-Ending Medoid Path)")
 
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
@@ -400,21 +396,20 @@ def main():
             preds = final_model.predict(X).astype(np.float32)
             residuals = (Y.values - preds).astype(np.float32)
 
-            seed_paths = []
+            seed_medoids = []
             progress_bar = st.progress(0)
             status_text = st.empty()
             for i, seed in enumerate(range(ENSEMBLE_SEEDS)):
                 rng = np.random.default_rng(GLOBAL_SEED + seed)
                 sims = run_monte_carlo_paths(final_model, X, Y, residuals,
                                              SIMS_PER_SEED, rng, seed_id=seed, df=df_opt)
-                seed_paths.append(sims)
+                seed_medoids.append(find_median_ending_medoid(sims))
                 progress = (i+1)/ENSEMBLE_SEEDS
                 progress_bar.progress(progress)
                 status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS}")
             progress_bar.empty()
 
-            # NEW: Two-stage medoid (per-seed → global)
-            final_path = find_global_medoid(seed_paths)
+            final_path = find_median_ending_medoid(np.vstack(seed_medoids))
 
             stats = compute_forecast_stats_from_path(final_path, start_capital, port_rets.index[-1])
             backtest_stats = {
