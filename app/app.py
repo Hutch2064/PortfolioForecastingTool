@@ -10,7 +10,7 @@ from lightgbm import LGBMRegressor
 import matplotlib.pyplot as plt
 import shap
 import streamlit as st
-from sklearn.metrics import mean_squared_error
+from sklearn.metrics import mean_squared_error, pairwise_distances
 import optuna
 from scipy.stats import t as student_t  # <-- Student-t distribution
 
@@ -286,13 +286,17 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
 
     return np.exp(log_paths, dtype=np.float32)
 
-# ---------- NEW: Medoid Path ----------
+# ---------- NEW: Two-Stage Medoid Path ----------
 def find_medoid_path(paths: np.ndarray) -> np.ndarray:
-    # Compute pairwise distances in Euclidean space
-    from sklearn.metrics import pairwise_distances
     dists = pairwise_distances(paths, metric="euclidean")
     medoid_index = np.argmin(dists.sum(axis=1))
     return paths[medoid_index]
+
+def find_global_medoid(seed_paths: List[np.ndarray]) -> np.ndarray:
+    # First: compute medoid per seed batch
+    medoids = [find_medoid_path(batch) for batch in seed_paths if len(batch) > 0]
+    # Then: compute medoid across those medoids
+    return find_medoid_path(np.array(medoids))
 
 # ---------- Forecast Stats ----------
 def compute_forecast_stats_from_path(path: np.ndarray, start_capital: float, last_date: pd.Timestamp):
@@ -345,7 +349,7 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
 
 # ---------- Streamlit App ----------
 def main():
-    st.title("Portfolio Forecasting Tool (Medoid Path)")
+    st.title("Portfolio Forecasting Tool (Two-Stage Medoid Path)")
 
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
@@ -388,22 +392,21 @@ def main():
             preds = final_model.predict(X).astype(np.float32)
             residuals = (Y.values - preds).astype(np.float32)
 
-            all_paths = []
+            seed_paths = []
             progress_bar = st.progress(0)
             status_text = st.empty()
             for i, seed in enumerate(range(ENSEMBLE_SEEDS)):
                 rng = np.random.default_rng(GLOBAL_SEED + seed)
                 sims = run_monte_carlo_paths(final_model, X, Y, residuals,
                                              SIMS_PER_SEED, rng, seed_id=seed, df=df_opt)
-                all_paths.append(sims)
+                seed_paths.append(sims)
                 progress = (i+1)/ENSEMBLE_SEEDS
                 progress_bar.progress(progress)
                 status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS}")
             progress_bar.empty()
 
-            # NEW: Medoid path across all sims
-            all_paths = np.vstack(all_paths)
-            final_path = find_medoid_path(all_paths)
+            # NEW: Two-stage medoid (per-seed → global)
+            final_path = find_global_medoid(seed_paths)
 
             stats = compute_forecast_stats_from_path(final_path, start_capital, port_rets.index[-1])
             backtest_stats = {
@@ -431,4 +434,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
