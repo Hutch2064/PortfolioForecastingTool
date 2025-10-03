@@ -158,14 +158,10 @@ def build_features(returns: pd.Series, fred_panel: pd.DataFrame) -> pd.DataFrame
     if "M2" in df.columns:
         df["M2"] = df["M2"].pct_change().fillna(0)
 
-    # Align on common valid start
-    first_valids = [df[c].first_valid_index() for c in df.columns if df[c].first_valid_index() is not None]
-    if not first_valids:
-        return pd.DataFrame()
-    valid_start = max(first_valids)
-    df = df.loc[valid_start:]
+    # ✅ Fix: Do NOT cut with first_valids/max(). Just dropna at the end
+    df = df.dropna()
 
-    return df.dropna().astype(np.float32)
+    return df.astype(np.float32)
 
 # ---------- Optuna Hyperparameter Tuning ----------
 def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
@@ -348,38 +344,4 @@ def main():
                 progress = (i+1)/ENSEMBLE_SEEDS
                 progress_bar.progress(progress)
                 status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS}")
-            progress_bar.empty()
-            final_medoid = find_median_ending_medoid(np.vstack(seed_medoids))
-
-            stats = compute_forecast_stats_from_path(final_medoid, start_capital, port_rets.index[-1])
-            backtest_stats = {
-                "CAGR": annualized_return_monthly(port_rets),
-                "Volatility": annualized_vol_monthly(port_rets),
-                "Sharpe": annualized_sharpe_monthly(port_rets),
-                "Max Drawdown": max_drawdown_from_rets(port_rets)
-            }
-
-            st.subheader("Results")
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("**Backtest**")
-                for k,v in backtest_stats.items():
-                    st.metric(k, f"{v:.2%}" if 'Sharpe' not in k else f"{v:.2f}")
-            with col2:
-                st.markdown("**Forecast**")
-                for k,v in stats.items():
-                    st.metric(k, f"{v:.2%}" if 'Sharpe' not in k else f"{v:.2f}")
-
-            ending_value = float(final_medoid[-1]) * start_capital
-            st.metric("Forecasted Portfolio Value", f"${ending_value:,.2f}")
-
-            plot_forecasts(port_rets, start_capital, final_medoid, rebalance_label)
-
-            final_X = X_full.iloc[[-1]]
-            plot_feature_attributions(model, X_full, final_X)
-
-        except Exception as e:
-            st.error(f"Error: {e}")
-
-if __name__ == "__main__":
-    main()
+           
