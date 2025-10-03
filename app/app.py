@@ -238,15 +238,26 @@ def tune_across_recent_oos_years(X: pd.DataFrame, Y: pd.Series, years_back: int 
     years = _oos_years_available(Y.index, max_years=years_back)
     param_runs, details = [], []
     progress_outer = st.progress(0)  # NEW outer progress bar
+    status_outer = st.empty()
+    
+    n_years = len(years)
     for i, y in enumerate(years):
-        train_X, train_Y, test_X, test_Y = _split_train_test_for_year(X, Y, y)
-        if len(train_X) < 24 or len(test_X) < 6:
+        train_X, train_Y, test_X, test_Y, = _split_train_test_for_year(X, Y, y)
+        if len(train_X < 24 or len(test_X) < 6: 
             continue
         best_params, rmse, da = _tune_on_explicit_split(train_X, train_Y, test_X, test_Y, seed=seed, n_trials=n_trials)
         details.append({"year": y, "rmse": rmse, "da": da, "best_params": best_params})
         param_runs.append(best_params)
-        progress_outer.progress((i+1)/len(years))
+        
+        #update one bar
+        completion = (i+1) / n_years
+        percent = int(completion * 100)
+        progress_outer.progress(completion)
+        status_outer.text(f"Tuning... {percent}%")
+    
+    # done
     progress_outer.empty()
+    status_outer.text("Tuning Complete")
 
     consensus_params = _median_params(param_runs)
     last_rmse, last_da = np.nan, np.nan
