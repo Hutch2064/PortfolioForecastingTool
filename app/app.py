@@ -166,7 +166,7 @@ def _split_train_test_for_year(X: pd.DataFrame, Y: pd.Series, test_year: int):
     test_Y = Y.loc[test_X.index]
     return train_X, train_Y, test_X, test_Y
 
-def _tune_on_explicit_split(train_X, train_Y, test_X, test_Y, seed=GLOBAL_SEED, n_trials=50):
+def _tune_on_explicit_split(train_X, train_Y, test_X, test_Y, seed=GLOBAL_SEED, n_trials=10):
     def objective(trial):
         params = {
             "n_estimators": trial.suggest_int("n_estimators", 1000, 8000),
