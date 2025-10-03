@@ -13,7 +13,7 @@ import math
 import streamlit as st
 from sklearn.metrics import mean_squared_error
 import optuna
-from pandas_datareader import data as pdr  # FRED macros
+from pandas_datareader import data as pdr  # for FRED data
 
 warnings.filterwarnings("ignore")
 
@@ -25,8 +25,8 @@ np.random.seed(GLOBAL_SEED)
 
 # ---------- Config ----------
 DEFAULT_START = "2000-01-01"
-ENSEMBLE_SEEDS = 50         # smaller for testing, raise to 100 for production
-SIMS_PER_SEED = 2000        # smaller for testing, raise to 10000
+ENSEMBLE_SEEDS = 100        # number of seeds in the ensemble
+SIMS_PER_SEED = 10000       # simulations per seed
 FORECAST_YEARS = 1          # 12-month horizon
 
 # ---------- Helpers ----------
@@ -97,15 +97,17 @@ def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFram
     non_na_start = max(valid_starts)
     return close.loc[non_na_start:]
 
+@st.cache_data(show_spinner=False)
 def fetch_fred_series(series: str, start=DEFAULT_START) -> pd.Series:
+    """Fetch any FRED series, resampled monthly and forward-filled."""
     try:
         s = pdr.DataReader(series, "fred", start)
-        s = s.resample("M").last().astype(np.float32)
-        s.name = series.lower()
-        return s
+        s = s.resample("M").last().ffill()
+        s.name = series
+        return s.astype(np.float32).squeeze()
     except Exception as e:
-        print(f"Fetch failed for {series}: {e}")
-        return pd.Series(dtype=np.float32, name=series.lower())
+        st.error(f"{series} fetch failed: {e}")
+        return pd.Series(dtype=np.float32, name=series)
 
 # ---------- Portfolio ----------
 def portfolio_returns_monthly(prices: pd.DataFrame, weights: np.ndarray, rebalance: str) -> pd.Series:
@@ -135,19 +137,21 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
     df["mom_12m"] = returns.rolling(12).apply(lambda x: (1+x).prod()-1, raw=True)
     df["dd_state"] = compute_current_drawdown(returns)
 
-    # Fetch macros
-    umcsent = fetch_fred_series("UMCSENT").pct_change().rename("umcsent")
-    t10y3mm = fetch_fred_series("T10Y3MM").rename("t10y3mm")
-    sahm = fetch_fred_series("SAHMREALTIME").rename("sahmrealtime")
-    m2 = fetch_fred_series("M2SL").pct_change(12).rename("m2sl_yoy")
+    # Add FRED indicators
+    umcsent = fetch_fred_series("UMCSENT", start=returns.index.min().to_pydatetime().date())
+    t10y3m = fetch_fred_series("T10Y3M", start=returns.index.min().to_pydatetime().date())
+    sahm = fetch_fred_series("SAHMREALTIME", start=returns.index.min().to_pydatetime().date())
+    m2 = fetch_fred_series("M2SL", start=returns.index.min().to_pydatetime().date())
 
-    feats = pd.concat([df, umcsent, t10y3mm, sahm, m2], axis=1)
-    feats = feats.dropna(how="any")
+    # Reindex to portfolio dates
+    for name, series in [("umcsent", umcsent), ("t10y3m", t10y3m),
+                         ("sahm", sahm), ("m2", m2)]:
+        if not series.empty:
+            df[name] = series.reindex(df.index).astype(np.float32).fillna(method="ffill").fillna(method="bfill")
 
-    print("DEBUG feature counts:")
-    print(feats.count())
-
-    return feats.astype(np.float32)
+    # Drop rows where any indicator is missing
+    df = df.dropna()
+    return df.astype(np.float32)
 
 # ---------- Optuna Hyperparameter Tuning ----------
 def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
@@ -156,7 +160,7 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
 
     def objective(trial):
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 1000, 4000),
+            "n_estimators": trial.suggest_int("n_estimators", 1000, 8000),
             "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.2, log=True),
             "max_depth": trial.suggest_int("max_depth", 2, 6),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
@@ -167,7 +171,7 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
         }
         model_params = {k: v for k, v in params.items() if k != "block_length"}
         model = LGBMRegressor(**model_params)
-        model.fit(train_X, train_Y, feature_name=list(train_X.columns))
+        model.fit(train_X, train_Y, feature_name=train_X.columns.to_list())
         preds = model.predict(test_X)
         actual_cum = (1 + test_Y).cumprod()
         pred_cum = (1 + preds).cumprod()
@@ -175,7 +179,7 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
         return rmse
 
     study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=seed))
-    study.optimize(objective, n_trials=25, show_progress_bar=False)
+    study.optimize(objective, n_trials=50, show_progress_bar=False)
 
     best_trial = study.best_trial
     best_params_full = dict(best_trial.params)
@@ -184,7 +188,7 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
     best_rmse = float(best_trial.value)
 
     final_model = LGBMRegressor(**lgbm_params, random_state=seed, n_jobs=1)
-    final_model.fit(X, Y, feature_name=list(X.columns))
+    final_model.fit(X, Y, feature_name=X.columns.to_list())
     preds = final_model.predict(X).astype(np.float32)
     residuals = (Y.values - preds).astype(np.float32)
     return final_model, residuals, preds, X.astype(np.float32), Y.astype(np.float32), best_params_full, best_rmse
@@ -282,7 +286,7 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
 
 # ---------- Streamlit App ----------
 def main():
-    st.title("Snapshot Portfolio Forecasting Tool with UMCSENT, T10Y3MM, SAHM, M2")
+    st.title("Snapshot Portfolio Forecasting Tool with Median-Ending Medoid + FRED Indicators")
 
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
@@ -308,7 +312,8 @@ def main():
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
 
-            st.write("Final Features:", list(X.columns))
+            # Debug check
+            st.write("Final Features:", X.columns.to_list())
 
             model, residuals, preds, X_full, Y_full, best_params, best_rmse = tune_and_fit_best_model(X, Y)
             block_length = int(best_params.get("block_length", 3))
@@ -359,9 +364,12 @@ def main():
             final_X = X_full.iloc[[-1]]
             plot_feature_attributions(model, X_full, final_X)
 
-            # Debugging
+            # ---- Debugging Printouts ----
             st.write("DEBUG: Model feature names:", model.booster_.feature_name())
-            st.write("DEBUG: X_full columns:", list(X_full.columns))
+            st.write("DEBUG: X_full columns:", X_full.columns.to_list())
+            explainer = shap.TreeExplainer(model)
+            shap_vals = explainer.shap_values(X_full)
+            st.write("DEBUG: SHAP values shape:", np.array(shap_vals).shape)
 
         except Exception as e:
             st.error(f"Error: {e}")
