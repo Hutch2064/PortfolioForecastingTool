@@ -286,6 +286,15 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
 
     return np.exp(log_paths, dtype=np.float32)
 
+# ---------- NEW: Maximum Likelihood Path (optimized) ----------
+def find_max_likelihood_path(paths: np.ndarray, residuals: np.ndarray, df: int):
+    mu, sigma = residuals.mean(), residuals.std(ddof=0)
+    log_returns = np.diff(np.log(paths + 1e-9), axis=1)  # shape (n_paths, horizon-1)
+    logpdfs = student_t.logpdf(log_returns, df, loc=mu, scale=sigma)
+    loglik_per_path = logpdfs.sum(axis=1)
+    best_idx = np.argmax(loglik_per_path)
+    return paths[best_idx]
+
 # ---------- Forecast Stats ----------
 def compute_forecast_stats_from_path(path: np.ndarray, start_capital: float, last_date: pd.Timestamp):
     if path is None or len(path) == 0:
@@ -337,7 +346,7 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
 
 # ---------- Streamlit App ----------
 def main():
-    st.title("Portfolio Forecasting Tool (Pointwise Ensemble Median)")
+    st.title("Portfolio Forecasting Tool (Maximum Likelihood Path)")
 
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
@@ -393,11 +402,11 @@ def main():
                 status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS}")
             progress_bar.empty()
 
-            # NEW: pointwise median across all sims
+            # NEW: Maximum likelihood path across all sims
             all_paths = np.vstack(all_paths)
-            final_median = np.median(all_paths, axis=0)
+            final_path = find_max_likelihood_path(all_paths, residuals, df_opt)
 
-            stats = compute_forecast_stats_from_path(final_median, start_capital, port_rets.index[-1])
+            stats = compute_forecast_stats_from_path(final_path, start_capital, port_rets.index[-1])
             backtest_stats = {
                 "CAGR": annualized_return_monthly(port_rets),
                 "Volatility": annualized_vol_monthly(port_rets),
@@ -412,9 +421,9 @@ def main():
             with col2:
                 st.markdown("**Forecast**")
                 for k,v in stats.items(): st.metric(k, f"{v:.2%}" if 'Sharpe' not in k else f"{v:.2f}")
-            ending_value = float(final_median[-1]) * start_capital
+            ending_value = float(final_path[-1]) * start_capital
             st.metric("Forecasted Portfolio Value", f"${ending_value:,.2f}")
-            plot_forecasts(port_rets, start_capital, final_median, rebalance_label)
+            plot_forecasts(port_rets, start_capital, final_path, rebalance_label)
 
             final_X = X.iloc[[-1]]
             plot_feature_attributions(final_model, X, final_X)
