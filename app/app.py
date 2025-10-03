@@ -12,6 +12,7 @@ import shap
 import streamlit as st
 from sklearn.metrics import mean_squared_error
 import optuna
+from scipy.stats import t as student_t  # <-- Student-t distribution
 
 warnings.filterwarnings("ignore")
 
@@ -157,19 +158,19 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
             "max_depth": trial.suggest_int("max_depth", 2, 6),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+            "df": trial.suggest_int("df", 3, 30),   # <-- tune degrees of freedom
             "random_state": seed,
             "n_jobs": 1
         }
-        model = LGBMRegressor(**params)
+        model_params = {k:v for k,v in params.items() if k != "df"}
+        model = LGBMRegressor(**model_params)
         model.fit(train_X, train_Y)
         preds = model.predict(test_X)
 
-        # RMSE
         actual_cum = (1 + test_Y).cumprod()
         pred_cum = (1 + preds).cumprod()
         rmse = np.sqrt(mean_squared_error(actual_cum, pred_cum))
 
-        # Directional Accuracy
         actual_dir = np.sign(test_Y.values)
         pred_dir = np.sign(preds)
         directional_acc = (actual_dir == pred_dir).mean()
@@ -187,7 +188,8 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
     best_rmse = float(best_trial.values[0])
     best_da = -float(best_trial.values[1])
 
-    final_model = LGBMRegressor(**best_params_full, random_state=seed, n_jobs=1)
+    lgbm_params = {k:v for k,v in best_params_full.items() if k != "df"}
+    final_model = LGBMRegressor(**lgbm_params, random_state=seed, n_jobs=1)
     final_model.fit(X, Y)
     preds = final_model.predict(X).astype(np.float32)
     residuals = (Y.values - preds).astype(np.float32)
@@ -210,22 +212,20 @@ def find_median_ending_medoid(paths: np.ndarray):
     best_idx = np.argmax(scores)
     return subset[best_idx]
 
-# ---------- Monte Carlo (Multivariate Gaussian Residuals) ----------
-def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None):
+# ---------- Monte Carlo (Multivariate Student-t Residuals) ----------
+def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None, df=5):
     horizon_months = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
 
-    # Fit Gaussian to residuals
     mu = residuals.mean()
     sigma = residuals.std(ddof=0)
-    cov = np.array([[sigma**2]], dtype=np.float32)
 
     snapshot_X = X_base.iloc[[-1]].values.astype(np.float32)
     last_X = np.repeat(snapshot_X, sims_per_seed, axis=0)
     base_pred = model.predict(last_X).astype(np.float32)
 
     for t in range(horizon_months):
-        shocks = rng.multivariate_normal([mu], cov, size=sims_per_seed).reshape(-1).astype(np.float32)
+        shocks = student_t.rvs(df, loc=mu, scale=sigma, size=sims_per_seed, random_state=rng).astype(np.float32)
         raw_step = base_pred + shocks
         log_paths[:, t] = (log_paths[:, t-1] if t > 0 else 0) + raw_step
 
@@ -282,7 +282,7 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
 
 # ---------- Streamlit App ----------
 def main():
-    st.title("Portfolio Forecasting Tool (Multivariate Gaussian Residuals)")
+    st.title("Portfolio Forecasting Tool (Multivariate Student-t Residuals)")
 
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
@@ -311,13 +311,16 @@ def main():
             st.write("**OOS 12m RMSE:**", f"{best_rmse:.6f}")
             st.write("**OOS 12m Directional Accuracy:**", f"{best_da:.2%}")
 
+            df_opt = int(best_params.get("df", 5))  # best df from Optuna
+            st.write(f"**Optimal Student-t df:** {df_opt}")
+
             seed_medoids = []
             progress_bar = st.progress(0)
             status_text = st.empty()
             for i, seed in enumerate(range(ENSEMBLE_SEEDS)):
                 rng = np.random.default_rng(GLOBAL_SEED + seed)
                 sims = run_monte_carlo_paths(model, X_full, Y_full, residuals,
-                                             SIMS_PER_SEED, rng, seed_id=seed)
+                                             SIMS_PER_SEED, rng, seed_id=seed, df=df_opt)
                 seed_medoids.append(find_median_ending_medoid(sims))
                 progress = (i+1)/ENSEMBLE_SEEDS
                 progress_bar.progress(progress)
