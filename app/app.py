@@ -166,7 +166,7 @@ def _split_train_test_for_year(X: pd.DataFrame, Y: pd.Series, test_year: int):
     test_Y = Y.loc[test_X.index]
     return train_X, train_Y, test_X, test_Y
 
-def _tune_on_explicit_split(train_X, train_Y, test_X, test_Y, seed=GLOBAL_SEED, n_trials=10):
+def _tune_on_explicit_split(train_X, train_Y, test_X, test_Y, seed=GLOBAL_SEED, n_trials=50):
     def objective(trial):
         params = {
             "n_estimators": trial.suggest_int("n_estimators", 1000, 8000),
@@ -237,25 +237,16 @@ def _eval_params_on_split(params: dict, train_X, train_Y, test_X, test_Y, seed=G
 def tune_across_recent_oos_years(X: pd.DataFrame, Y: pd.Series, years_back: int = 5, seed: int = GLOBAL_SEED, n_trials: int = 50):
     years = _oos_years_available(Y.index, max_years=years_back)
     param_runs, details = [], []
-    progress_outer = st.progress(0)
-    status_outer = st.empty()
-    
-    n_years = len(years)
+    progress_outer = st.progress(0)  # NEW outer progress bar
     for i, y in enumerate(years):
         train_X, train_Y, test_X, test_Y = _split_train_test_for_year(X, Y, y)
-        if len(train_X) < 24 or len(test_X) < 6: 
+        if len(train_X) < 24 or len(test_X) < 6:
             continue
         best_params, rmse, da = _tune_on_explicit_split(train_X, train_Y, test_X, test_Y, seed=seed, n_trials=n_trials)
         details.append({"year": y, "rmse": rmse, "da": da, "best_params": best_params})
         param_runs.append(best_params)
-        
-        completion = (i+1) / n_years
-        percent = int(completion * 100)
-        progress_outer.progress(completion)
-        status_outer.text(f"Tuning... {percent}%")
-    
+        progress_outer.progress((i+1)/len(years))
     progress_outer.empty()
-    status_outer.text("Tuning Complete")
 
     consensus_params = _median_params(param_runs)
     last_rmse, last_da = np.nan, np.nan
@@ -266,6 +257,22 @@ def tune_across_recent_oos_years(X: pd.DataFrame, Y: pd.Series, years_back: int 
             last_rmse, last_da = _eval_params_on_split(consensus_params, trX, trY, teX, teY, seed=seed)
 
     return consensus_params, details, last_rmse, last_da
+
+# ---------- Median-Ending Subset Medoid ----------
+def find_median_ending_medoid(paths: np.ndarray):
+    endings = paths[:, -1]
+    median_ending = np.median(endings)
+    tol = 0.01 * median_ending
+    subset_idx = np.where(np.abs(endings - median_ending) <= tol)[0]
+    if len(subset_idx) == 0:
+        subset_idx = np.argsort(np.abs(endings - median_ending))[:max(1, len(paths)//20)]
+    subset = paths[subset_idx]
+    median_series = np.median(subset, axis=0)
+    diffs = np.abs(subset - median_series)
+    closest = np.argmin(diffs, axis=0)
+    scores = np.bincount(closest, minlength=subset.shape[0])
+    best_idx = np.argmax(scores)
+    return subset[best_idx]
 
 # ---------- Monte Carlo (Multivariate Student-t Residuals) ----------
 def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None, df=5):
@@ -285,22 +292,6 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
         log_paths[:, t] = (log_paths[:, t-1] if t > 0 else 0) + raw_step
 
     return np.exp(log_paths, dtype=np.float32)
-
-# ---------- Median-Ending Subset Medoid (from first script) ----------
-def find_median_ending_medoid(paths: np.ndarray):
-    endings = paths[:, -1]
-    median_ending = np.median(endings)
-    tol = 0.01 * median_ending
-    subset_idx = np.where(np.abs(endings - median_ending) <= tol)[0]
-    if len(subset_idx) == 0:
-        subset_idx = np.argsort(np.abs(endings - median_ending))[:max(1, len(paths)//20)]
-    subset = paths[subset_idx]
-    median_series = np.median(subset, axis=0)
-    diffs = np.abs(subset - median_series)
-    closest = np.argmin(diffs, axis=0)
-    scores = np.bincount(closest, minlength=subset.shape[0])
-    best_idx = np.argmax(scores)
-    return subset[best_idx]
 
 # ---------- Forecast Stats ----------
 def compute_forecast_stats_from_path(path: np.ndarray, start_capital: float, last_date: pd.Timestamp):
@@ -353,7 +344,7 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
 
 # ---------- Streamlit App ----------
 def main():
-    st.title("Portfolio Forecasting Tool (Median-Ending Medoid Path)")
+    st.title("Portfolio Forecasting Tool (Multivariate Student-t Residuals)")
 
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
@@ -408,10 +399,9 @@ def main():
                 progress_bar.progress(progress)
                 status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS}")
             progress_bar.empty()
+            final_medoid = find_median_ending_medoid(np.vstack(seed_medoids))
 
-            final_path = find_median_ending_medoid(np.vstack(seed_medoids))
-
-            stats = compute_forecast_stats_from_path(final_path, start_capital, port_rets.index[-1])
+            stats = compute_forecast_stats_from_path(final_medoid, start_capital, port_rets.index[-1])
             backtest_stats = {
                 "CAGR": annualized_return_monthly(port_rets),
                 "Volatility": annualized_vol_monthly(port_rets),
@@ -426,9 +416,9 @@ def main():
             with col2:
                 st.markdown("**Forecast**")
                 for k,v in stats.items(): st.metric(k, f"{v:.2%}" if 'Sharpe' not in k else f"{v:.2f}")
-            ending_value = float(final_path[-1]) * start_capital
+            ending_value = float(final_medoid[-1]) * start_capital
             st.metric("Forecasted Portfolio Value", f"${ending_value:,.2f}")
-            plot_forecasts(port_rets, start_capital, final_path, rebalance_label)
+            plot_forecasts(port_rets, start_capital, final_medoid, rebalance_label)
 
             final_X = X.iloc[[-1]]
             plot_feature_attributions(final_model, X, final_X)
