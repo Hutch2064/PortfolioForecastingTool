@@ -5,7 +5,7 @@ import os
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from typing import List
+from typing import List, Dict
 from lightgbm import LGBMRegressor
 import matplotlib.pyplot as plt
 import shap
@@ -28,6 +28,14 @@ DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 100        # number of seeds in the ensemble
 SIMS_PER_SEED = 10000       # simulations per seed
 FORECAST_YEARS = 1          # 12-month horizon
+
+# FRED series map
+FRED_SERIES = {
+    "UMCSENT": "Sentiment",
+    "T10Y3M": "T10Y3M",
+    "SAHMREALTIME": "SAHM",
+    "M2SL": "M2"
+}
 
 # ---------- Helpers ----------
 def to_weights(raw: List[float]) -> np.ndarray:
@@ -97,17 +105,21 @@ def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFram
     non_na_start = max(valid_starts)
     return close.loc[non_na_start:]
 
-# FRED macro features
 @st.cache_data(show_spinner=False)
-def fetch_fred_series(series_id: str, start=DEFAULT_START) -> pd.Series:
-    try:
-        s = pdr.DataReader(series_id, "fred", start)
-        s = s.resample("M").last().ffill()
-        s.name = series_id
-        return s.astype(np.float32).squeeze()
-    except Exception as e:
-        st.error(f"{series_id} fetch failed: {e}")
-        return pd.Series(dtype=np.float32, name=series_id)
+def fetch_fred_panel(series_map: Dict[str, str], start=DEFAULT_START) -> pd.DataFrame:
+    frames = []
+    for fred_code, name in series_map.items():
+        try:
+            s = pdr.DataReader(fred_code, "fred", start)
+            s = s.resample("M").last().ffill()
+            s = s.rename(columns={fred_code: name})
+            frames.append(s)
+        except Exception as e:
+            st.error(f"{fred_code} fetch failed: {e}")
+    if not frames:
+        return pd.DataFrame()
+    df = pd.concat(frames, axis=1).sort_index().ffill()
+    return df.astype(np.float32)
 
 # ---------- Portfolio ----------
 def portfolio_returns_monthly(prices: pd.DataFrame, weights: np.ndarray, rebalance: str) -> pd.Series:
@@ -130,27 +142,23 @@ def portfolio_returns_monthly(prices: pd.DataFrame, weights: np.ndarray, rebalan
         return pd.Series(port_vals, index=rets.index, name="Portfolio").pct_change().fillna(0.0).astype(np.float32)
 
 # ---------- Feature Builders ----------
-def build_features(returns: pd.Series) -> pd.DataFrame:
+def build_features(returns: pd.Series, fred_panel: pd.DataFrame) -> pd.DataFrame:
     df = pd.DataFrame(index=returns.index)
     df["mom_3m"] = returns.rolling(3).apply(lambda x: (1+x).prod()-1, raw=True)
     df["mom_6m"] = returns.rolling(6).apply(lambda x: (1+x).prod()-1, raw=True)
     df["mom_12m"] = returns.rolling(12).apply(lambda x: (1+x).prod()-1, raw=True)
     df["dd_state"] = compute_current_drawdown(returns)
 
-    # Macro features
-    umcsent = fetch_fred_series("UMCSENT", start=returns.index.min())
-    df["umcsent"] = umcsent.pct_change().reindex(df.index).fillna(0)
+    # Join FRED macro panel
+    df = df.join(fred_panel, how="left").ffill()
 
-    t10y3m = fetch_fred_series("T10Y3M", start=returns.index.min())
-    df["t10y3m"] = t10y3m.reindex(df.index).fillna(method="ffill")
+    # Transformations
+    if "Sentiment" in df.columns:
+        df["Sentiment"] = df["Sentiment"].pct_change().fillna(0)
+    if "M2" in df.columns:
+        df["M2"] = df["M2"].pct_change().fillna(0)
 
-    sahm = fetch_fred_series("SAHMREALTIME", start=returns.index.min())
-    df["sahm"] = sahm.reindex(df.index).fillna(method="ffill")
-
-    m2 = fetch_fred_series("M2SL", start=returns.index.min())
-    df["m2"] = m2.pct_change().reindex(df.index).fillna(0)
-
-    # Align to the max start date across all features
+    # Align on common valid start
     first_valids = [df[c].first_valid_index() for c in df.columns if df[c].first_valid_index() is not None]
     if not first_valids:
         return pd.DataFrame()
@@ -309,7 +317,8 @@ def main():
             prices = fetch_prices_monthly(tickers, start=DEFAULT_START)
             port_rets = portfolio_returns_monthly(prices, weights, rebalance_choice)
 
-            df = build_features(port_rets)
+            fred_panel = fetch_fred_panel(FRED_SERIES, start=DEFAULT_START)
+            df = build_features(port_rets, fred_panel)
             if df.empty:
                 st.error("Feature engineering returned no data.")
                 return
