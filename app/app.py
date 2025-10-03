@@ -340,4 +340,12 @@ def main():
                 st.markdown("**Forecast**")
                 for k,v in stats.items(): st.metric(k, f"{v:.2%}" if 'Sharpe' not in k else f"{v:.2f}")
             ending_value = float(final_medoid[-1]) * start_capital
-            st.metric("
+            st.metric("Forecasted Portfolio Value", f"${ending_value:,.2f}")
+            plot_forecasts(port_rets, start_capital, final_medoid, rebalance_label)
+            final_X = X_full.iloc[[-1]]
+            plot_feature_attributions(model, X_full, final_X)
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+if __name__ == "__main__":
+    main()
