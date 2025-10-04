@@ -181,7 +181,7 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
         directions=["minimize", "minimize"],
         sampler=optuna.samplers.TPESampler(seed=seed)
     )
-    study.optimize(objective, n_trials=50, show_progress_bar=False)
+    study.optimize(objective, n_trials=100, show_progress_bar=False)
 
     best_trial = study.best_trials[0]
     best_params_full = dict(best_trial.params)
