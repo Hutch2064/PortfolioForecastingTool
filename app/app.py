@@ -138,10 +138,8 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
     df["mom_6m"] = returns.rolling(6).apply(lambda x: (1+x).prod()-1, raw=True)
     df["mom_12m"] = returns.rolling(12).apply(lambda x: (1+x).prod()-1, raw=True)
     df["dd_state"] = compute_current_drawdown(returns)
-
     macro = fetch_macro_features()
     df = df.join(macro, how="left").ffill()
-
     valid_start = max([df[c].first_valid_index() for c in df.columns if df[c].first_valid_index() is not None])
     df = df.loc[valid_start:].dropna()
     return df.astype(np.float32)
@@ -183,12 +181,10 @@ def tune_across_recent_oos_years(X: pd.DataFrame, Y: pd.Series, years_back: int 
     years = sorted(set(Y.index.year))
     years = years[-years_back:]
     param_runs, details = [], []
-
     total_jobs = len(years) * n_trials
     progress_bar = st.progress(0)
     status_text = st.empty()
     completed = 0
-
     for y in years:
         train_X = X.loc[:f"{y-1}-12-31"]
         test_X = X.loc[f"{y}-01-01":f"{y}-12-31"]
@@ -196,7 +192,6 @@ def tune_across_recent_oos_years(X: pd.DataFrame, Y: pd.Series, years_back: int 
         test_Y = Y.loc[test_X.index]
         if len(train_X) < 24 or len(test_X) < 6:
             continue
-
         def objective(trial):
             nonlocal completed
             params = {
@@ -211,17 +206,14 @@ def tune_across_recent_oos_years(X: pd.DataFrame, Y: pd.Series, years_back: int 
             model = LGBMRegressor(**model_params)
             model.fit(train_X, train_Y)
             preds = model.predict(test_X)
-
             actual_cum = (1 + test_Y).cumprod()
             pred_cum = (1 + preds).cumprod()
             rmse = np.sqrt(mean_squared_error(actual_cum, pred_cum))
             directional_acc = (np.sign(test_Y.values) == np.sign(preds)).mean()
-
             completed += 1
             progress_bar.progress(completed / total_jobs)
             status_text.text(f"Tuning... {int((completed / total_jobs) * 100)}%")
             return rmse, -directional_acc
-
         study = optuna.create_study(
             directions=["minimize", "minimize"],
             sampler=optuna.samplers.TPESampler(seed=seed)
@@ -230,7 +222,6 @@ def tune_across_recent_oos_years(X: pd.DataFrame, Y: pd.Series, years_back: int 
         best = study.best_trials[0]
         details.append({"year": y, "rmse": float(best.values[0]), "da": -float(best.values[1]), "best_params": dict(best.params)})
         param_runs.append(dict(best.params))
-
     consensus_params = _median_params(param_runs)
     last_rmse, last_da = np.nan, np.nan
     if years:
@@ -241,27 +232,22 @@ def tune_across_recent_oos_years(X: pd.DataFrame, Y: pd.Series, years_back: int 
         teY = Y.loc[teX.index]
         if len(trX) > 0 and len(teX) > 0:
             last_rmse, last_da = _eval_params_on_split(consensus_params, trX, trY, teX, teY, seed=seed)
-
     return consensus_params, details, last_rmse, last_da
 
-# ---------- Modal-Ending Medoid ----------
-def find_modal_ending_medoid(paths: np.ndarray):
-    endings = paths[:, -1]
-    counts, bins = np.histogram(endings, bins=100)
-    modal_bin_idx = np.argmax(counts)
-    mode_low, mode_high = bins[modal_bin_idx], bins[modal_bin_idx + 1]
-    tol_low = mode_low - 0.01 * abs(mode_low)
-    tol_high = mode_high + 0.01 * abs(mode_high)
-    subset_idx = np.where((endings >= tol_low) & (endings <= tol_high))[0]
-    if len(subset_idx) == 0:
-        subset_idx = np.argsort(np.abs(endings - np.median(endings)))[:max(1, len(paths)//20)]
-    subset = paths[subset_idx]
-    median_series = np.median(subset, axis=0)
-    diffs = np.abs(subset - median_series)
-    closest = np.argmin(diffs, axis=0)
-    scores = np.bincount(closest, minlength=subset.shape[0])
-    best_idx = np.argmax(scores)
-    return subset[best_idx]
+# ---------- Modal Path ----------
+def find_modal_path(paths: np.ndarray, bins: int = 200) -> np.ndarray:
+    """Selects the single path closest to the modal trajectory (most frequent values per time)."""
+    mode_series = []
+    for t in range(paths.shape[1]):
+        vals = paths[:, t]
+        hist, edges = np.histogram(vals, bins=bins)
+        mode_bin = np.argmax(hist)
+        mode_val = (edges[mode_bin] + edges[mode_bin + 1]) / 2
+        mode_series.append(mode_val)
+    mode_series = np.array(mode_series)
+    dists = np.sqrt(((paths - mode_series) ** 2).mean(axis=1))
+    modal_idx = np.argmin(dists)
+    return paths[modal_idx]
 
 # ---------- Monte Carlo ----------
 def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None, df=5):
@@ -330,15 +316,12 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
 # ---------- Streamlit App ----------
 def main():
     st.title("Portfolio Forecasting Tool")
-
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
     start_capital = st.number_input("Starting Value ($)", min_value=1000.0, value=10000.0, step=1000.0)
-
     freq_map = {"M": "Monthly","Q": "Quarterly","S": "Semiannual","Y": "Yearly","N": "None"}
     rebalance_label = st.selectbox("Rebalance", list(freq_map.values()), index=0)
     rebalance_choice = [k for k,v in freq_map.items() if v == rebalance_label][0]
-
     if st.button("Run Forecast"):
         try:
             weights = to_weights([float(x) for x in weights_str.split(",")])
@@ -352,23 +335,19 @@ def main():
             Y = np.log(1 + port_rets.loc[df.index]).astype(np.float32)
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
-
             consensus_params, oos_details, last_rmse, last_da = tune_across_recent_oos_years(
                 X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=1000
             )
-
             st.write("**Best Params (median across last 5 OOS years):**")
             st.json(consensus_params)
             st.write("**OOS RMSE:**", f"{last_rmse:.6f}")
             st.write("**OOS Directional Accuracy:**", f"{last_da:.2%}")
-
             df_opt = int(consensus_params.get("df", 5))
             lgbm_params = {k:v for k,v in consensus_params.items() if k != "df"}
             final_model = LGBMRegressor(**lgbm_params)
             final_model.fit(X, Y)
             preds = final_model.predict(X).astype(np.float32)
             residuals = (Y.values - preds).astype(np.float32)
-
             seed_medoids = []
             progress_bar = st.progress(0)
             status_text = st.empty()
@@ -376,13 +355,12 @@ def main():
                 rng = np.random.default_rng(GLOBAL_SEED + seed)
                 sims = run_monte_carlo_paths(final_model, X, Y, residuals,
                                              SIMS_PER_SEED, rng, seed_id=seed, df=df_opt)
-                seed_medoids.append(find_modal_ending_medoid(sims))
+                seed_medoids.append(find_modal_path(sims))
                 progress = (i+1)/ENSEMBLE_SEEDS
                 progress_bar.progress(progress)
                 status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS}")
             progress_bar.empty()
-
-            final_medoid = find_modal_ending_medoid(np.vstack(seed_medoids))
+            final_medoid = find_modal_path(np.vstack(seed_medoids))
             stats = compute_forecast_stats_from_path(final_medoid, start_capital, port_rets.index[-1])
             backtest_stats = {
                 "CAGR": annualized_return_monthly(port_rets),
@@ -390,7 +368,6 @@ def main():
                 "Sharpe": annualized_sharpe_monthly(port_rets),
                 "Max Drawdown": max_drawdown_from_rets(port_rets)
             }
-
             st.subheader("Results")
             col1, col2 = st.columns(2)
             with col1:
@@ -401,7 +378,6 @@ def main():
                 for k,v in stats.items(): st.metric(k, f"{v:.2%}" if 'Sharpe' not in k else f"{v:.2f}")
             st.metric("Forecasted Portfolio Value", f"${float(final_medoid[-1])*start_capital:,.2f}")
             plot_forecasts(port_rets, start_capital, final_medoid, rebalance_label)
-
             final_X = X.iloc[[-1]]
             plot_feature_attributions(final_model, X, final_X)
         except Exception as e:
