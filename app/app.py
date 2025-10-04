@@ -253,7 +253,7 @@ def _eval_params_on_split(params: dict, train_X, train_Y, test_X, test_Y, seed=G
     return rmse, directional_acc
 # -----------------------------------
 
-def tune_across_recent_oos_years(X: pd.DataFrame, Y: pd.Series, years_back: int = 5, seed: int = GLOBAL_SEED, n_trials: int = 50):
+def tune_across_recent_oos_years(X: pd.DataFrame, Y: pd.Series, years_back: int = 5, seed: int = GLOBAL_SEED, n_trials: int = 1000):
     years = _oos_years_available(Y.index, max_years=years_back)
     param_runs, details = [], []
 
@@ -430,7 +430,7 @@ def main():
 
             # ---- NEW: run 5× yearly OOS tuning and take per-parameter median ----
             consensus_params, oos_details, last_rmse, last_da = tune_across_recent_oos_years(
-                X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=50
+                X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=1000
             )
 
             # Show "Best Params" as the consensus
