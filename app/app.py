@@ -384,7 +384,6 @@ def main():
             st.error(f"Error: {e}")
 
 if __name__ == "__main__":
-<<<<<<< HEAD
     main()
 
 
@@ -404,6 +403,3 @@ if __name__ == "__main__":
 
 
 
-=======
-    main()
->>>>>>> 22a56f3f64cee518de58b6a4520e9ad88e3c1f3d
