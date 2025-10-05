@@ -242,13 +242,31 @@ def tune_across_recent_oos_years(X: pd.DataFrame, Y: pd.Series, years_back: int 
             last_rmse, last_da = _eval_params_on_split(consensus_params, trX, trY, teX, teY, seed=seed)
     return consensus_params, details, last_rmse, last_da
 
-# ---------- Modal Path ----------
-def find_overall_modal_path(paths: np.ndarray) -> np.ndarray:
+# ---------- Modal Path (Hierarchical Mini-Batch) ----------
+def find_overall_modal_path(paths: np.ndarray, chunk_size: int = 5000) -> np.ndarray:
+    """
+    Efficiently selects the single simulated path most central to all others (L1 medoid)
+    using a hierarchical mini-batch approach for scalability.
+    """
     n = len(paths)
-    dist_matrix = np.abs(paths[:, None, :] - paths[None, :, :]).sum(axis=2)
+    if n <= chunk_size:
+        dist_matrix = np.abs(paths[:, None, :] - paths[None, :, :]).sum(axis=2)
+        total_dists = dist_matrix.sum(axis=1)
+        return paths[np.argmin(total_dists)]
+
+    n_chunks = int(np.ceil(n / chunk_size))
+    chunk_medoids = []
+    for i in range(n_chunks):
+        subset = paths[i * chunk_size:(i + 1) * chunk_size]
+        dist_matrix = np.abs(subset[:, None, :] - subset[None, :, :]).sum(axis=2)
+        total_dists = dist_matrix.sum(axis=1)
+        medoid_idx = np.argmin(total_dists)
+        chunk_medoids.append(subset[medoid_idx])
+    chunk_medoids = np.array(chunk_medoids)
+
+    dist_matrix = np.abs(chunk_medoids[:, None, :] - chunk_medoids[None, :, :]).sum(axis=2)
     total_dists = dist_matrix.sum(axis=1)
-    best_idx = np.argmin(total_dists)
-    return paths[best_idx]
+    return chunk_medoids[np.argmin(total_dists)]
 
 # ---------- Monte Carlo ----------
 def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None, df=5):
@@ -369,7 +387,6 @@ def main():
                 status_text.text(f"Running forecasts... {int(progress * 100)}%")
             progress_bar.empty()
 
-            # Combine all simulations and find one global modal path
             all_paths = np.vstack(all_sims_collected)
             final_modal_path = find_overall_modal_path(all_paths)
 
@@ -403,6 +420,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
