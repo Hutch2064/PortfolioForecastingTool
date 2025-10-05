@@ -235,19 +235,17 @@ def tune_across_recent_oos_years(X: pd.DataFrame, Y: pd.Series, years_back: int 
     return consensus_params, details, last_rmse, last_da
 
 # ---------- Modal Path ----------
-def find_modal_path(paths: np.ndarray, bins: int = 200) -> np.ndarray:
-    """Selects the single path closest to the modal trajectory (most frequent values per time)."""
-    mode_series = []
-    for t in range(paths.shape[1]):
-        vals = paths[:, t]
-        hist, edges = np.histogram(vals, bins=bins)
-        mode_bin = np.argmax(hist)
-        mode_val = (edges[mode_bin] + edges[mode_bin + 1]) / 2
-        mode_series.append(mode_val)
-    mode_series = np.array(mode_series)
-    dists = np.sqrt(((paths - mode_series) ** 2).mean(axis=1))
-    modal_idx = np.argmin(dists)
-    return paths[modal_idx]
+def find_overall_modal_path(paths: np.ndarray) -> np.ndarray:
+    """
+    Selects the single simulated path that overlaps the most others overall.
+    Formally: the medoid of all simulated trajectories based on L1 distance.
+    """
+    n = len(paths)
+    # Compute pairwise distances (use L1 for stability)
+    dist_matrix = np.abs(paths[:, None, :] - paths[None, :, :]).sum(axis=2)
+    total_dists = dist_matrix.sum(axis=1)
+    best_idx = np.argmin(total_dists)
+    return paths[best_idx]
 
 # ---------- Monte Carlo ----------
 def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None, df=5):
@@ -355,12 +353,12 @@ def main():
                 rng = np.random.default_rng(GLOBAL_SEED + seed)
                 sims = run_monte_carlo_paths(final_model, X, Y, residuals,
                                              SIMS_PER_SEED, rng, seed_id=seed, df=df_opt)
-                seed_medoids.append(find_modal_path(sims))
+                seed_medoids.append(find_overall_modal_path(sims))
                 progress = (i+1)/ENSEMBLE_SEEDS
                 progress_bar.progress(progress)
                 status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS}")
             progress_bar.empty()
-            final_medoid = find_modal_path(np.vstack(seed_medoids))
+            final_medoid = find_overall_modal_path(np.vstack(seed_medoids))
             stats = compute_forecast_stats_from_path(final_medoid, start_capital, port_rets.index[-1])
             backtest_stats = {
                 "CAGR": annualized_return_monthly(port_rets),
