@@ -38,8 +38,7 @@ def to_weights(raw: List[float]) -> np.ndarray:
 
 def annualized_return_monthly(monthly_returns: pd.Series) -> float:
     m = monthly_returns.dropna()
-    if m.empty:
-        return np.nan
+    if m.empty: return np.nan
     compounded = (1 + m).prod()
     years = len(m) / 12.0
     return compounded ** (1 / years) - 1 if years > 0 else np.nan
@@ -50,8 +49,7 @@ def annualized_vol_monthly(monthly_returns: pd.Series) -> float:
 
 def annualized_sharpe_monthly(monthly_returns: pd.Series, rf_monthly: float = 0.0) -> float:
     m = monthly_returns.dropna()
-    if m.empty:
-        return np.nan
+    if m.empty: return np.nan
     excess = m - rf_monthly
     mu, sigma = excess.mean(), excess.std(ddof=0)
     return (mu / sigma) * np.sqrt(12) if sigma and sigma > 0 else np.nan
@@ -88,8 +86,7 @@ def fetch_prices_monthly(tickers: List[str], start=DEFAULT_START) -> pd.DataFram
             raise ValueError("Could not find Close/Adj Close in Yahoo data.")
     else:
         colname = "Adj Close" if "Adj Close" in data.columns else "Close"
-        close = pd.DataFrame(data[colname])
-        close.columns = tickers
+        close = pd.DataFrame(data[colname]); close.columns = tickers
     close = close.ffill().dropna(how="all").astype(np.float32)
     first_valids = [close[col].first_valid_index() for col in close.columns]
     valid_starts = [d for d in first_valids if d is not None]
@@ -125,16 +122,13 @@ def portfolio_returns_monthly(prices: pd.DataFrame, weights: np.ndarray, rebalan
     else:
         freq_map = {"M": "M", "Q": "Q", "S": "2Q", "Y": "A"}
         rule = freq_map.get(rebalance)
-        if rule is None:
-            raise ValueError("Invalid rebalance option")
+        if rule is None: raise ValueError("Invalid rebalance option")
         port_val, port_vals, current_weights = 1.0, [], weights.copy()
         rebalance_dates = rets.resample(rule).last().index
         for i, date in enumerate(rets.index):
-            if i > 0:
-                port_val *= (1 + (rets.iloc[i] @ current_weights))
+            if i > 0: port_val *= (1 + (rets.iloc[i] @ current_weights))
             port_vals.append(port_val)
-            if date in rebalance_dates:
-                current_weights = weights.copy()
+            if date in rebalance_dates: current_weights = weights.copy()
         return pd.Series(port_vals, index=rets.index, name="Portfolio").pct_change().fillna(0.0).astype(np.float32)
 
 # ---------- Feature Builders ----------
@@ -152,14 +146,12 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
 
 # ---------- Missing Helpers ----------
 def _median_params(param_dicts: List[dict]) -> dict:
-    if not param_dicts:
-        return {}
+    if not param_dicts: return {}
     all_keys = set().union(*[d.keys() for d in param_dicts])
     consensus = {}
     for k in all_keys:
         vals = [d[k] for d in param_dicts if k in d]
-        if not vals:
-            continue
+        if not vals: continue
         if isinstance(vals[0], (int, np.integer)):
             consensus[k] = int(np.round(np.median(vals)))
         elif isinstance(vals[0], (float, np.floating)):
@@ -185,7 +177,7 @@ def _eval_params_on_split(params: dict, train_X, train_Y, test_X, test_Y, seed=G
     return rmse, directional_acc
 
 # ---------- Multi-year OOS Tuning ----------
-def tune_across_recent_oos_years(X: pd.DataFrame, Y: pd.Series, years_back: int = 5, seed: int = GLOBAL_SEED, n_trials: int = 100):
+def tune_across_recent_oos_years(X: pd.DataFrame, Y: pd.Series, years_back: int = 5, seed: int = GLOBAL_SEED, n_trials: int = 1000):
     years = sorted(set(Y.index.year))
     years = years[-years_back:]
     param_runs, details = [], []
@@ -242,31 +234,20 @@ def tune_across_recent_oos_years(X: pd.DataFrame, Y: pd.Series, years_back: int 
             last_rmse, last_da = _eval_params_on_split(consensus_params, trX, trY, teX, teY, seed=seed)
     return consensus_params, details, last_rmse, last_da
 
-# ---------- Modal Path (Hierarchical Mini-Batch) ----------
-def find_overall_modal_path(paths: np.ndarray, chunk_size: int = 5000) -> np.ndarray:
-    """
-    Efficiently selects the single simulated path most central to all others (L1 medoid)
-    using a hierarchical mini-batch approach for scalability.
-    """
-    n = len(paths)
-    if n <= chunk_size:
-        dist_matrix = np.abs(paths[:, None, :] - paths[None, :, :]).sum(axis=2)
-        total_dists = dist_matrix.sum(axis=1)
-        return paths[np.argmin(total_dists)]
-
-    n_chunks = int(np.ceil(n / chunk_size))
-    chunk_medoids = []
-    for i in range(n_chunks):
-        subset = paths[i * chunk_size:(i + 1) * chunk_size]
-        dist_matrix = np.abs(subset[:, None, :] - subset[None, :, :]).sum(axis=2)
-        total_dists = dist_matrix.sum(axis=1)
-        medoid_idx = np.argmin(total_dists)
-        chunk_medoids.append(subset[medoid_idx])
-    chunk_medoids = np.array(chunk_medoids)
-
-    dist_matrix = np.abs(chunk_medoids[:, None, :] - chunk_medoids[None, :, :]).sum(axis=2)
-    total_dists = dist_matrix.sum(axis=1)
-    return chunk_medoids[np.argmin(total_dists)]
+# ---------- Modal Path ----------
+def find_modal_path(paths: np.ndarray, bins: int = 200) -> np.ndarray:
+    """Selects the single path closest to the modal trajectory (most frequent values per time)."""
+    mode_series = []
+    for t in range(paths.shape[1]):
+        vals = paths[:, t]
+        hist, edges = np.histogram(vals, bins=bins)
+        mode_bin = np.argmax(hist)
+        mode_val = (edges[mode_bin] + edges[mode_bin + 1]) / 2
+        mode_series.append(mode_val)
+    mode_series = np.array(mode_series)
+    dists = np.sqrt(((paths - mode_series) ** 2).mean(axis=1))
+    modal_idx = np.argmin(dists)
+    return paths[modal_idx]
 
 # ---------- Monte Carlo ----------
 def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None, df=5):
@@ -328,22 +309,19 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
     ax.plot([last_date, *forecast_dates], [port_cum.iloc[-1], *forecast_path],
             linewidth=2, label="Forecast")
     ax.set_title(f"Portfolio Forecast (Backtest + 1Y Snapshot Forecast)")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Balance ($)")
+    ax.set_xlabel("Date"); ax.set_ylabel("Balance ($)")
     ax.legend()
     st.pyplot(fig)
 
 # ---------- Streamlit App ----------
 def main():
     st.title("Portfolio Forecasting Tool")
-
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
     start_capital = st.number_input("Starting Value ($)", min_value=1000.0, value=10000.0, step=1000.0)
-    freq_map = {"M": "Monthly", "Q": "Quarterly", "S": "Semiannual", "Y": "Yearly", "N": "None"}
+    freq_map = {"M": "Monthly","Q": "Quarterly","S": "Semiannual","Y": "Yearly","N": "None"}
     rebalance_label = st.selectbox("Rebalance", list(freq_map.values()), index=0)
-    rebalance_choice = [k for k, v in freq_map.items() if v == rebalance_label][0]
-
+    rebalance_choice = [k for k,v in freq_map.items() if v == rebalance_label][0]
     if st.button("Run Forecast"):
         try:
             weights = to_weights([float(x) for x in weights_str.split(",")])
@@ -357,69 +335,57 @@ def main():
             Y = np.log(1 + port_rets.loc[df.index]).astype(np.float32)
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
-
             consensus_params, oos_details, last_rmse, last_da = tune_across_recent_oos_years(
-                X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=100
+                X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=1000
             )
-
             st.write("**Best Params (median across last 5 OOS years):**")
             st.json(consensus_params)
             st.write("**OOS RMSE:**", f"{last_rmse:.6f}")
             st.write("**OOS Directional Accuracy:**", f"{last_da:.2%}")
-
             df_opt = int(consensus_params.get("df", 5))
-            lgbm_params = {k: v for k, v in consensus_params.items() if k != "df"}
+            lgbm_params = {k:v for k,v in consensus_params.items() if k != "df"}
             final_model = LGBMRegressor(**lgbm_params)
             final_model.fit(X, Y)
             preds = final_model.predict(X).astype(np.float32)
             residuals = (Y.values - preds).astype(np.float32)
-
-            all_sims_collected = []
+            seed_medoids = []
             progress_bar = st.progress(0)
             status_text = st.empty()
             for i, seed in enumerate(range(ENSEMBLE_SEEDS)):
                 rng = np.random.default_rng(GLOBAL_SEED + seed)
                 sims = run_monte_carlo_paths(final_model, X, Y, residuals,
                                              SIMS_PER_SEED, rng, seed_id=seed, df=df_opt)
-                all_sims_collected.append(sims)
-                progress = (i + 1) / ENSEMBLE_SEEDS
+                seed_medoids.append(find_modal_path(sims))
+                progress = (i+1)/ENSEMBLE_SEEDS
                 progress_bar.progress(progress)
-                status_text.text(f"Running forecasts... {int(progress * 100)}%")
+                status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS}")
             progress_bar.empty()
-
-            all_paths = np.vstack(all_sims_collected)
-            final_modal_path = find_overall_modal_path(all_paths)
-
-            stats = compute_forecast_stats_from_path(final_modal_path, start_capital, port_rets.index[-1])
+            final_medoid = find_modal_path(np.vstack(seed_medoids))
+            stats = compute_forecast_stats_from_path(final_medoid, start_capital, port_rets.index[-1])
             backtest_stats = {
                 "CAGR": annualized_return_monthly(port_rets),
                 "Volatility": annualized_vol_monthly(port_rets),
                 "Sharpe": annualized_sharpe_monthly(port_rets),
                 "Max Drawdown": max_drawdown_from_rets(port_rets)
             }
-
             st.subheader("Results")
             col1, col2 = st.columns(2)
             with col1:
                 st.markdown("**Backtest**")
-                for k, v in backtest_stats.items():
-                    st.metric(k, f"{v:.2%}" if 'Sharpe' not in k else f"{v:.2f}")
+                for k,v in backtest_stats.items(): st.metric(k, f"{v:.2%}" if 'Sharpe' not in k else f"{v:.2f}")
             with col2:
                 st.markdown("**Forecast**")
-                for k, v in stats.items():
-                    st.metric(k, f"{v:.2%}" if 'Sharpe' not in k else f"{v:.2f}")
-
-            st.metric("Forecasted Portfolio Value", f"${float(final_modal_path[-1]) * start_capital:,.2f}")
-            plot_forecasts(port_rets, start_capital, final_modal_path, rebalance_label)
-
+                for k,v in stats.items(): st.metric(k, f"{v:.2%}" if 'Sharpe' not in k else f"{v:.2f}")
+            st.metric("Forecasted Portfolio Value", f"${float(final_medoid[-1])*start_capital:,.2f}")
+            plot_forecasts(port_rets, start_capital, final_medoid, rebalance_label)
             final_X = X.iloc[[-1]]
             plot_feature_attributions(final_model, X, final_X)
-
         except Exception as e:
             st.error(f"Error: {e}")
 
 if __name__ == "__main__":
     main()
+
 
 
 
