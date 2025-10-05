@@ -146,7 +146,26 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
     df = df.loc[valid_start:].dropna()
     return df.astype(np.float32)
 
-# ---------- OOS Tuning ----------
+# ---------- OOS Helper Functions ----------
+def _oos_years_available(idx: pd.DatetimeIndex, max_years=5) -> List[int]:
+    years = sorted(set(idx.year))
+    complete_years = []
+    for y in years:
+        months = set(idx[idx.year == y].month)
+        if all(m in months for m in range(1, 13)):
+            complete_years.append(y)
+    return complete_years[-max_years:] if len(complete_years) > max_years else complete_years
+
+def _split_train_test_for_year(X: pd.DataFrame, Y: pd.Series, test_year: int):
+    train_end = pd.Timestamp(f"{test_year-1}-12-31")
+    test_start = pd.Timestamp(f"{test_year}-01-01")
+    test_end = pd.Timestamp(f"{test_year}-12-31")
+    train_X = X.loc[:train_end]
+    train_Y = Y.loc[train_X.index]
+    test_X = X.loc[test_start:test_end]
+    test_Y = Y.loc[test_X.index]
+    return train_X, train_Y, test_X, test_Y
+
 def _tune_on_explicit_split(train_X, train_Y, test_X, test_Y, seed=GLOBAL_SEED, n_trials=50):
     def objective(trial):
         params = {
@@ -200,15 +219,27 @@ def _median_params(param_dicts: List[dict]) -> dict:
     consensus["n_jobs"] = 1
     return consensus
 
+def _eval_params_on_split(params: dict, train_X, train_Y, test_X, test_Y, seed=GLOBAL_SEED):
+    lgbm_params = {k:v for k,v in params.items() if k not in ("df",)}
+    lgbm_params["random_state"] = seed
+    lgbm_params["n_jobs"] = 1
+    model = LGBMRegressor(**lgbm_params)
+    model.fit(train_X, train_Y)
+    preds = model.predict(test_X)
+    actual_cum = (1 + test_Y).cumprod()
+    pred_cum = (1 + preds).cumprod()
+    rmse = np.sqrt(mean_squared_error(actual_cum, pred_cum))
+    actual_dir = np.sign(test_Y.values)
+    pred_dir = np.sign(preds)
+    directional_acc = (actual_dir == pred_dir).mean()
+    return rmse, directional_acc
+
 def tune_across_recent_oos_years(X: pd.DataFrame, Y: pd.Series, years_back: int = 5, seed: int = GLOBAL_SEED, n_trials: int = 50):
-    years = sorted(set(Y.index.year))[-years_back:]
+    years = _oos_years_available(Y.index, max_years=years_back)
     param_runs, details = [], []
-    progress_outer = st.progress(0)
+    progress_outer = st.progress(0)  # NEW outer progress bar
     for i, y in enumerate(years):
-        train_X = X.loc[:f"{y-1}-12-31"]
-        test_X = X.loc[f"{y}-01-01":f"{y}-12-31"]
-        train_Y = Y.loc[train_X.index]
-        test_Y = Y.loc[test_X.index]
+        train_X, train_Y, test_X, test_Y = _split_train_test_for_year(X, Y, y)
         if len(train_X) < 24 or len(test_X) < 6:
             continue
         best_params, rmse, da = _tune_on_explicit_split(train_X, train_Y, test_X, test_Y, seed=seed, n_trials=n_trials)
@@ -218,45 +249,57 @@ def tune_across_recent_oos_years(X: pd.DataFrame, Y: pd.Series, years_back: int 
     progress_outer.empty()
 
     consensus_params = _median_params(param_runs)
-    return consensus_params, details, details[-1]["rmse"], details[-1]["da"]
+    last_rmse, last_da = np.nan, np.nan
+    if years:
+        last_year = years[-1]
+        trX, trY, teX, teY = _split_train_test_for_year(X, Y, last_year)
+        if len(trX) > 0 and len(teX) > 0:
+            last_rmse, last_da = _eval_params_on_split(consensus_params, trX, trY, teX, teY, seed=seed)
 
-# ---------- NEW Global Modal Line ----------
-def find_global_modal_line(all_paths: np.ndarray):
-    # Compute median across all simulations and seeds
-    median_path = np.median(all_paths, axis=0)
-    # Find subset within ±1% of median path at final point
-    median_end = median_path[-1]
-    tol = 0.01 * median_end
-    idx = np.where((all_paths[:, -1] >= median_end - tol) & (all_paths[:, -1] <= median_end + tol))[0]
-    if len(idx) == 0:
-        idx = np.argsort(np.abs(all_paths[:, -1] - median_end))[:max(1, len(all_paths)//100)]
-    subset = all_paths[idx]
-    # Find the modal (most overlapping) line
-    diffs = np.abs(subset - np.median(subset, axis=0))
+    return consensus_params, details, last_rmse, last_da
+
+# ---------- Median-Ending Subset Medoid ----------
+def find_median_ending_medoid(paths: np.ndarray):
+    endings = paths[:, -1]
+    median_ending = np.median(endings)
+    tol = 0.01 * median_ending
+    subset_idx = np.where(np.abs(endings - median_ending) <= tol)[0]
+    if len(subset_idx) == 0:
+        subset_idx = np.argsort(np.abs(endings - median_ending))[:max(1, len(paths)//20)]
+    subset = paths[subset_idx]
+    median_series = np.median(subset, axis=0)
+    diffs = np.abs(subset - median_series)
     closest = np.argmin(diffs, axis=0)
     scores = np.bincount(closest, minlength=subset.shape[0])
     best_idx = np.argmax(scores)
     return subset[best_idx]
 
-# ---------- Monte Carlo ----------
-def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, df=5):
-    horizon = FORECAST_YEARS * 12
-    log_paths = np.zeros((sims_per_seed, horizon), dtype=np.float32)
-    mu, sigma = residuals.mean(), residuals.std(ddof=0)
-    snapshot = X_base.iloc[[-1]].values.astype(np.float32)
-    base_pred = model.predict(np.repeat(snapshot, sims_per_seed, axis=0)).astype(np.float32)
-    for t in range(horizon):
+# ---------- Monte Carlo (Multivariate Student-t Residuals) ----------
+def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None, df=5):
+    horizon_months = FORECAST_YEARS * 12
+    log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
+
+    mu = residuals.mean()
+    sigma = residuals.std(ddof=0)
+
+    snapshot_X = X_base.iloc[[-1]].values.astype(np.float32)
+    last_X = np.repeat(snapshot_X, sims_per_seed, axis=0)
+    base_pred = model.predict(last_X).astype(np.float32)
+
+    for t in range(horizon_months):
         shocks = student_t.rvs(df, loc=mu, scale=sigma, size=sims_per_seed, random_state=rng).astype(np.float32)
         raw_step = base_pred + shocks
-        log_paths[:, t] = (log_paths[:, t-1] if t>0 else 0) + raw_step
+        log_paths[:, t] = (log_paths[:, t-1] if t > 0 else 0) + raw_step
+
     return np.exp(log_paths, dtype=np.float32)
 
-# ---------- Stats / Plot ----------
-def compute_forecast_stats_from_path(path, start_capital, last_date):
-    if len(path)==0: return {"CAGR":np.nan,"Volatility":np.nan,"Sharpe":np.nan,"Max Drawdown":np.nan}
-    norm_path = path/path[0]
+# ---------- Forecast Stats ----------
+def compute_forecast_stats_from_path(path: np.ndarray, start_capital: float, last_date: pd.Timestamp):
+    if path is None or len(path) == 0:
+        return {"CAGR": np.nan, "Volatility": np.nan, "Sharpe": np.nan, "Max Drawdown": np.nan}
+    norm_path = path / path[0]
     forecast_index = pd.date_range(start=last_date, periods=len(norm_path)+1, freq="M")
-    price = pd.Series(norm_path, index=forecast_index[:-1])*start_capital
+    price = pd.Series(norm_path, index=forecast_index[:-1]) * start_capital
     monthly = price.pct_change().dropna()
     return {
         "CAGR": annualized_return_monthly(monthly),
@@ -265,27 +308,51 @@ def compute_forecast_stats_from_path(path, start_capital, last_date):
         "Max Drawdown": max_drawdown_from_rets(monthly)
     }
 
-def plot_forecasts(port_rets, start_capital, central, rebalance_label):
-    port_cum = (1+port_rets).cumprod()*start_capital
-    last_date = port_cum.index[-1]
-    forecast_path = port_cum.iloc[-1]*(central/central[0])
-    forecast_dates = pd.date_range(start=last_date, periods=len(central), freq="M")
-    fig, ax = plt.subplots(figsize=(12,6))
-    ax.plot(port_cum.index, port_cum.values, label="Portfolio Backtest")
-    ax.plot([last_date, *forecast_dates],[port_cum.iloc[-1], *forecast_path],linewidth=2,label="Forecast")
-    ax.set_title("Portfolio Forecast (Backtest + 1Y Snapshot Forecast)")
-    ax.set_xlabel("Date"); ax.set_ylabel("Balance ($)"); ax.legend()
+# ---------- SHAP ----------
+def plot_feature_attributions(model, X, final_X):
+    explainer = shap.TreeExplainer(model)
+    shap_values_hist = explainer.shap_values(X)
+    shap_mean_hist = np.abs(shap_values_hist).mean(axis=0)
+    shap_values_fore = explainer.shap_values(final_X)
+    shap_mean_fore = np.abs(shap_values_fore).reshape(-1)
+    features = X.columns
+    x_pos = np.arange(len(features))
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.bar(x_pos - 0.2, shap_mean_hist, width=0.4, label="Backtest Avg")
+    ax.bar(x_pos + 0.2, shap_mean_fore, width=0.4, label="Forecast Snapshot")
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(features, rotation=45, ha="right")
+    ax.set_ylabel("Average |SHAP Value|")
+    ax.set_title("Feature Contributions: Backtest vs Forecast Snapshot")
+    ax.legend()
     st.pyplot(fig)
 
-# ---------- Streamlit ----------
+# ---------- Plot Forecasts ----------
+def plot_forecasts(port_rets, start_capital, central, rebalance_label):
+    port_cum = (1 + port_rets).cumprod() * start_capital
+    last_date = port_cum.index[-1]
+    forecast_path = port_cum.iloc[-1] * (central / central[0])
+    forecast_dates = pd.date_range(start=last_date, periods=len(central), freq="M")
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.plot(port_cum.index, port_cum.values, label="Portfolio Backtest")
+    ax.plot([last_date, *forecast_dates], [port_cum.iloc[-1], *forecast_path],
+            linewidth=2, label="Forecast")
+    ax.set_title(f"Portfolio Forecast (Backtest + 1Y Snapshot Forecast)")
+    ax.set_xlabel("Date"); ax.set_ylabel("Balance ($)")
+    ax.legend()
+    st.pyplot(fig)
+
+# ---------- Streamlit App ----------
 def main():
-    st.title("Portfolio Forecasting Tool (Global Modal Path Selection)")
-    tickers = st.text_input("Tickers","VTI,AGG")
-    weights_str = st.text_input("Weights","0.6,0.4")
-    start_capital = st.number_input("Starting Value ($)",min_value=1000.0,value=10000.0,step=1000.0)
-    freq_map = {"M":"Monthly","Q":"Quarterly","S":"Semiannual","Y":"Yearly","N":"None"}
+    st.title("Portfolio Forecasting Tool (Multivariate Student-t Residuals)")
+
+    tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
+    weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
+    start_capital = st.number_input("Starting Value ($)", min_value=1000.0, value=10000.0, step=1000.0)
+
+    freq_map = {"M": "Monthly","Q": "Quarterly","S": "Semiannual","Y": "Yearly","N": "None"}
     rebalance_label = st.selectbox("Rebalance", list(freq_map.values()), index=0)
-    rebalance_choice = [k for k,v in freq_map.items() if v==rebalance_label][0]
+    rebalance_choice = [k for k,v in freq_map.items() if v == rebalance_label][0]
 
     if st.button("Run Forecast"):
         try:
@@ -295,55 +362,70 @@ def main():
             port_rets = portfolio_returns_monthly(prices, weights, rebalance_choice)
             df = build_features(port_rets)
             if df.empty:
-                st.error("Feature engineering returned no data."); return
+                st.error("Feature engineering returned no data.")
+                return
             Y = np.log(1 + port_rets.loc[df.index]).astype(np.float32)
-            X = df.shift(1).dropna(); Y = Y.loc[X.index]
+            X = df.shift(1).dropna()
+            Y = Y.loc[X.index]
 
-            consensus_params, _, last_rmse, last_da = tune_across_recent_oos_years(X, Y, 5, GLOBAL_SEED, 50)
-            st.write("**Best Params:**"); st.json(consensus_params)
-            st.write("**OOS RMSE:**", f"{last_rmse:.6f}"); st.write("**Directional Accuracy:**", f"{last_da:.2%}")
+            consensus_params, oos_details, last_rmse, last_da = tune_across_recent_oos_years(
+                X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=50
+            )
 
-            df_opt = int(consensus_params.get("df",5))
-            lgbm_params = {k:v for k,v in consensus_params.items() if k!="df"}
-            lgbm_params["random_state"]=GLOBAL_SEED; lgbm_params["n_jobs"]=1
+            st.write("**Best Params (per-parameter median across last 5 OOS years):**")
+            st.json(consensus_params)
+            st.write("**OOS 12m RMSE:**", f"{last_rmse:.6f}")
+            st.write("**OOS 12m Directional Accuracy:**", f"{last_da:.2%}")
 
-            model = LGBMRegressor(**lgbm_params); model.fit(X,Y)
-            preds = model.predict(X).astype(np.float32)
+            df_opt = int(consensus_params.get("df", 5))
+            lgbm_params = {k:v for k,v in consensus_params.items() if k != "df"}
+            lgbm_params["random_state"] = GLOBAL_SEED
+            lgbm_params["n_jobs"] = 1
+
+            final_model = LGBMRegressor(**lgbm_params)
+            final_model.fit(X, Y)
+            preds = final_model.predict(X).astype(np.float32)
             residuals = (Y.values - preds).astype(np.float32)
 
-            all_paths = []
-            progress_bar = st.progress(0); status_text = st.empty()
-            for i,seed in enumerate(range(ENSEMBLE_SEEDS)):
-                rng = np.random.default_rng(GLOBAL_SEED+seed)
-                sims = run_monte_carlo_paths(model,X,Y,residuals,SIMS_PER_SEED,rng,df=df_opt)
-                all_paths.append(sims)
-                progress_bar.progress((i+1)/ENSEMBLE_SEEDS)
+            seed_medoids = []
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            for i, seed in enumerate(range(ENSEMBLE_SEEDS)):
+                rng = np.random.default_rng(GLOBAL_SEED + seed)
+                sims = run_monte_carlo_paths(final_model, X, Y, residuals,
+                                             SIMS_PER_SEED, rng, seed_id=seed, df=df_opt)
+                seed_medoids.append(find_median_ending_medoid(sims))
+                progress = (i+1)/ENSEMBLE_SEEDS
+                progress_bar.progress(progress)
                 status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS}")
             progress_bar.empty()
-            all_paths = np.vstack(all_paths)
+            final_medoid = find_median_ending_medoid(np.vstack(seed_medoids))
 
-            final_path = find_global_modal_line(all_paths)
-            stats = compute_forecast_stats_from_path(final_path,start_capital,port_rets.index[-1])
-            backtest = {
+            stats = compute_forecast_stats_from_path(final_medoid, start_capital, port_rets.index[-1])
+            backtest_stats = {
                 "CAGR": annualized_return_monthly(port_rets),
                 "Volatility": annualized_vol_monthly(port_rets),
                 "Sharpe": annualized_sharpe_monthly(port_rets),
                 "Max Drawdown": max_drawdown_from_rets(port_rets)
             }
-
             st.subheader("Results")
-            c1,c2 = st.columns(2)
-            with c1:
-                st.markdown("**Backtest**"); [st.metric(k,f"{v:.2%}" if 'Sharpe' not in k else f"{v:.2f}") for k,v in backtest.items()]
-            with c2:
-                st.markdown("**Forecast**"); [st.metric(k,f"{v:.2%}" if 'Sharpe' not in k else f"{v:.2f}") for k,v in stats.items()]
-            st.metric("Forecasted Portfolio Value", f"${float(final_path[-1])*start_capital:,.2f}")
-            plot_forecasts(port_rets,start_capital,final_path,rebalance_label)
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("**Backtest**")
+                for k,v in backtest_stats.items(): st.metric(k, f"{v:.2%}" if 'Sharpe' not in k else f"{v:.2f}")
+            with col2:
+                st.markdown("**Forecast**")
+                for k,v in stats.items(): st.metric(k, f"{v:.2%}" if 'Sharpe' not in k else f"{v:.2f}")
+            ending_value = float(final_medoid[-1]) * start_capital
+            st.metric("Forecasted Portfolio Value", f"${ending_value:,.2f}")
+            plot_forecasts(port_rets, start_capital, final_medoid, rebalance_label)
 
             final_X = X.iloc[[-1]]
-            plot_feature_attributions(model,X,final_X)
+            plot_feature_attributions(final_model, X, final_X)
         except Exception as e:
             st.error(f"Error: {e}")
 
 if __name__ == "__main__":
     main()
+
+
