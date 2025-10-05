@@ -143,7 +143,7 @@ def _eval_params_on_split(params, train_X, train_Y, test_X, test_Y):
     return rmse, da
 
 # ---------- Optuna Tuning ----------
-def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=1000):
+def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=50):
     years = sorted(set(Y.index.year))[-years_back:]
     param_runs, details = [], []
     total_jobs = len(years)*n_trials
