@@ -142,7 +142,7 @@ def _eval_params_on_split(params, train_X, train_Y, test_X, test_Y):
     da = (np.sign(test_Y.values) == np.sign(preds)).mean()
     return rmse, da
 
-# ---------- Optuna Tuning ----------
+# ---------- FAST Optuna Tuning ----------
 def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=50):
     years = sorted(set(Y.index.year))[-years_back:]
     param_runs, details = [], []
@@ -162,7 +162,9 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
                 "max_depth": trial.suggest_int("max_depth", 2, 6),
                 "subsample": trial.suggest_float("subsample", 0.5, 1.0),
                 "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
-                "df": trial.suggest_int("df", 3, 30)
+                "df": trial.suggest_int("df", 3, 30),
+                "random_state": seed,
+                "n_jobs": 1
             }
             m = LGBMRegressor(**{k:v for k,v in p.items() if k!="df"})
             m.fit(train_X, train_Y)
@@ -170,7 +172,7 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
             rmse = np.sqrt(mean_squared_error((1+test_Y).cumprod(), (1+preds).cumprod()))
             da = (np.sign(test_Y.values)==np.sign(preds)).mean()
             completed += 1
-            if completed % 20 == 0:  # update less often
+            if completed % 10 == 0:
                 progress_bar.progress(completed/total_jobs)
                 status_text.text(f"Tuning... {int(100*completed/total_jobs)}%")
             return rmse, -da
@@ -272,7 +274,7 @@ def main():
             Y=np.log(1+port_rets.loc[df.index]).astype(np.float32)
             X=df.shift(1).dropna(); Y=Y.loc[X.index]
 
-            params,details,rmse,da=tune_across_recent_oos_years(X,Y,5,GLOBAL_SEED,1000)
+            params,details,rmse,da=tune_across_recent_oos_years(X,Y,5,GLOBAL_SEED,50)
             st.json(params); st.write(f"OOS RMSE: {rmse:.6f} | DirAcc: {da:.2%}")
 
             df_opt=int(params.get("df",5))
