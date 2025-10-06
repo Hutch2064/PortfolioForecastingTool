@@ -212,7 +212,7 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
             mdl = LGBMRegressor(**{k: v for k, v in params.items() if k != "block_length"})
             mdl.fit(Xtr, Ytr)
             preds = mdl.predict(Xte)
-            rmse = np.sqrt(mean_squared_error(Yte, preds))  # fixed: use raw returns
+            rmse = np.sqrt(mean_squared_error(Yte, preds))
             da = (np.sign(Yte) == np.sign(preds)).mean()
             done += 1
             bar.progress(done / total_jobs)
@@ -265,55 +265,46 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
                           seed_id=None, block_len=12, indicator_models=None, port_rets=None):
     horizon = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon), dtype=np.float32)
-    state = X_base.iloc[[-1]].astype(np.float32).values  # 1 x n_feats
+    state = np.repeat(X_base.iloc[[-1]].values, sims_per_seed, axis=0).astype(np.float32)  # independent per path
     hist_std = port_rets[-12:].std(ddof=0) if port_rets is not None and len(port_rets) >= 12 else np.std(residuals, ddof=0)
 
     for t in range(horizon):
-        mu_t = model.predict(state)[0]
+        mu_t = model.predict(state)
         shocks = block_bootstrap_residuals(residuals, sims_per_seed, block_len, rng)
         sim_std = np.std(shocks, ddof=0)
         if hist_std > 0 and sim_std > 0:
             shocks *= hist_std / sim_std
-        log_step = mu_t + shocks
-        log_paths[:, t] = (log_paths[:, t-1] if t > 0 else 0) + log_step
+        log_paths[:, t] = (log_paths[:, t-1] if t > 0 else 0) + mu_t + shocks
 
         df_temp = pd.DataFrame(log_paths[:, :t+1])
-        mom_3m = df_temp.diff(3, axis=1).iloc[:, -1].fillna(0)
-        mom_6m = df_temp.diff(6, axis=1).iloc[:, -1].fillna(0)
-        mom_12m = df_temp.diff(12, axis=1).iloc[:, -1].fillna(0)
-        vol_3m = df_temp.iloc[:, -3:].std(axis=1, ddof=0) if t >= 2 else np.zeros(sims_per_seed)
-        vol_6m = df_temp.iloc[:, -6:].std(axis=1, ddof=0) if t >= 5 else np.zeros(sims_per_seed)
-        vol_12m = df_temp.iloc[:, -12:].std(axis=1, ddof=0) if t >= 11 else np.zeros(sims_per_seed)
+        mom_3m = df_temp.diff(3, axis=1).iloc[:, -1].fillna(0).values
+        mom_6m = df_temp.diff(6, axis=1).iloc[:, -1].fillna(0).values
+        mom_12m = df_temp.diff(12, axis=1).iloc[:, -1].fillna(0).values
+        vol_3m = df_temp.iloc[:, -3:].std(axis=1, ddof=0).values if t >= 2 else np.zeros(sims_per_seed)
+        vol_6m = df_temp.iloc[:, -6:].std(axis=1, ddof=0).values if t >= 5 else np.zeros(sims_per_seed)
+        vol_12m = df_temp.iloc[:, -12:].std(axis=1, ddof=0).values if t >= 11 else np.zeros(sims_per_seed)
         cum_vals = np.exp(df_temp)
         dd_state = cum_vals.values[:, -1] / np.maximum.accumulate(cum_vals.values, axis=1)[:, -1] - 1
 
-        # Update feature state
-        state_new = state.copy()
-        for i, name in enumerate(["mom_3m", "mom_6m", "mom_12m",
-                                  "vol_3m", "vol_6m", "vol_12m", "dd_state"]):
+        for name, vals in zip(["mom_3m", "mom_6m", "mom_12m", "vol_3m", "vol_6m", "vol_12m", "dd_state"],
+                              [mom_3m, mom_6m, mom_12m, vol_3m, vol_6m, vol_12m, dd_state]):
             if name in X_base.columns:
                 col_idx = list(X_base.columns).index(name)
-                state_new[0, col_idx] = np.median(eval(name))
+                state[:, col_idx] = vals
+
         if indicator_models:
             for feat in ("VIX", "MOVE", "YC_Spread"):
                 if feat in indicator_models:
                     col_idx = list(X_base.columns).index(feat)
-                    state_new[0, col_idx] = float(indicator_models[feat].predict(state)[0])
-        state = state_new
+                    preds = indicator_models[feat].predict(state)
+                    state[:, col_idx] = preds
+
     return np.exp(log_paths - log_paths[:, [0]], dtype=np.float32)
 
-# ---------- Vol-Conditioned Medoid Path ----------
-def find_vol_conditioned_middle_path(paths, port_rets):
-    rolling_vol = port_rets.rolling(12).std(ddof=0) * np.sqrt(12)
-    hist_vol = rolling_vol.iloc[-1]
-    hist_vol_std = rolling_vol.iloc[-12:].std(ddof=0)
-    diffs = np.diff(np.log(paths), axis=1)
-    vols = diffs.std(axis=1) * np.sqrt(12)
-    final_vals = paths[:, -1]
-    target_vol, target_ret = np.mean(vols), np.median(final_vals)
-    dist = (vols - target_vol)**2 + ((final_vals - target_ret)/abs(target_ret + 1e-8))**2
-    med_idx = np.argmin(dist)
-    return paths[med_idx]
+# ---------- Median Forecast ----------
+def compute_median_forecast_path(paths):
+    median_vals = np.median(paths, axis=0)
+    return median_vals
 
 # ---------- Stats ----------
 def compute_forecast_stats_from_path(path, start_cap, last_date):
@@ -352,13 +343,13 @@ def plot_forecasts(port_rets, start_cap, central, reb_label):
     dates = pd.date_range(start=last, periods=len(central), freq="M")
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(port_cum.index, port_cum.values, label="Portfolio Backtest")
-    ax.plot([last, *dates], [port_cum.iloc[-1], *fore], label="Forecast (Vol-Conditioned Medoid Path)", lw=2)
+    ax.plot([last, *dates], [port_cum.iloc[-1], *fore], label="Forecast (Median Path)", lw=2)
     ax.legend()
     st.pyplot(fig)
 
 # ---------- Streamlit ----------
 def main():
-    st.title("Portfolio Forecasting Tool – Academic Revision (Log Return Framework)")
+    st.title("Portfolio Forecasting Tool – Independent Feature Evolution (Median Forecast)")
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1000000.0, 10000.0, 1000.0)
@@ -402,7 +393,7 @@ def main():
             txt.empty()
 
             paths = np.vstack(all_paths)
-            final = find_vol_conditioned_middle_path(paths, port_rets)
+            final = compute_median_forecast_path(paths)
 
             stats = compute_forecast_stats_from_path(final, start_cap, port_rets.index[-1])
             back = {
@@ -419,7 +410,7 @@ def main():
                 for k, v in back.items():
                     st.metric(k, f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
             with c2:
-                st.markdown("**Forecast (Vol-Conditioned Medoid Path)**")
+                st.markdown("**Forecast (Median Path)**")
                 for k, v in stats.items():
                     st.metric(k, f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
             st.metric("Forecasted Portfolio Value", f"${final[-1] * start_cap:,.2f}")
