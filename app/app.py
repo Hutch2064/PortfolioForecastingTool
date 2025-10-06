@@ -5,7 +5,7 @@ import os
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from typing import List
+from typing import List, Dict
 from lightgbm import LGBMRegressor
 import matplotlib.pyplot as plt
 import shap
@@ -230,19 +230,95 @@ def tune_across_recent_oos_years(X: pd.DataFrame, Y: pd.Series, years_back: int 
     consensus_params = _median_params(param_runs)
     return consensus_params, details, np.nan, np.nan
 
-# ---------- Monte Carlo ----------
-def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None, df=5):
+# ---------- Indicator Models (for exogenous features) ----------
+def train_indicator_models(X: pd.DataFrame, feats: List[str]) -> Dict[str, LGBMRegressor]:
+    models: Dict[str, LGBMRegressor] = {}
+    for f in feats:
+        if f not in X.columns:  # safety
+            continue
+        y = X[f].shift(-1)
+        idx = y.dropna().index.intersection(X.index)
+        if len(idx) < 24:  # need minimal samples
+            continue
+        y_fit = y.loc[idx]
+        X_fit = X.loc[idx]
+        mdl = LGBMRegressor(
+            n_estimators=500, max_depth=3, learning_rate=0.05,
+            subsample=0.8, colsample_bytree=0.8,
+            random_state=GLOBAL_SEED, n_jobs=1
+        )
+        mdl.fit(X_fit, y_fit)
+        models[f] = mdl
+    return models
+
+# ---------- Monte Carlo (Dynamic drift via evolving VIX/MOVE/YC_Spread; endogenous features mechanical) ----------
+def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None, df=5, indicator_models: Dict[str, LGBMRegressor]=None):
+    """
+    - Drift at month t is model.predict(current_features_t)
+    - Exogenous features (VIX, MOVE, YC_Spread) evolve via their one-step-ahead ML models (deterministic).
+    - Endogenous features (mom_3m, mom_6m, mom_12m, dd_state) evolve mechanically from simulated returns (median across sims fed back to features).
+    - Returns simulated in log space; output is price index path (starts ~1.0).
+    """
     horizon_months = FORECAST_YEARS * 12
+    # arrays per simulation
     log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
-    mu = residuals.mean()
-    sigma = residuals.std(ddof=0)
-    snapshot_X = X_base.iloc[[-1]].values.astype(np.float32)
-    last_X = np.repeat(snapshot_X, sims_per_seed, axis=0)
-    base_pred = model.predict(last_X).astype(np.float32)
+    ar_returns = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)  # arithmetic returns per step
+    # residual stats
+    mu_eps = float(residuals.mean())
+    sigma_eps = float(residuals.std(ddof=0))
+    # feature state (single vector used for predicting drift, evolves each month)
+    # Start from last observed feature row (already lagged properly via X construction)
+    feature_cols = list(X_base.columns)
+    current_state = pd.Series(X_base.iloc[-1].values, index=feature_cols).astype(np.float32)
+
+    # running cumulative value & max for drawdown (per sim)
+    cum_val = np.ones(sims_per_seed, dtype=np.float32)
+    cum_max = np.ones(sims_per_seed, dtype=np.float32)
+
+    # helper to compute momentum median across sims for last k months (arithmetic)
+    def _momentum_median(k: int, t: int) -> float:
+        start = max(0, t - k + 1)
+        if start > t: 
+            return 0.0
+        window = ar_returns[:, start:t+1]
+        if window.shape[1] == 0:
+            return 0.0
+        prod = np.prod(1.0 + window, axis=1, dtype=np.float64) - 1.0
+        return float(np.median(prod))
+
     for t in range(horizon_months):
-        shocks = student_t.rvs(df, loc=mu, scale=sigma, size=sims_per_seed, random_state=rng).astype(np.float32)
-        raw_step = base_pred + shocks
-        log_paths[:, t] = (log_paths[:, t-1] if t > 0 else 0) + raw_step
+        # 1) Predict drift given current (evolving) features
+        mu_t = float(model.predict(current_state.values.reshape(1, -1)).astype(np.float32)[0])
+
+        # 2) Simulate shocks (Student-t) around drift (log-return space)
+        shocks = student_t.rvs(df, loc=mu_eps, scale=sigma_eps, size=sims_per_seed, random_state=rng).astype(np.float32)
+        log_step = mu_t + shocks  # log(1+r_t)
+        log_paths[:, t] = (log_paths[:, t-1] if t > 0 else 0.0) + log_step
+
+        # 3) Update arithmetic returns, cumulative, drawdown
+        ar_t = np.expm1(log_step).astype(np.float32)  # convert to arithmetic return
+        ar_returns[:, t] = ar_t
+        cum_val *= (1.0 + ar_t)
+        cum_max = np.maximum(cum_max, cum_val)
+        dd_now = (cum_val / np.maximum(cum_max, 1e-12) - 1.0)  # per-sim drawdown
+        dd_med = float(np.median(dd_now))
+
+        # 4) Evolve endogenous (portfolio) features mechanically (use cross-sim medians)
+        #    These feed into next month's feature vector for drift prediction
+        current_state["mom_3m"] = np.float32(_momentum_median(3, t))
+        current_state["mom_6m"] = np.float32(_momentum_median(6, t))
+        current_state["mom_12m"] = np.float32(_momentum_median(12, t))
+        current_state["dd_state"] = np.float32(dd_med)
+
+        # 5) Evolve exogenous features via their ML one-step models (deterministic)
+        if indicator_models:
+            for feat in ("VIX", "MOVE", "YC_Spread"):
+                if feat in indicator_models and feat in current_state.index:
+                    # Predict next month level given current state vector
+                    next_val = float(indicator_models[feat].predict(current_state.values.reshape(1, -1))[0])
+                    current_state[feat] = np.float32(next_val)
+
+    # Return price index paths (start near 1.0)
     return np.exp(log_paths, dtype=np.float32)
 
 # ---------- Vol-Matched Single Path ----------
@@ -321,6 +397,7 @@ def main():
             Y = np.log(1 + port_rets.loc[df.index]).astype(np.float32)
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
+
             consensus_params, oos_details, last_rmse, last_da = tune_across_recent_oos_years(
                 X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=50
             )
@@ -336,6 +413,9 @@ def main():
             preds = final_model.predict(X).astype(np.float32)
             residuals = (Y.values - preds).astype(np.float32)
 
+            # --- Train indicator models for exogenous features (deterministic one-step evolution) ---
+            indicator_models = train_indicator_models(X, ["VIX", "MOVE", "YC_Spread"])
+
             hist_vol = annualized_vol_monthly(port_rets.iloc[-12:])
 
             all_paths = []
@@ -343,7 +423,11 @@ def main():
             sim_status = st.empty()
             for i, seed in enumerate(range(ENSEMBLE_SEEDS)):
                 rng = np.random.default_rng(GLOBAL_SEED + seed)
-                sims = run_monte_carlo_paths(final_model, X, Y, residuals, SIMS_PER_SEED, rng, seed_id=seed, df=df_opt)
+                sims = run_monte_carlo_paths(
+                    final_model, X, Y, residuals,
+                    SIMS_PER_SEED, rng, seed_id=seed, df=df_opt,
+                    indicator_models=indicator_models
+                )
                 all_paths.append(sims)
                 sim_bar.progress((i+1)/ENSEMBLE_SEEDS)
                 sim_status.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS}")
@@ -379,4 +463,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
