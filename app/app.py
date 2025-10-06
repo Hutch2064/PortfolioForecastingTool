@@ -25,7 +25,7 @@ np.random.seed(GLOBAL_SEED)
 # ---------- Config ----------
 DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 100
-SIMS_PER_SEED = 10000
+SIMS_PER_SEED = 1000
 FORECAST_YEARS = 1
 
 # ---------- Helpers ----------
@@ -376,7 +376,7 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
 
 # ---------- Streamlit App ----------
 def main():
-    st.title("Portfolio Forecasting Tool – Volatility-Matched Path")
+    st.title("Portfolio Forecasting Tool – evolving")
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
     start_capital = st.number_input("Starting Value ($)", min_value=1000.0, value=10000.0, step=1000.0)
