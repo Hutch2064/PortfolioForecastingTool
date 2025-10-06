@@ -220,7 +220,7 @@ def block_bootstrap_residuals(residuals, size, block_len, rng):
     return np.ascontiguousarray(arr)
 
 # ---------- Monte Carlo ----------
-def run_monte_carlo_paths(model, X_base, residuals, sims_per_seed, rng, block_len=12, indicator_models=None, hist_vol=None):
+def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None, block_len=12, indicator_models=None):
     horizon = FORECAST_YEARS*12
     log_paths = np.zeros((sims_per_seed,horizon),dtype=np.float32)
     ar_returns = np.zeros_like(log_paths)
@@ -235,9 +235,17 @@ def run_monte_carlo_paths(model, X_base, residuals, sims_per_seed, rng, block_le
         prod=np.prod(1+window,axis=1)-1
         return float(np.median(prod))
 
+    hist_std = np.std(residuals, ddof=0)
+
     for t in range(horizon):
         mu_t=float(model.predict(state.values.reshape(1,-1))[0])
         shocks=block_bootstrap_residuals(residuals,sims_per_seed,block_len,rng)
+
+        # Scale shocks to match historical residual volatility
+        sim_std = np.std(shocks, ddof=0)
+        if hist_std > 0 and sim_std > 0:
+            shocks *= hist_std / sim_std
+
         log_step=mu_t+shocks
         log_paths[:,t]=(log_paths[:,t-1] if t>0 else 0)+log_step
         ar_t=np.expm1(log_step); ar_returns[:,t]=ar_t
@@ -251,14 +259,6 @@ def run_monte_carlo_paths(model, X_base, residuals, sims_per_seed, rng, block_le
             for feat in("VIX","MOVE","YC_Spread"):
                 if feat in indicator_models:
                     state[feat]=float(indicator_models[feat].predict(state.values.reshape(1,-1))[0])
-
-    # --- Scale forecast volatility to match historical portfolio volatility ---
-    diffs = np.diff(np.log(np.exp(log_paths)), axis=1)
-    forecast_vol = diffs.std(axis=1).mean() * np.sqrt(12)
-    if hist_vol and forecast_vol > 0:
-        scale_factor = hist_vol / forecast_vol
-        log_paths *= scale_factor
-
     return np.exp(log_paths,dtype=np.float32)
 
 # ---------- Vol-Matched ----------
@@ -306,7 +306,7 @@ def plot_forecasts(port_rets,start_cap,central,reb_label):
 
 # ---------- Streamlit ----------
 def main():
-    st.title("Portfolio Forecasting Tool – Vol-Scaled Forecasts")
+    st.title("Portfolio Forecasting Tool – Vol-Scaled Residuals")
     tickers=st.text_input("Tickers","VTI,AGG")
     weights_str=st.text_input("Weights","0.6,0.4")
     start_cap=st.number_input("Starting Value ($)",1000.0,1000000.0,10000.0,1000.0)
@@ -338,7 +338,7 @@ def main():
             all_paths=[]; bar=st.progress(0); txt=st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng=np.random.default_rng(GLOBAL_SEED+i)
-                sims=run_monte_carlo_paths(model,X,res,SIMS_PER_SEED,rng,blk_len,indicators,hist_vol)
+                sims=run_monte_carlo_paths(model,X,Y,res,SIMS_PER_SEED,rng,i,blk_len,indicators)
                 all_paths.append(sims)
                 bar.progress((i+1)/ENSEMBLE_SEEDS)
                 txt.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS}")
@@ -372,8 +372,3 @@ def main():
 
 if __name__=="__main__":
     main()
-
-
-
-
-
