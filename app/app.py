@@ -35,7 +35,6 @@ def to_weights(raw: List[float]) -> np.ndarray:
         raise ValueError("Weights must sum to a positive number.")
     return arr / s
 
-
 def annualized_return_monthly(m):
     m = m.dropna()
     if m.empty:
@@ -44,11 +43,9 @@ def annualized_return_monthly(m):
     years = len(m) / 12.0
     return compounded ** (1 / years) - 1 if years > 0 else np.nan
 
-
 def annualized_vol_monthly(m):
     m = m.dropna()
     return m.std(ddof=0) * np.sqrt(12) if len(m) > 1 else np.nan
-
 
 def annualized_sharpe_monthly(m, rf_monthly=0.0):
     m = m.dropna()
@@ -58,25 +55,23 @@ def annualized_sharpe_monthly(m, rf_monthly=0.0):
     mu, sigma = excess.mean(), excess.std(ddof=0)
     return (mu / sigma) * np.sqrt(12) if sigma and sigma > 0 else np.nan
 
-
 def max_drawdown_from_rets(returns):
     cum = np.exp(returns.cumsum())
     roll_max = cum.cummax()
     return (cum / roll_max - 1.0).min()
-
 
 def compute_current_drawdown(returns):
     cum = np.exp(returns.cumsum())
     roll_max = cum.cummax()
     return (cum / roll_max - 1.0).astype(np.float32)
 
-
 def realized_vol(returns, window):
     return returns.rolling(window).std(ddof=0)
 
 # ---------- Data Fetch ----------
 def fetch_prices_monthly(tickers, start=DEFAULT_START):
-    data = yf.download(tickers, start=start, interval="1mo", auto_adjust=False, progress=False, threads=False)
+    data = yf.download(tickers, start=start, interval="1mo",
+                       auto_adjust=False, progress=False, threads=False)
     if data.empty:
         raise ValueError("No price data returned.")
     if isinstance(data.columns, pd.MultiIndex):
@@ -94,10 +89,10 @@ def fetch_prices_monthly(tickers, start=DEFAULT_START):
         df.columns = df.columns.get_level_values(1)
     return df.dropna(how="all")
 
-
 def fetch_macro_features(start=DEFAULT_START):
     tickers = ["^VIX", "^MOVE", "^TNX", "^IRX"]
-    data = yf.download(tickers, start=start, interval="1mo", progress=False, threads=False)
+    data = yf.download(tickers, start=start, interval="1mo",
+                       progress=False, threads=False)
     close = data["Close"].ffill().astype(np.float32)
     df = pd.DataFrame(index=close.index)
     df["VIX"] = close["^VIX"]
@@ -105,7 +100,7 @@ def fetch_macro_features(start=DEFAULT_START):
     df["YC_Spread"] = close["^TNX"] - close["^IRX"]
     return df
 
-# ---------- Portfolio (fixed drift) ----------
+# ---------- Portfolio ----------
 def portfolio_log_returns_monthly(prices, weights, rebalance):
     rets = np.log(prices / prices.shift(1)).dropna().astype(np.float32)
     if rebalance == "N":
@@ -119,7 +114,6 @@ def portfolio_log_returns_monthly(prices, weights, rebalance):
     if not rule:
         raise ValueError("Invalid rebalance option.")
 
-    n_assets = rets.shape[1]
     weights0 = weights.copy()
     holdings = weights0.astype(np.float64)
     port_vals = []
@@ -149,7 +143,8 @@ def build_features(returns):
     df["dd_state"] = compute_current_drawdown(returns)
     macro = fetch_macro_features()
     df = df.join(macro, how="left").ffill()
-    valid_start = max([df[c].first_valid_index() for c in df.columns if df[c].first_valid_index()])
+    valid_start = max([df[c].first_valid_index()
+                       for c in df.columns if df[c].first_valid_index()])
     df = df.loc[valid_start:].dropna()
     return df.astype(np.float32)
 
@@ -163,7 +158,6 @@ def _oos_years_available(idx, max_years=5):
             full.append(y)
     return full[-max_years:]
 
-
 def _split_train_test_for_year(X, Y, y):
     train_end = pd.Timestamp(f"{y-1}-12-31")
     test_start = pd.Timestamp(f"{y}-01-01")
@@ -172,7 +166,6 @@ def _split_train_test_for_year(X, Y, y):
     test_X = X.loc[test_start:]
     test_Y = Y.loc[test_X.index]
     return train_X, train_Y, test_X, test_Y
-
 
 def _median_params(params_list):
     if not params_list:
@@ -192,7 +185,6 @@ def _median_params(params_list):
     out["random_state"] = GLOBAL_SEED
     out["n_jobs"] = 1
     return out
-
 
 def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=50):
     years = _oos_years_available(Y.index, years_back)
@@ -271,7 +263,7 @@ def block_bootstrap_residuals(residuals, size, block_len, rng):
     flat = residuals[idx[:size]]
     return np.ascontiguousarray(flat)
 
-# ---------- Monte Carlo (no residual-vol scaling) ----------
+# ---------- Monte Carlo ----------
 def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
                           seed_id=None, block_len=12, indicator_models=None, port_rets=None):
     horizon = FORECAST_YEARS * 12
@@ -286,12 +278,12 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
         df_temp = pd.DataFrame(log_paths[:, :t+1])
         inc = df_temp.diff(axis=1)
 
-        mom_3m  = df_temp.diff(3,  axis=1).iloc[:, -1].fillna(0).values
-        mom_6m  = df_temp.diff(6,  axis=1).iloc[:, -1].fillna(0).values
+        mom_3m = df_temp.diff(3, axis=1).iloc[:, -1].fillna(0).values
+        mom_6m = df_temp.diff(6, axis=1).iloc[:, -1].fillna(0).values
         mom_12m = df_temp.diff(12, axis=1).iloc[:, -1].fillna(0).values
 
-        vol_3m  = inc.iloc[:, -3:].std(axis=1, ddof=0).values  if t >= 2  else np.zeros(sims_per_seed)
-        vol_6m  = inc.iloc[:, -6:].std(axis=1, ddof=0).values  if t >= 5  else np.zeros(sims_per_seed)
+        vol_3m = inc.iloc[:, -3:].std(axis=1, ddof=0).values if t >= 2 else np.zeros(sims_per_seed)
+        vol_6m = inc.iloc[:, -6:].std(axis=1, ddof=0).values if t >= 5 else np.zeros(sims_per_seed)
         vol_12m = inc.iloc[:, -12:].std(axis=1, ddof=0).values if t >= 11 else np.zeros(sims_per_seed)
 
         cum_vals = np.exp(df_temp)
@@ -314,7 +306,7 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
 
     return np.exp(log_paths - log_paths[:, [0]], dtype=np.float32)
 
-# ---------- True Medoid Path ----------
+# ---------- Medoid ----------
 def compute_medoid_path(paths):
     log_paths = np.log(paths)
     diffs = np.diff(log_paths, axis=1)
@@ -329,7 +321,7 @@ def compute_medoid_path(paths):
 # ---------- Stats ----------
 def compute_forecast_stats_from_path(path, start_cap, last_date):
     norm = path / path[0]
-    idx = pd.date_range(start=last_date, periods=len(norm) + 1, freq="M")
+    idx = pd.date_range(start=last_date, periods=len(norm)+1, freq="M")
     price = pd.Series(norm, index=idx[:-1]) * start_cap
     rets = np.log(price / price.shift(1)).dropna()
     return {
@@ -339,21 +331,61 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
         "Max Drawdown": max_drawdown_from_rets(rets),
     }
 
-# ---------- SHAP ----------
-def plot_feature_attributions(model, X, final_X):
-    expl = shap.TreeExplainer(model)
-    sh_hist = np.abs(expl.shap_values(X)).mean(axis=0)
-    sh_fore = np.abs(expl.shap_values(final_X)).reshape(-1)
+# ---------- SHAP (Enhanced Ensemble Version) ----------
+def plot_feature_attributions(ensemble_models, X, final_X, Y):
+    st.subheader("Model Explainability (Ensemble-Averaged SHAP)")
+    shap_values_all = []
+    for mdl in ensemble_models:
+        expl = shap.TreeExplainer(mdl)
+        sv = expl.shap_values(X)
+        shap_values_all.append(np.abs(sv).mean(axis=0))
+    avg_shap = np.mean(shap_values_all, axis=0)
     feats = X.columns
-    pos = np.arange(len(feats))
+    shap_df = pd.DataFrame({"Feature": feats, "MeanAbsSHAP": avg_shap})
+    shap_df.sort_values("MeanAbsSHAP", ascending=False, inplace=True)
+    total_shap_mag = shap_df["MeanAbsSHAP"].sum()
+    pred_mean = np.mean([mdl.predict(X).mean() for mdl in ensemble_models])
+    shap_df["Pct_of_Total_Return"] = (
+        100 * shap_df["MeanAbsSHAP"] / total_shap_mag if total_shap_mag > 0 else 0
+    )
+    shap_df["MeanAbsSHAP_pct"] = shap_df["MeanAbsSHAP"] * 100
+    model_preds = np.concatenate([mdl.predict(X) for mdl in ensemble_models])
+    residuals = Y.values.flatten() - model_preds
+    explained_pct = 100 * total_shap_mag / (np.abs(Y.values.flatten()).mean() + 1e-9)
+    unexplained_pct = max(0, 100 - explained_pct)
+    st.markdown(f"**Avg Monthly Predicted Return:** {pred_mean*100:.2f}%")
+    st.markdown(f"**SHAP-Explained Portion:** {explained_pct:.1f}%")
+    st.markdown(f"**Residual (Unexplained):** {unexplained_pct:.1f}%")
+
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.bar(pos - 0.2, sh_hist, width=0.4, label="Backtest Avg")
-    ax.bar(pos + 0.2, sh_fore, width=0.4, label="Forecast Snapshot")
-    ax.set_xticks(pos)
-    ax.set_xticklabels(feats, rotation=45, ha="right")
-    ax.set_ylabel("Average |SHAP Value|")
-    ax.legend()
+    ax.barh(shap_df["Feature"], shap_df["MeanAbsSHAP_pct"], color="skyblue")
+    ax.set_xlabel("Mean |SHAP| (percentage points of return)")
+    ax.set_title("Feature Importance (Ensemble-Averaged)")
+    plt.gca().invert_yaxis()
     st.pyplot(fig)
+
+    st.markdown("### Top Feature Interactions")
+    base_model = ensemble_models[0]
+    expl = shap.TreeExplainer(base_model)
+    try:
+        inter_vals = expl.shap_interaction_values(X)
+        inter_mean = np.abs(inter_vals).mean(axis=0)
+        np.fill_diagonal(inter_mean, 0)
+        top_pairs = []
+        for i in range(len(feats)):
+            for j in range(i+1, len(feats)):
+                top_pairs.append((feats[i], feats[j], inter_mean[i, j]))
+        top_pairs = sorted(top_pairs, key=lambda x: x[2], reverse=True)[:10]
+        inter_df = pd.DataFrame(top_pairs, columns=["Feature1", "Feature2", "MeanAbsInteraction"])
+        fig2, ax2 = plt.subplots(figsize=(10, 5))
+        ax2.barh([f"{a} × {b}" for a,b,_ in top_pairs],
+                 [v*100 for _,_,v in top_pairs], color="salmon")
+        ax2.set_xlabel("Mean |Interaction SHAP| (percentage points)")
+        ax2.set_title("Top Feature Interactions")
+        plt.gca().invert_yaxis()
+        st.pyplot(fig2)
+    except Exception as e:
+        st.warning(f"Could not compute interaction values: {e}")
 
 # ---------- Plot ----------
 def plot_forecasts(port_rets, start_cap, central, reb_label):
@@ -363,7 +395,8 @@ def plot_forecasts(port_rets, start_cap, central, reb_label):
     dates = pd.date_range(start=last, periods=len(central), freq="M")
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(port_cum.index, port_cum.values, label="Portfolio Backtest")
-    ax.plot([last, *dates], [port_cum.iloc[-1], *fore], label="Forecast (Medoid Path)", lw=2)
+    ax.plot([last, *dates], [port_cum.iloc[-1], *fore],
+            label="Forecast (Medoid Path)", lw=2)
     ax.legend()
     st.pyplot(fig)
 
@@ -387,24 +420,26 @@ def main():
             Y = port_rets.loc[df.index].astype(np.float32)
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
-
             cons, _, _, _ = tune_across_recent_oos_years(X, Y, 5, GLOBAL_SEED, 50)
             st.json(cons)
             blk_len = int(cons.get("block_length", 12))
             lgb_params = {k: v for k, v in cons.items() if k != "block_length"}
-            model = LGBMRegressor(**lgb_params)
-            model.fit(X, Y)
-            res = (Y.values - model.predict(X)).astype(np.float32)
-            res = np.ascontiguousarray(res[~np.isnan(res)])
 
-            indicators = train_indicator_models(X, ["VIX", "MOVE", "YC_Spread"])
-
-            all_paths = []
+            ensemble_models, all_paths = [], []
             bar = st.progress(0)
             txt = st.empty()
+            indicators = train_indicator_models(X, ["VIX", "MOVE", "YC_Spread"])
+            res = None
+
             for i in range(ENSEMBLE_SEEDS):
                 rng = np.random.default_rng(GLOBAL_SEED + i)
-                sims = run_monte_carlo_paths(model, X, Y, res, SIMS_PER_SEED, rng,
+                mdl = LGBMRegressor(**lgb_params)
+                mdl.fit(X, Y)
+                if res is None:
+                    res = (Y.values - mdl.predict(X)).astype(np.float32)
+                    res = np.ascontiguousarray(res[~np.isnan(res)])
+                ensemble_models.append(mdl)
+                sims = run_monte_carlo_paths(mdl, X, Y, res, SIMS_PER_SEED, rng,
                                              i, blk_len, indicators, port_rets)
                 all_paths.append(sims)
                 bar.progress((i + 1) / ENSEMBLE_SEEDS)
@@ -414,7 +449,6 @@ def main():
 
             paths = np.vstack(all_paths)
             final = compute_medoid_path(paths)
-
             stats = compute_forecast_stats_from_path(final, start_cap, port_rets.index[-1])
             back = {
                 "CAGR": annualized_return_monthly(port_rets),
@@ -436,7 +470,7 @@ def main():
             st.metric("Forecasted Portfolio Value", f"${final[-1] * start_cap:,.2f}")
 
             plot_forecasts(port_rets, start_cap, final, reb_label)
-            plot_feature_attributions(model, X, X.iloc[[-1]])
+            plot_feature_attributions(ensemble_models, X, X.iloc[[-1]], Y)
 
         except Exception as e:
             st.error(f"Error: {e}")
