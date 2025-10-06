@@ -255,9 +255,10 @@ def train_indicator_models(X, feats):
 def block_bootstrap_residuals(residuals, size, block_len, rng):
     n = len(residuals)
     valid_starts = np.arange(0, n - block_len + 1)
-    starts = rng.choice(valid_starts, size // block_len, replace=True)
-    idx = (starts[:, None] + np.arange(block_len)).ravel()
-    flat = residuals[idx[:size]]
+    # Oversample slightly to guarantee full output length
+    starts = rng.choice(valid_starts, (size // block_len) + 2, replace=True)
+    idx = (starts[:, None] + np.arange(block_len)).ravel()[:size]
+    flat = residuals[idx]
     return np.ascontiguousarray(flat)
 
 # ---------- Monte Carlo ----------
@@ -437,7 +438,7 @@ def main():
             st.error(f"Error: {e}")
 
 if __name__ == "__main__":
-    main()
+
 
 
 
