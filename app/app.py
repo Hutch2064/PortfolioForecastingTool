@@ -349,7 +349,7 @@ def plot_forecasts(port_rets, start_cap, central, reb_label):
 
 # ---------- Streamlit ----------
 def main():
-    st.title("Portfolio Forecasting Tool – Independent Feature Evolution (Median Forecast)")
+    st.title("Portfolio Forecasting Tool")
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1000000.0, 10000.0, 1000.0)
