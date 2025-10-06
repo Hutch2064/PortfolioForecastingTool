@@ -146,7 +146,7 @@ def build_features(returns: pd.Series) -> pd.DataFrame:
     df = df.loc[valid_start:].dropna()
     return df.astype(np.float32)
 
-# ---------- Optuna Hyperparameter Tuning (single split, kept for compatibility) ----------
+# ---------- Optuna Hyperparameter Tuning ----------
 def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
     train_X, test_X = X.iloc[:-12], X.iloc[-12:]
     train_Y, test_Y = Y.iloc[:-12], Y.iloc[-12:]
@@ -158,7 +158,7 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
             "max_depth": trial.suggest_int("max_depth", 2, 6),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
-            "df": trial.suggest_int("df", 3, 30),   # <-- tune degrees of freedom
+            "df": trial.suggest_int("df", 3, 30),
             "random_state": seed,
             "n_jobs": 1
         }
@@ -166,15 +166,12 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
         model = LGBMRegressor(**model_params)
         model.fit(train_X, train_Y)
         preds = model.predict(test_X)
-
         actual_cum = (1 + test_Y).cumprod()
         pred_cum = (1 + preds).cumprod()
         rmse = np.sqrt(mean_squared_error(actual_cum, pred_cum))
-
         actual_dir = np.sign(test_Y.values)
         pred_dir = np.sign(preds)
         directional_acc = (actual_dir == pred_dir).mean()
-
         return rmse, -directional_acc
 
     study = optuna.create_study(
@@ -182,21 +179,18 @@ def tune_and_fit_best_model(X: pd.DataFrame, Y: pd.Series, seed=GLOBAL_SEED):
         sampler=optuna.samplers.TPESampler(seed=seed)
     )
     study.optimize(objective, n_trials=50, show_progress_bar=False)
-
     best_trial = study.best_trials[0]
     best_params_full = dict(best_trial.params)
     best_rmse = float(best_trial.values[0])
     best_da = -float(best_trial.values[1])
-
     lgbm_params = {k:v for k,v in best_params_full.items() if k != "df"}
     final_model = LGBMRegressor(**lgbm_params, random_state=seed, n_jobs=1)
     final_model.fit(X, Y)
     preds = final_model.predict(X).astype(np.float32)
     residuals = (Y.values - preds).astype(np.float32)
-
     return final_model, residuals, preds, X.astype(np.float32), Y.astype(np.float32), best_params_full, best_rmse, best_da
 
-# ---------- NEW: helpers for multi-year OOS tuning ----------
+# ---------- Helpers for multi-year OOS tuning ----------
 def _oos_years_available(idx: pd.DatetimeIndex, max_years=5) -> List[int]:
     years = sorted(set(idx.year))
     complete_years = []
@@ -216,7 +210,6 @@ def _split_train_test_for_year(X: pd.DataFrame, Y: pd.Series, test_year: int):
     test_Y = Y.loc[test_X.index]
     return train_X, train_Y, test_X, test_Y
 
-# ---- missing helpers added here ----
 def _median_params(param_dicts: List[dict]) -> dict:
     if not param_dicts: return {}
     all_keys = set().union(*[d.keys() for d in param_dicts])
@@ -251,22 +244,18 @@ def _eval_params_on_split(params: dict, train_X, train_Y, test_X, test_Y, seed=G
     pred_dir = np.sign(preds)
     directional_acc = (actual_dir == pred_dir).mean()
     return rmse, directional_acc
-# -----------------------------------
 
 def tune_across_recent_oos_years(X: pd.DataFrame, Y: pd.Series, years_back: int = 5, seed: int = GLOBAL_SEED, n_trials: int = 50):
     years = _oos_years_available(Y.index, max_years=years_back)
     param_runs, details = [], []
-
     total_jobs = len(years) * n_trials
     progress_bar = st.progress(0)
     status_text = st.empty()
     completed = 0
-
     for y in years:
         train_X, train_Y, test_X, test_Y = _split_train_test_for_year(X, Y, y)
         if len(train_X) < 24 or len(test_X) < 6:
             continue
-
         def objective(trial):
             nonlocal completed
             params = {
@@ -283,31 +272,24 @@ def tune_across_recent_oos_years(X: pd.DataFrame, Y: pd.Series, years_back: int 
             model = LGBMRegressor(**model_params)
             model.fit(train_X, train_Y)
             preds = model.predict(test_X)
-
             actual_cum = (1 + test_Y).cumprod()
             pred_cum = (1 + preds).cumprod()
             rmse = np.sqrt(mean_squared_error(actual_cum, pred_cum))
-
             actual_dir = np.sign(test_Y.values)
             pred_dir = np.sign(preds)
             directional_acc = (actual_dir == pred_dir).mean()
-
             completed += 1
-            percent = int((completed / total_jobs) * 100)
             progress_bar.progress(completed / total_jobs)
-            status_text.text(f"Tuning... {percent}%")
+            status_text.text(f"Tuning... {int((completed/total_jobs)*100)}%")
             return rmse, -directional_acc
-
         study = optuna.create_study(
             directions=["minimize", "minimize"],
             sampler=optuna.samplers.TPESampler(seed=seed)
         )
         study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
-
         best = study.best_trials[0]
         details.append({"year": y, "rmse": float(best.values[0]), "da": -float(best.values[1]), "best_params": dict(best.params)})
         param_runs.append(dict(best.params))
-
     consensus_params = _median_params(param_runs)
     last_rmse, last_da = np.nan, np.nan
     if years:
@@ -315,7 +297,6 @@ def tune_across_recent_oos_years(X: pd.DataFrame, Y: pd.Series, years_back: int 
         trX, trY, teX, teY = _split_train_test_for_year(X, Y, last_year)
         if len(trX) > 0 and len(teX) > 0:
             last_rmse, last_da = _eval_params_on_split(consensus_params, trX, trY, teX, teY, seed=seed)
-
     return consensus_params, details, last_rmse, last_da
 
 # ---------- Median-Ending Subset Medoid ----------
@@ -334,39 +315,20 @@ def find_median_ending_medoid(paths: np.ndarray):
     best_idx = np.argmax(scores)
     return subset[best_idx]
 
-# ---------- Monte Carlo (Multivariate Student-t Residuals) ----------
+# ---------- Monte Carlo (Fixed for Real Returns) ----------
 def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None, df=5):
     horizon_months = FORECAST_YEARS * 12
-    log_paths = np.zeros((sims_per_seed, horizon_months), dtype=np.float32)
-
+    price_paths = np.ones((sims_per_seed, horizon_months), dtype=np.float32)
     mu = residuals.mean()
     sigma = residuals.std(ddof=0)
-
     snapshot_X = X_base.iloc[[-1]].values.astype(np.float32)
     last_X = np.repeat(snapshot_X, sims_per_seed, axis=0)
     base_pred = model.predict(last_X).astype(np.float32)
-
     for t in range(horizon_months):
         shocks = student_t.rvs(df, loc=mu, scale=sigma, size=sims_per_seed, random_state=rng).astype(np.float32)
-        raw_step = base_pred + shocks
-        log_paths[:, t] = (log_paths[:, t-1] if t > 0 else 0) + raw_step
-
-    return np.exp(log_paths, dtype=np.float32)
-
-# ---------- Forecast Stats ----------
-def compute_forecast_stats_from_path(path: np.ndarray, start_capital: float, last_date: pd.Timestamp):
-    if path is None or len(path) == 0:
-        return {"CAGR": np.nan, "Volatility": np.nan, "Sharpe": np.nan, "Max Drawdown": np.nan}
-    norm_path = path / path[0]
-    forecast_index = pd.date_range(start=last_date, periods=len(norm_path)+1, freq="M")
-    price = pd.Series(norm_path, index=forecast_index[:-1]) * start_capital
-    monthly = price.pct_change().dropna()
-    return {
-        "CAGR": annualized_return_monthly(monthly),
-        "Volatility": annualized_vol_monthly(monthly),
-        "Sharpe": annualized_sharpe_monthly(monthly),
-        "Max Drawdown": max_drawdown_from_rets(monthly)
-    }
+        returns_t = base_pred + shocks
+        price_paths[:, t] = (price_paths[:, t-1] if t > 0 else 1) * (1 + returns_t)
+    return price_paths
 
 # ---------- SHAP ----------
 def plot_feature_attributions(model, X, final_X):
@@ -428,21 +390,16 @@ def main():
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
 
-            # ---- NEW: run 5× yearly OOS tuning and take per-parameter median ----
             consensus_params, oos_details, last_rmse, last_da = tune_across_recent_oos_years(
                 X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=50
             )
 
-            # Show "Best Params" as the consensus
             st.write("**Best Params (per-parameter median across last 5 OOS years):**")
             st.json(consensus_params)
-
-            # Show OOS metrics for the most recent split using consensus params
             st.write("**OOS 12m RMSE:**", f"{last_rmse:.6f}")
             st.write("**OOS 12m Directional Accuracy:**", f"{last_da:.2%}")
 
-            # Final model on full history with consensus params
-            df_opt = int(consensus_params.get("df", 5))  # best df from consensus
+            df_opt = int(consensus_params.get("df", 5))
             lgbm_params = {k:v for k,v in consensus_params.items() if k != "df"}
             lgbm_params["random_state"] = GLOBAL_SEED
             lgbm_params["n_jobs"] = 1
@@ -466,13 +423,22 @@ def main():
             progress_bar.empty()
             final_medoid = find_median_ending_medoid(np.vstack(seed_medoids))
 
-            stats = compute_forecast_stats_from_path(final_medoid, start_capital, port_rets.index[-1])
+            # ----- Compute realistic stats from same forecast path -----
+            forecast_returns = pd.Series(final_medoid).pct_change().dropna()
+            stats = {
+                "CAGR": annualized_return_monthly(forecast_returns),
+                "Volatility": annualized_vol_monthly(forecast_returns),
+                "Sharpe": annualized_sharpe_monthly(forecast_returns),
+                "Max Drawdown": max_drawdown_from_rets(forecast_returns),
+            }
+
             backtest_stats = {
                 "CAGR": annualized_return_monthly(port_rets),
                 "Volatility": annualized_vol_monthly(port_rets),
                 "Sharpe": annualized_sharpe_monthly(port_rets),
                 "Max Drawdown": max_drawdown_from_rets(port_rets)
             }
+
             st.subheader("Results")
             col1, col2 = st.columns(2)
             with col1:
@@ -481,10 +447,11 @@ def main():
             with col2:
                 st.markdown("**Forecast**")
                 for k,v in stats.items(): st.metric(k, f"{v:.2%}" if 'Sharpe' not in k else f"{v:.2f}")
+
             ending_value = float(final_medoid[-1]) * start_capital
             st.metric("Forecasted Portfolio Value", f"${ending_value:,.2f}")
-            plot_forecasts(port_rets, start_capital, final_medoid, rebalance_label)
 
+            plot_forecasts(port_rets, start_capital, final_medoid, rebalance_label)
             final_X = X.iloc[[-1]]
             plot_feature_attributions(final_model, X, final_X)
         except Exception as e:
@@ -492,6 +459,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
