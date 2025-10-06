@@ -219,12 +219,7 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
         study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
         best = study.best_trials[0]
         details.append(
-            {
-                "year": y,
-                "rmse": float(best.values[0]),
-                "da": -float(best.values[1]),
-                "best_params": dict(best.params),
-            }
+            {"year": y, "rmse": float(best.values[0]), "da": -float(best.values[1]), "best_params": dict(best.params)}
         )
         params_all.append(dict(best.params))
     bar.empty()
@@ -268,7 +263,8 @@ def block_bootstrap_residuals(residuals, size, block_len, rng):
     return np.ascontiguousarray(arr)
 
 # ---------- Monte Carlo ----------
-def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None, block_len=12, indicator_models=None, port_rets=None):
+def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None,
+                          block_len=12, indicator_models=None, port_rets=None):
     horizon = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon), dtype=np.float32)
     ar_returns = np.zeros_like(log_paths)
@@ -284,7 +280,7 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
 
     def _mom_med(k, t):
         start = max(0, t - k + 1)
-        window = ar_returns[:, start : t + 1]
+        window = ar_returns[:, start:t + 1]
         if window.shape[1] == 0:
             return 0.0
         prod = np.prod(1 + window, axis=1) - 1
@@ -313,24 +309,29 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
                     state[feat] = float(indicator_models[feat].predict(state.values.reshape(1, -1))[0])
     return np.exp(log_paths, dtype=np.float32)
 
-# ---------- Volatility-Conditioned Medoid ----------
-def find_vol_conditioned_medoid(paths, port_rets):
+# ---------- Volatility-Conditioned Median-Rank Path ----------
+def find_vol_conditioned_path(paths, port_rets):
     rolling_vol = port_rets.rolling(12).std(ddof=0) * np.sqrt(12)
     hist_vol = rolling_vol.iloc[-1]
     hist_vol_std = rolling_vol.iloc[-12:].std(ddof=0)
 
+    # Compute realized vol of each path
     diffs = np.diff(np.log(paths), axis=1)
     vols = diffs.std(axis=1) * np.sqrt(12)
 
+    # Keep only paths within ±1σ of past-12m realized volatility
     lower = hist_vol - hist_vol_std
     upper = hist_vol + hist_vol_std
     mask = (vols >= lower) & (vols <= upper)
     subset = paths[mask] if mask.sum() > 0 else paths
 
-    median_shape = np.median(subset, axis=0)
-    dist = np.linalg.norm(subset - median_shape, axis=1)
-    medoid = subset[np.argmin(dist)]
-    return medoid
+    # Compute rank at each timestep, find the path most "median-ranked" across time
+    ranks = np.argsort(np.argsort(subset, axis=0), axis=0)
+    median_rank = ranks.shape[0] // 2
+    avg_rank_distance = np.abs(ranks - median_rank).mean(axis=1)
+    chosen_idx = np.argmin(avg_rank_distance)
+    central_path = subset[chosen_idx]
+    return central_path
 
 # ---------- Stats ----------
 def compute_forecast_stats_from_path(path, start_cap, last_date):
@@ -369,13 +370,13 @@ def plot_forecasts(port_rets, start_cap, central, reb_label):
     dates = pd.date_range(start=last, periods=len(central), freq="M")
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(port_cum.index, port_cum.values, label="Portfolio Backtest")
-    ax.plot([last, *dates], [port_cum.iloc[-1], *fore], label="Forecast (Vol-Conditioned Medoid)", lw=2)
+    ax.plot([last, *dates], [port_cum.iloc[-1], *fore], label="Forecast (Median-Rank Path)", lw=2)
     ax.legend()
     st.pyplot(fig)
 
 # ---------- Streamlit ----------
 def main():
-    st.title("Portfolio Forecasting Tool – Vol-Conditioned Medoid (12-Month Scaled Residuals)")
+    st.title("Portfolio Forecasting Tool – Vol-Conditioned Median-Rank Path (12-Month Scaled Residuals)")
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1000000.0, 10000.0, 1000.0)
@@ -410,7 +411,8 @@ def main():
             txt = st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng = np.random.default_rng(GLOBAL_SEED + i)
-                sims = run_monte_carlo_paths(model, X, Y, res, SIMS_PER_SEED, rng, i, blk_len, indicators, port_rets)
+                sims = run_monte_carlo_paths(model, X, Y, res, SIMS_PER_SEED, rng,
+                                             i, blk_len, indicators, port_rets)
                 all_paths.append(sims)
                 bar.progress((i + 1) / ENSEMBLE_SEEDS)
                 txt.text(f"Running forecasts... {i + 1}/{ENSEMBLE_SEEDS}")
@@ -418,7 +420,7 @@ def main():
             txt.empty()
 
             paths = np.vstack(all_paths)
-            final = find_vol_conditioned_medoid(paths, port_rets)
+            final = find_vol_conditioned_path(paths, port_rets)
 
             stats = compute_forecast_stats_from_path(final, start_cap, port_rets.index[-1])
             back = {
@@ -435,7 +437,7 @@ def main():
                 for k, v in back.items():
                     st.metric(k, f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
             with c2:
-                st.markdown("**Forecast (Vol-Conditioned Medoid)**")
+                st.markdown("**Forecast (Median-Rank Path)**")
                 for k, v in stats.items():
                     st.metric(k, f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
             st.metric("Forecasted Portfolio Value", f"${final[-1] * start_cap:,.2f}")
@@ -448,6 +450,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
