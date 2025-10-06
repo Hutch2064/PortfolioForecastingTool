@@ -268,7 +268,7 @@ def block_bootstrap_residuals(residuals, size, block_len, rng):
     return np.ascontiguousarray(arr)
 
 # ---------- Monte Carlo ----------
-def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None, block_len=12, indicator_models=None):
+def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None, block_len=12, indicator_models=None, port_rets=None):
     horizon = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon), dtype=np.float32)
     ar_returns = np.zeros_like(log_paths)
@@ -276,7 +276,11 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
     cum_val = np.ones(sims_per_seed, dtype=np.float32)
     cum_max = np.ones_like(cum_val)
 
-    hist_std = np.std(residuals, ddof=0)
+    # Scale shocks to match most recent 12-month realized volatility of the portfolio
+    if port_rets is not None and len(port_rets) >= 12:
+        hist_std = port_rets[-12:].std(ddof=0)
+    else:
+        hist_std = port_rets.std(ddof=0) if port_rets is not None else np.std(residuals, ddof=0)
 
     def _mom_med(k, t):
         start = max(0, t - k + 1)
@@ -371,7 +375,7 @@ def plot_forecasts(port_rets, start_cap, central, reb_label):
 
 # ---------- Streamlit ----------
 def main():
-    st.title("Portfolio Forecasting Tool – Vol-Conditioned Medoid")
+    st.title("Portfolio Forecasting Tool – Vol-Conditioned Medoid (12-Month Scaled Residuals)")
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1000000.0, 10000.0, 1000.0)
@@ -406,7 +410,7 @@ def main():
             txt = st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng = np.random.default_rng(GLOBAL_SEED + i)
-                sims = run_monte_carlo_paths(model, X, Y, res, SIMS_PER_SEED, rng, i, blk_len, indicators)
+                sims = run_monte_carlo_paths(model, X, Y, res, SIMS_PER_SEED, rng, i, blk_len, indicators, port_rets)
                 all_paths.append(sims)
                 bar.progress((i + 1) / ENSEMBLE_SEEDS)
                 txt.text(f"Running forecasts... {i + 1}/{ENSEMBLE_SEEDS}")
@@ -444,6 +448,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
