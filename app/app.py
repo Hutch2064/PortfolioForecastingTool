@@ -220,7 +220,7 @@ def block_bootstrap_residuals(residuals, size, block_len, rng):
     return np.ascontiguousarray(arr)
 
 # ---------- Monte Carlo ----------
-def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None, block_len=12, indicator_models=None):
+def run_monte_carlo_paths(model, X_base, residuals, sims_per_seed, rng, block_len=12, indicator_models=None, hist_vol=None):
     horizon = FORECAST_YEARS*12
     log_paths = np.zeros((sims_per_seed,horizon),dtype=np.float32)
     ar_returns = np.zeros_like(log_paths)
@@ -251,6 +251,14 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
             for feat in("VIX","MOVE","YC_Spread"):
                 if feat in indicator_models:
                     state[feat]=float(indicator_models[feat].predict(state.values.reshape(1,-1))[0])
+
+    # --- Scale forecast volatility to match historical portfolio volatility ---
+    diffs = np.diff(np.log(np.exp(log_paths)), axis=1)
+    forecast_vol = diffs.std(axis=1).mean() * np.sqrt(12)
+    if hist_vol and forecast_vol > 0:
+        scale_factor = hist_vol / forecast_vol
+        log_paths *= scale_factor
+
     return np.exp(log_paths,dtype=np.float32)
 
 # ---------- Vol-Matched ----------
@@ -293,12 +301,12 @@ def plot_forecasts(port_rets,start_cap,central,reb_label):
     dates=pd.date_range(start=last,periods=len(central),freq="M")
     fig,ax=plt.subplots(figsize=(12,6))
     ax.plot(port_cum.index,port_cum.values,label="Portfolio Backtest")
-    ax.plot([last,*dates],[port_cum.iloc[-1],*fore],label="Forecast (Vol-Matched)",lw=2)
+    ax.plot([last,*dates],[port_cum.iloc[-1],*fore],label="Forecast (Vol-Scaled)",lw=2)
     ax.legend(); st.pyplot(fig)
 
 # ---------- Streamlit ----------
 def main():
-    st.title("Portfolio Forecasting Tool")
+    st.title("Portfolio Forecasting Tool – Vol-Scaled Forecasts")
     tickers=st.text_input("Tickers","VTI,AGG")
     weights_str=st.text_input("Weights","0.6,0.4")
     start_cap=st.number_input("Starting Value ($)",1000.0,1000000.0,10000.0,1000.0)
@@ -325,12 +333,12 @@ def main():
             res=np.ascontiguousarray(res[~np.isnan(res)])
 
             indicators=train_indicator_models(X,["VIX","MOVE","YC_Spread"])
-            hist_vol=annualized_vol_monthly(port_rets.iloc[-12:])
-            all_paths=[]; bar=st.progress(0); txt=st.empty()
+            hist_vol=annualized_vol_monthly(port_rets)
 
+            all_paths=[]; bar=st.progress(0); txt=st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng=np.random.default_rng(GLOBAL_SEED+i)
-                sims=run_monte_carlo_paths(model,X,Y,res,SIMS_PER_SEED,rng,i,blk_len,indicators)
+                sims=run_monte_carlo_paths(model,X,res,SIMS_PER_SEED,rng,blk_len,indicators,hist_vol)
                 all_paths.append(sims)
                 bar.progress((i+1)/ENSEMBLE_SEEDS)
                 txt.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS}")
@@ -351,7 +359,7 @@ def main():
                 for k,v in back.items():
                     st.metric(k,f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
             with c2:
-                st.markdown("**Forecast (Vol-Matched)**")
+                st.markdown("**Forecast (Vol-Scaled)**")
                 for k,v in stats.items():
                     st.metric(k,f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
             st.metric("Forecasted Portfolio Value",f"${final[-1]*start_cap:,.2f}")
