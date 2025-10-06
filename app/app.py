@@ -24,7 +24,7 @@ np.random.seed(GLOBAL_SEED)
 # ---------- Config ----------
 DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 100
-SIMS_PER_SEED = 10000
+SIMS_PER_SEED = 1000
 FORECAST_YEARS = 1
 
 # ---------- Helpers ----------
