@@ -258,10 +258,12 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
                     state[feat]=float(indicator_models[feat].predict(state.values.reshape(1,-1))[0])
     return np.exp(log_paths,dtype=np.float32)
 
-# ---------- Median Path (Deterministic) ----------
-def compute_median_path(paths: np.ndarray) -> np.ndarray:
-    """Compute the median forecast trajectory across all simulations (deterministic, vectorized)."""
-    return np.median(paths, axis=0)
+# ---------- Ensemble Medoid ----------
+def find_ensemble_medoid_path(paths: np.ndarray) -> np.ndarray:
+    median_path = np.median(paths, axis=0)
+    dists = np.sum((paths - median_path)**2, axis=1)
+    medoid_idx = np.argmin(dists)
+    return paths[medoid_idx]
 
 # ---------- Stats ----------
 def compute_forecast_stats_from_path(path,start_cap,last_date):
@@ -297,12 +299,12 @@ def plot_forecasts(port_rets,start_cap,central,reb_label):
     dates=pd.date_range(start=last,periods=len(central),freq="M")
     fig,ax=plt.subplots(figsize=(12,6))
     ax.plot(port_cum.index,port_cum.values,label="Portfolio Backtest")
-    ax.plot([last,*dates],[port_cum.iloc[-1],*fore],label="Forecast (Median Path)",lw=2)
+    ax.plot([last,*dates],[port_cum.iloc[-1],*fore],label="Forecast (Ensemble Medoid)",lw=2)
     ax.legend(); st.pyplot(fig)
 
 # ---------- Streamlit ----------
 def main():
-    st.title("Portfolio Forecasting Tool – Median Forecast Path")
+    st.title("Portfolio Forecasting Tool – Ensemble Medoid Path")
     tickers=st.text_input("Tickers","VTI,AGG")
     weights_str=st.text_input("Weights","0.6,0.4")
     start_cap=st.number_input("Starting Value ($)",1000.0,1000000.0,10000.0,1000.0)
@@ -329,8 +331,8 @@ def main():
             res=np.ascontiguousarray(res[~np.isnan(res)])
 
             indicators=train_indicator_models(X,["VIX","MOVE","YC_Spread"])
-            all_paths=[]; bar=st.progress(0); txt=st.empty()
 
+            all_paths=[]; bar=st.progress(0); txt=st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng=np.random.default_rng(GLOBAL_SEED+i)
                 sims=run_monte_carlo_paths(model,X,Y,res,SIMS_PER_SEED,rng,i,blk_len,indicators)
@@ -340,9 +342,8 @@ def main():
             bar.empty(); txt.empty()
 
             paths=np.vstack(all_paths)
-            median_path=compute_median_path(paths)
-            stats=compute_forecast_stats_from_path(median_path,start_cap,port_rets.index[-1])
-
+            final=find_ensemble_medoid_path(paths)
+            stats=compute_forecast_stats_from_path(final,start_cap,port_rets.index[-1])
             back={"CAGR":annualized_return_monthly(port_rets),
                   "Volatility":annualized_vol_monthly(port_rets),
                   "Sharpe":annualized_sharpe_monthly(port_rets),
@@ -355,12 +356,12 @@ def main():
                 for k,v in back.items():
                     st.metric(k,f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
             with c2:
-                st.markdown("**Forecast (Median Path)**")
+                st.markdown("**Forecast (Ensemble Medoid)**")
                 for k,v in stats.items():
                     st.metric(k,f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
-            st.metric("Forecasted Portfolio Value",f"${median_path[-1]*start_cap:,.2f}")
+            st.metric("Forecasted Portfolio Value",f"${final[-1]*start_cap:,.2f}")
 
-            plot_forecasts(port_rets,start_cap,median_path,reb_label)
+            plot_forecasts(port_rets,start_cap,final,reb_label)
             plot_feature_attributions(model,X,X.iloc[[-1]])
 
         except Exception as e:
@@ -368,5 +369,3 @@ def main():
 
 if __name__=="__main__":
     main()
-
-
