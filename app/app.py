@@ -220,13 +220,20 @@ def block_bootstrap_residuals(residuals, size, block_len, rng):
     return np.ascontiguousarray(arr)
 
 # ---------- Monte Carlo ----------
-def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None, block_len=12, indicator_models=None):
+def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
+                          seed_id=None, block_len=12, indicator_models=None,
+                          port_rets=None):
     horizon = FORECAST_YEARS*12
     log_paths = np.zeros((sims_per_seed,horizon),dtype=np.float32)
     ar_returns = np.zeros_like(log_paths)
     state = pd.Series(X_base.iloc[-1].values, index=X_base.columns).astype(np.float32)
     cum_val = np.ones(sims_per_seed,dtype=np.float32)
     cum_max = np.ones_like(cum_val)
+
+    # Scale residuals to match portfolio vol
+    res_vol = np.std(residuals, ddof=0)
+    hist_vol = annualized_vol_monthly(port_rets) / np.sqrt(12)
+    vol_scale = hist_vol / res_vol if res_vol > 0 else 1.0
 
     def _mom_med(k,t):
         start=max(0,t-k+1)
@@ -235,14 +242,10 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
         prod=np.prod(1+window,axis=1)-1
         return float(np.median(prod))
 
-    hist_std = np.std(residuals, ddof=0)
-
     for t in range(horizon):
         mu_t=float(model.predict(state.values.reshape(1,-1))[0])
         shocks=block_bootstrap_residuals(residuals,sims_per_seed,block_len,rng)
-        sim_std = np.std(shocks, ddof=0)
-        if hist_std > 0 and sim_std > 0:
-            shocks *= hist_std / sim_std
+        shocks*=vol_scale
         log_step=mu_t+shocks
         log_paths[:,t]=(log_paths[:,t-1] if t>0 else 0)+log_step
         ar_t=np.expm1(log_step); ar_returns[:,t]=ar_t
@@ -259,11 +262,10 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
     return np.exp(log_paths,dtype=np.float32)
 
 # ---------- Ensemble Medoid ----------
-def find_ensemble_medoid_path(paths: np.ndarray) -> np.ndarray:
-    median_path = np.median(paths, axis=0)
-    dists = np.sum((paths - median_path)**2, axis=1)
-    medoid_idx = np.argmin(dists)
-    return paths[medoid_idx]
+def find_ensemble_medoid_path(paths):
+    med = np.median(paths, axis=0)
+    dists = np.sum((paths - med)**2, axis=1)
+    return paths[np.argmin(dists)]
 
 # ---------- Stats ----------
 def compute_forecast_stats_from_path(path,start_cap,last_date):
@@ -299,12 +301,12 @@ def plot_forecasts(port_rets,start_cap,central,reb_label):
     dates=pd.date_range(start=last,periods=len(central),freq="M")
     fig,ax=plt.subplots(figsize=(12,6))
     ax.plot(port_cum.index,port_cum.values,label="Portfolio Backtest")
-    ax.plot([last,*dates],[port_cum.iloc[-1],*fore],label="Forecast (Ensemble Medoid)",lw=2)
+    ax.plot([last,*dates],[port_cum.iloc[-1],*fore],label="Forecast (Medoid, Vol-Calibrated)",lw=2)
     ax.legend(); st.pyplot(fig)
 
 # ---------- Streamlit ----------
 def main():
-    st.title("Portfolio Forecasting Tool – Ensemble Medoid Path")
+    st.title("Portfolio Forecasting Tool – Ensemble Medoid (Vol-Calibrated)")
     tickers=st.text_input("Tickers","VTI,AGG")
     weights_str=st.text_input("Weights","0.6,0.4")
     start_cap=st.number_input("Starting Value ($)",1000.0,1000000.0,10000.0,1000.0)
@@ -335,7 +337,8 @@ def main():
             all_paths=[]; bar=st.progress(0); txt=st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng=np.random.default_rng(GLOBAL_SEED+i)
-                sims=run_monte_carlo_paths(model,X,Y,res,SIMS_PER_SEED,rng,i,blk_len,indicators)
+                sims=run_monte_carlo_paths(model,X,Y,res,SIMS_PER_SEED,rng,i,blk_len,
+                                           indicator_models=indicators,port_rets=port_rets)
                 all_paths.append(sims)
                 bar.progress((i+1)/ENSEMBLE_SEEDS)
                 txt.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS}")
@@ -356,7 +359,7 @@ def main():
                 for k,v in back.items():
                     st.metric(k,f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
             with c2:
-                st.markdown("**Forecast (Ensemble Medoid)**")
+                st.markdown("**Forecast (Medoid, Vol-Calibrated)**")
                 for k,v in stats.items():
                     st.metric(k,f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
             st.metric("Forecasted Portfolio Value",f"${final[-1]*start_cap:,.2f}")
@@ -369,3 +372,4 @@ def main():
 
 if __name__=="__main__":
     main()
+
