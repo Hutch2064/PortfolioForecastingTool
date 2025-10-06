@@ -170,12 +170,12 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
         def objective(trial):
             nonlocal done
             params = {
-                "n_estimators": trial.suggest_int("n_estimators",500,4000),
-                "learning_rate": trial.suggest_float("learning_rate",0.005,0.2,log=True),
+                "n_estimators": trial.suggest_int("n_estimators",500,10000),
+                "learning_rate": trial.suggest_float("learning_rate",0.001,1,log=True),
                 "max_depth": trial.suggest_int("max_depth",2,6),
                 "subsample": trial.suggest_float("subsample",0.5,1.0),
                 "colsample_bytree": trial.suggest_float("colsample_bytree",0.5,1.0),
-                "block_length": trial.suggest_int("block_length",3,24),
+                "block_length": trial.suggest_int("block_length",3,6),
                 "random_state": seed, "n_jobs":1
             }
             mdl = LGBMRegressor(**{k:v for k,v in params.items() if k!="block_length"})
@@ -298,7 +298,7 @@ def plot_forecasts(port_rets,start_cap,central,reb_label):
 
 # ---------- Streamlit ----------
 def main():
-    st.title("Portfolio Forecasting Tool – Overlapping Block Bootstrap Residuals")
+    st.title("Portfolio Forecasting Tool – BBR")
     tickers=st.text_input("Tickers","VTI,AGG")
     weights_str=st.text_input("Weights","0.6,0.4")
     start_cap=st.number_input("Starting Value ($)",1000.0,1000000.0,10000.0,1000.0)
