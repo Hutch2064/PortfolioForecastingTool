@@ -299,8 +299,8 @@ def tune_across_recent_oos_years(X: pd.DataFrame, Y: pd.Series, years_back: int 
             last_rmse, last_da = _eval_params_on_split(consensus_params, trX, trY, teX, teY, seed=seed)
     return consensus_params, details, last_rmse, last_da
 
-# ---------- Median-Ending Subset Medoid ----------
-def find_median_ending_medoid(paths: np.ndarray):
+# ---------- Median-Ending Subset Modal Path ----------
+def find_median_ending_modal_path(paths: np.ndarray):
     endings = paths[:, -1]
     median_ending = np.median(endings)
     tol = 0.01 * median_ending
@@ -308,20 +308,24 @@ def find_median_ending_medoid(paths: np.ndarray):
     if len(subset_idx) == 0:
         subset_idx = np.argsort(np.abs(endings - median_ending))[:max(1, len(paths)//20)]
     subset = paths[subset_idx]
-    median_series = np.median(subset, axis=0)
-    diffs = np.abs(subset - median_series)
-    closest = np.argmin(diffs, axis=0)
-    scores = np.bincount(closest, minlength=subset.shape[0])
-    best_idx = np.argmax(scores)
+    # Efficient modal computation
+    rounded = np.round(subset, 3)
+    modal_series = np.empty(subset.shape[1], dtype=np.float32)
+    for t in range(subset.shape[1]):
+        col = rounded[:, t]
+        vals, counts = np.unique(col, return_counts=True)
+        modal_series[t] = vals[np.argmax(counts)]
+    diffs = np.abs(subset - modal_series)
+    total_dev = diffs.sum(axis=1)
+    best_idx = np.argmin(total_dev)
     return subset[best_idx]
 
 # ---------- Monte Carlo (Fixed for Real Returns) ----------
 def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None, df=5):
     horizon_months = FORECAST_YEARS * 12
     price_paths = np.ones((sims_per_seed, horizon_months), dtype=np.float32)
-    # --- Regime-sensitive scaling: last 12 months of residuals ---
     resid_series = pd.Series(residuals)
-    window = 12  # last 12 months
+    window = 12
     mu = resid_series.iloc[-window:].mean() if len(resid_series) >= window else resid_series.mean()
     sigma = resid_series.iloc[-window:].std(ddof=0) if len(resid_series) >= window else resid_series.std(ddof=0)
     snapshot_X = X_base.iloc[[-1]].values.astype(np.float32)
@@ -369,7 +373,7 @@ def plot_forecasts(port_rets, start_capital, central, rebalance_label):
 
 # ---------- Streamlit App ----------
 def main():
-    st.title("Portfolio Forecasting Tool")
+    st.title("Portfolio Forecasting Toolio")
 
     tickers = st.text_input("Tickers (comma-separated, e.g. VTI,AGG)", "VTI,AGG")
     weights_str = st.text_input("Weights (comma-separated, must sum > 0)", "0.6,0.4")
@@ -419,14 +423,13 @@ def main():
                 rng = np.random.default_rng(GLOBAL_SEED + seed)
                 sims = run_monte_carlo_paths(final_model, X, Y, residuals,
                                              SIMS_PER_SEED, rng, seed_id=seed, df=df_opt)
-                seed_medoids.append(find_median_ending_medoid(sims))
+                seed_medoids.append(find_median_ending_modal_path(sims))
                 progress = (i+1)/ENSEMBLE_SEEDS
                 progress_bar.progress(progress)
                 status_text.text(f"Running forecasts... {i+1}/{ENSEMBLE_SEEDS}")
             progress_bar.empty()
-            final_medoid = find_median_ending_medoid(np.vstack(seed_medoids))
+            final_medoid = find_median_ending_modal_path(np.vstack(seed_medoids))
 
-            # ----- Compute realistic stats from same forecast path -----
             forecast_returns = pd.Series(final_medoid).pct_change().dropna()
             stats = {
                 "CAGR": annualized_return_monthly(forecast_returns),
@@ -462,28 +465,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
