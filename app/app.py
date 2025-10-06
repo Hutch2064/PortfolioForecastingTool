@@ -319,8 +319,11 @@ def find_median_ending_medoid(paths: np.ndarray):
 def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None, df=5):
     horizon_months = FORECAST_YEARS * 12
     price_paths = np.ones((sims_per_seed, horizon_months), dtype=np.float32)
-    mu = residuals.mean()
-    sigma = residuals.std(ddof=0)
+    # --- Regime-sensitive scaling: last 12 months of residuals ---
+    resid_series = pd.Series(residuals)
+    window = 12  # last 12 months
+    mu = resid_series.iloc[-window:].mean() if len(resid_series) >= window else resid_series.mean()
+    sigma = resid_series.iloc[-window:].std(ddof=0) if len(resid_series) >= window else resid_series.std(ddof=0)
     snapshot_X = X_base.iloc[[-1]].values.astype(np.float32)
     last_X = np.repeat(snapshot_X, sims_per_seed, axis=0)
     base_pred = model.predict(last_X).astype(np.float32)
