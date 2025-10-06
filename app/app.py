@@ -35,6 +35,7 @@ def to_weights(raw: List[float]) -> np.ndarray:
         raise ValueError("Weights must sum to a positive number.")
     return arr / s
 
+
 def annualized_return_monthly(m):
     m = m.dropna()
     if m.empty:
@@ -43,9 +44,11 @@ def annualized_return_monthly(m):
     years = len(m) / 12.0
     return compounded ** (1 / years) - 1 if years > 0 else np.nan
 
+
 def annualized_vol_monthly(m):
     m = m.dropna()
     return m.std(ddof=0) * np.sqrt(12) if len(m) > 1 else np.nan
+
 
 def annualized_sharpe_monthly(m, rf_monthly=0.0):
     m = m.dropna()
@@ -55,10 +58,12 @@ def annualized_sharpe_monthly(m, rf_monthly=0.0):
     mu, sigma = excess.mean(), excess.std(ddof=0)
     return (mu / sigma) * np.sqrt(12) if sigma and sigma > 0 else np.nan
 
+
 def max_drawdown_from_rets(returns):
     cum = (1 + returns.fillna(0)).cumprod()
     roll_max = cum.cummax()
     return (cum / roll_max - 1.0).min()
+
 
 def compute_current_drawdown(returns):
     cum = (1 + returns.fillna(0)).cumprod()
@@ -84,6 +89,7 @@ def fetch_prices_monthly(tickers, start=DEFAULT_START):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(1)
     return df.dropna(how="all")
+
 
 def fetch_macro_features(start=DEFAULT_START):
     tickers = ["^VIX", "^MOVE", "^TNX", "^IRX"]
@@ -142,6 +148,7 @@ def _oos_years_available(idx, max_years=5):
             full.append(y)
     return full[-max_years:]
 
+
 def _split_train_test_for_year(X, Y, y):
     train_end = pd.Timestamp(f"{y-1}-12-31")
     test_start = pd.Timestamp(f"{y}-01-01")
@@ -150,6 +157,7 @@ def _split_train_test_for_year(X, Y, y):
     test_X = X.loc[test_start:]
     test_Y = Y.loc[test_X.index]
     return train_X, train_Y, test_X, test_Y
+
 
 def _median_params(params_list):
     if not params_list:
@@ -169,6 +177,7 @@ def _median_params(params_list):
     out["random_state"] = GLOBAL_SEED
     out["n_jobs"] = 1
     return out
+
 
 def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=50):
     years = _oos_years_available(Y.index, years_back)
@@ -245,7 +254,7 @@ def train_indicator_models(X, feats):
         models[f] = mdl
     return models
 
-# ---------- Block Bootstrap (Overlapping) ----------
+# ---------- Block Bootstrap ----------
 def block_bootstrap_residuals(residuals, size, block_len, rng):
     n = len(residuals)
     indices = []
@@ -300,19 +309,24 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
                     state[feat] = float(indicator_models[feat].predict(state.values.reshape(1, -1))[0])
     return np.exp(log_paths, dtype=np.float32)
 
-# ---------- Volatility-Constrained Medoid ----------
-def find_vol_constrained_medoid(paths, hist_vol):
+# ---------- Volatility-Conditioned Medoid ----------
+def find_vol_conditioned_medoid(paths, port_rets):
+    rolling_vol = port_rets.rolling(12).std(ddof=0) * np.sqrt(12)
+    hist_vol = rolling_vol.iloc[-1]
+    hist_vol_std = rolling_vol.iloc[-12:].std(ddof=0)
+
     diffs = np.diff(np.log(paths), axis=1)
     vols = diffs.std(axis=1) * np.sqrt(12)
-    mask = (vols >= 0.95 * hist_vol) & (vols <= 1.05 * hist_vol)
-    candidates = paths[mask]
-    if len(candidates) == 0:
-        idx = np.argmin(np.abs(vols - hist_vol))
-        return paths[idx]
-    median_shape = np.median(candidates, axis=0)
-    dists = np.sum((candidates - median_shape) ** 2, axis=1)
-    medoid_idx = np.argmin(dists)
-    return candidates[medoid_idx]
+
+    lower = hist_vol - hist_vol_std
+    upper = hist_vol + hist_vol_std
+    mask = (vols >= lower) & (vols <= upper)
+    subset = paths[mask] if mask.sum() > 0 else paths
+
+    median_shape = np.median(subset, axis=0)
+    dist = np.linalg.norm(subset - median_shape, axis=1)
+    medoid = subset[np.argmin(dist)]
+    return medoid
 
 # ---------- Stats ----------
 def compute_forecast_stats_from_path(path, start_cap, last_date):
@@ -351,13 +365,13 @@ def plot_forecasts(port_rets, start_cap, central, reb_label):
     dates = pd.date_range(start=last, periods=len(central), freq="M")
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(port_cum.index, port_cum.values, label="Portfolio Backtest")
-    ax.plot([last, *dates], [port_cum.iloc[-1], *fore], label="Forecast (Vol-Constrained Medoid)", lw=2)
+    ax.plot([last, *dates], [port_cum.iloc[-1], *fore], label="Forecast (Vol-Conditioned Medoid)", lw=2)
     ax.legend()
     st.pyplot(fig)
 
 # ---------- Streamlit ----------
 def main():
-    st.title("Portfolio Forecasting Tool – Vol-Constrained Medoid")
+    st.title("Portfolio Forecasting Tool – Vol-Conditioned Medoid")
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1000000.0, 10000.0, 1000.0)
@@ -386,7 +400,6 @@ def main():
             res = np.ascontiguousarray(res[~np.isnan(res)])
 
             indicators = train_indicator_models(X, ["VIX", "MOVE", "YC_Spread"])
-            hist_vol = annualized_vol_monthly(port_rets)
 
             all_paths = []
             bar = st.progress(0)
@@ -401,7 +414,7 @@ def main():
             txt.empty()
 
             paths = np.vstack(all_paths)
-            final = find_vol_constrained_medoid(paths, hist_vol)
+            final = find_vol_conditioned_medoid(paths, port_rets)
 
             stats = compute_forecast_stats_from_path(final, start_cap, port_rets.index[-1])
             back = {
@@ -418,7 +431,7 @@ def main():
                 for k, v in back.items():
                     st.metric(k, f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
             with c2:
-                st.markdown("**Forecast (Vol-Constrained Medoid)**")
+                st.markdown("**Forecast (Vol-Conditioned Medoid)**")
                 for k, v in stats.items():
                     st.metric(k, f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
             st.metric("Forecasted Portfolio Value", f"${final[-1] * start_cap:,.2f}")
@@ -431,5 +444,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
