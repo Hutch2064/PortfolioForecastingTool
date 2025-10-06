@@ -40,7 +40,7 @@ def annualized_return_monthly(m):
     m = m.dropna()
     if m.empty:
         return np.nan
-    compounded = np.exp(m.sum())  # log return compounding
+    compounded = np.exp(m.sum())
     years = len(m) / 12.0
     return compounded ** (1 / years) - 1 if years > 0 else np.nan
 
@@ -105,7 +105,7 @@ def fetch_macro_features(start=DEFAULT_START):
     df["YC_Spread"] = close["^TNX"] - close["^IRX"]
     return df
 
-# ---------- Portfolio ----------
+# ---------- Portfolio (fixed drift) ----------
 def portfolio_log_returns_monthly(prices, weights, rebalance):
     rets = np.log(prices / prices.shift(1)).dropna().astype(np.float32)
     if rebalance == "N":
@@ -113,19 +113,28 @@ def portfolio_log_returns_monthly(prices, weights, rebalance):
         port_vals = vals.dot(weights)
         port_vals = port_vals / port_vals.iloc[0]
         return np.log(port_vals / port_vals.shift(1)).fillna(0.0)
+
     freq_map = {"M": "M", "Q": "Q", "S": "2Q", "Y": "A"}
     rule = freq_map.get(rebalance)
     if not rule:
         raise ValueError("Invalid rebalance option.")
-    port_val, port_vals, current_weights = 1.0, [], weights.copy()
+
+    n_assets = rets.shape[1]
+    weights0 = weights.copy()
+    holdings = weights0.astype(np.float64)
+    port_vals = []
     rebalance_dates = rets.resample(rule).last().index
+
     for i, date in enumerate(rets.index):
-        if i > 0:
-            port_val *= np.exp(rets.iloc[i] @ current_weights)
+        gross = np.exp(rets.iloc[i].values.astype(np.float64))
+        holdings *= gross
+        port_val = holdings.sum()
         port_vals.append(port_val)
         if date in rebalance_dates:
-            current_weights = weights.copy()
-    log_rets = np.log(pd.Series(port_vals, index=rets.index) / pd.Series(port_vals, index=rets.index).shift(1))
+            holdings = (weights0 * port_val).astype(np.float64)
+
+    log_rets = np.log(pd.Series(port_vals, index=rets.index) /
+                      pd.Series(port_vals, index=rets.index).shift(1))
     return log_rets.fillna(0.0)
 
 # ---------- Features ----------
@@ -254,40 +263,44 @@ def train_indicator_models(X, feats):
 # ---------- Block Bootstrap ----------
 def block_bootstrap_residuals(residuals, size, block_len, rng):
     n = len(residuals)
+    if size < block_len:
+        return rng.choice(residuals, size=size, replace=True).astype(residuals.dtype, copy=False)
     valid_starts = np.arange(0, n - block_len + 1)
     starts = rng.choice(valid_starts, size // block_len, replace=True)
     idx = (starts[:, None] + np.arange(block_len)).ravel()
     flat = residuals[idx[:size]]
     return np.ascontiguousarray(flat)
 
-# ---------- Monte Carlo ----------
+# ---------- Monte Carlo (no residual-vol scaling) ----------
 def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
                           seed_id=None, block_len=12, indicator_models=None, port_rets=None):
     horizon = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon), dtype=np.float32)
-    state = np.repeat(X_base.iloc[[-1]].values, sims_per_seed, axis=0).astype(np.float32)  # independent per path
-    hist_std = port_rets[-12:].std(ddof=0) if port_rets is not None and len(port_rets) >= 12 else np.std(residuals, ddof=0)
+    state = np.repeat(X_base.iloc[[-1]].values, sims_per_seed, axis=0).astype(np.float32)
 
     for t in range(horizon):
         mu_t = model.predict(state)
         shocks = block_bootstrap_residuals(residuals, sims_per_seed, block_len, rng)
-        sim_std = np.std(shocks, ddof=0)
-        if hist_std > 0 and sim_std > 0:
-            shocks *= hist_std / sim_std
         log_paths[:, t] = (log_paths[:, t-1] if t > 0 else 0) + mu_t + shocks
 
         df_temp = pd.DataFrame(log_paths[:, :t+1])
-        mom_3m = df_temp.diff(3, axis=1).iloc[:, -1].fillna(0).values
-        mom_6m = df_temp.diff(6, axis=1).iloc[:, -1].fillna(0).values
+        inc = df_temp.diff(axis=1)
+
+        mom_3m  = df_temp.diff(3,  axis=1).iloc[:, -1].fillna(0).values
+        mom_6m  = df_temp.diff(6,  axis=1).iloc[:, -1].fillna(0).values
         mom_12m = df_temp.diff(12, axis=1).iloc[:, -1].fillna(0).values
-        vol_3m = df_temp.iloc[:, -3:].std(axis=1, ddof=0).values if t >= 2 else np.zeros(sims_per_seed)
-        vol_6m = df_temp.iloc[:, -6:].std(axis=1, ddof=0).values if t >= 5 else np.zeros(sims_per_seed)
-        vol_12m = df_temp.iloc[:, -12:].std(axis=1, ddof=0).values if t >= 11 else np.zeros(sims_per_seed)
+
+        vol_3m  = inc.iloc[:, -3:].std(axis=1, ddof=0).values  if t >= 2  else np.zeros(sims_per_seed)
+        vol_6m  = inc.iloc[:, -6:].std(axis=1, ddof=0).values  if t >= 5  else np.zeros(sims_per_seed)
+        vol_12m = inc.iloc[:, -12:].std(axis=1, ddof=0).values if t >= 11 else np.zeros(sims_per_seed)
+
         cum_vals = np.exp(df_temp)
         dd_state = cum_vals.values[:, -1] / np.maximum.accumulate(cum_vals.values, axis=1)[:, -1] - 1
 
-        for name, vals in zip(["mom_3m", "mom_6m", "mom_12m", "vol_3m", "vol_6m", "vol_12m", "dd_state"],
-                              [mom_3m, mom_6m, mom_12m, vol_3m, vol_6m, vol_12m, dd_state]):
+        for name, vals in zip(
+            ["mom_3m", "mom_6m", "mom_12m", "vol_3m", "vol_6m", "vol_12m", "dd_state"],
+            [mom_3m, mom_6m, mom_12m, vol_3m, vol_6m, vol_12m, dd_state],
+        ):
             if name in X_base.columns:
                 col_idx = list(X_base.columns).index(name)
                 state[:, col_idx] = vals
@@ -301,10 +314,17 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
 
     return np.exp(log_paths - log_paths[:, [0]], dtype=np.float32)
 
-# ---------- Median Forecast ----------
-def compute_median_forecast_path(paths):
-    median_vals = np.median(paths, axis=0)
-    return median_vals
+# ---------- True Medoid Path ----------
+def compute_medoid_path(paths):
+    log_paths = np.log(paths)
+    diffs = np.diff(log_paths, axis=1)
+    normed = diffs - diffs.mean(axis=1, keepdims=True)
+    mean_traj = normed.mean(axis=0)
+    dots = np.sum(normed * mean_traj, axis=1)
+    norms = np.linalg.norm(normed, axis=1) * np.linalg.norm(mean_traj)
+    sims = dots / (norms + 1e-9)
+    medoid_idx = np.argmax(sims)
+    return paths[medoid_idx]
 
 # ---------- Stats ----------
 def compute_forecast_stats_from_path(path, start_cap, last_date):
@@ -343,7 +363,7 @@ def plot_forecasts(port_rets, start_cap, central, reb_label):
     dates = pd.date_range(start=last, periods=len(central), freq="M")
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(port_cum.index, port_cum.values, label="Portfolio Backtest")
-    ax.plot([last, *dates], [port_cum.iloc[-1], *fore], label="Forecast (Median Path)", lw=2)
+    ax.plot([last, *dates], [port_cum.iloc[-1], *fore], label="Forecast (Medoid Path)", lw=2)
     ax.legend()
     st.pyplot(fig)
 
@@ -393,7 +413,7 @@ def main():
             txt.empty()
 
             paths = np.vstack(all_paths)
-            final = compute_median_forecast_path(paths)
+            final = compute_medoid_path(paths)
 
             stats = compute_forecast_stats_from_path(final, start_cap, port_rets.index[-1])
             back = {
@@ -410,7 +430,7 @@ def main():
                 for k, v in back.items():
                     st.metric(k, f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
             with c2:
-                st.markdown("**Forecast (Median Path)**")
+                st.markdown("**Forecast (Medoid Path)**")
                 for k, v in stats.items():
                     st.metric(k, f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
             st.metric("Forecasted Portfolio Value", f"${final[-1] * start_cap:,.2f}")
@@ -423,5 +443,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
