@@ -173,7 +173,7 @@ def _median_params(param_dicts: List[dict]) -> dict:
     consensus["n_jobs"] = 1
     return consensus
 
-def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=50):
+def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=10):
     years = _oos_years_available(Y.index, max_years=years_back)
     param_runs, details = [], []
     total_jobs = len(years)*n_trials
@@ -225,10 +225,19 @@ def train_indicator_models(X, feats):
 
 # ---------- Block Bootstrap Monte Carlo ----------
 def block_bootstrap_residuals(residuals, size, block_len, rng):
-    n=len(residuals)
-    starts=rng.integers(0,n-block_len+1,size=max(1,size//block_len))
-    blocks=[residuals[s:s+block_len] for s in starts]
-    flat=np.concatenate(blocks,axis=0)[:size]
+    n = len(residuals)
+    # Ensure at least one block
+    num_blocks = max(1, int(np.ceil(size / block_len)))
+    starts = rng.integers(0, n - block_len + 1, size=num_blocks)
+    blocks = [residuals[s:s + block_len] for s in starts]
+    flat = np.concatenate(blocks, axis=0)
+    # Pad or trim to exact requested size
+    if len(flat) < size:
+        repeats = (size - len(flat))
+        extra = rng.choice(residuals, size=repeats, replace=True)
+        flat = np.concatenate([flat, extra])
+    elif len(flat) > size:
+        flat = flat[:size]
     return flat.astype(np.float32)
 
 def run_monte_carlo_paths(model,X_base,Y_base,residuals,sims_per_seed,rng,seed_id=None,block_len=12,indicator_models=None):
