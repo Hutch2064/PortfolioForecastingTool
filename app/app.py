@@ -207,7 +207,7 @@ def train_indicator_models(X, feats):
         models[f]=mdl
     return models
 
-# ---------- Block Bootstrap (Overlapping) ----------
+# ---------- Block Bootstrap ----------
 def block_bootstrap_residuals(residuals, size, block_len, rng):
     n = len(residuals)
     indices = []
@@ -240,12 +240,9 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
     for t in range(horizon):
         mu_t=float(model.predict(state.values.reshape(1,-1))[0])
         shocks=block_bootstrap_residuals(residuals,sims_per_seed,block_len,rng)
-
-        # Scale shocks to match historical residual volatility
         sim_std = np.std(shocks, ddof=0)
         if hist_std > 0 and sim_std > 0:
             shocks *= hist_std / sim_std
-
         log_step=mu_t+shocks
         log_paths[:,t]=(log_paths[:,t-1] if t>0 else 0)+log_step
         ar_t=np.expm1(log_step); ar_returns[:,t]=ar_t
@@ -261,12 +258,10 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
                     state[feat]=float(indicator_models[feat].predict(state.values.reshape(1,-1))[0])
     return np.exp(log_paths,dtype=np.float32)
 
-# ---------- Median Path Selection ----------
-def find_median_path(paths):
-    final_vals = paths[:,-1]
-    median_val = np.median(final_vals)
-    idx = np.argmin(np.abs(final_vals - median_val))
-    return paths[idx]
+# ---------- Median Path (Deterministic) ----------
+def compute_median_path(paths: np.ndarray) -> np.ndarray:
+    """Compute the median forecast trajectory across all simulations (deterministic, vectorized)."""
+    return np.median(paths, axis=0)
 
 # ---------- Stats ----------
 def compute_forecast_stats_from_path(path,start_cap,last_date):
@@ -307,7 +302,7 @@ def plot_forecasts(port_rets,start_cap,central,reb_label):
 
 # ---------- Streamlit ----------
 def main():
-    st.title("Portfolio Forecasting Tool – Ensemble Median Path")
+    st.title("Portfolio Forecasting Tool – Median Forecast Path")
     tickers=st.text_input("Tickers","VTI,AGG")
     weights_str=st.text_input("Weights","0.6,0.4")
     start_cap=st.number_input("Starting Value ($)",1000.0,1000000.0,10000.0,1000.0)
@@ -334,9 +329,8 @@ def main():
             res=np.ascontiguousarray(res[~np.isnan(res)])
 
             indicators=train_indicator_models(X,["VIX","MOVE","YC_Spread"])
-            hist_vol=annualized_vol_monthly(port_rets)
-
             all_paths=[]; bar=st.progress(0); txt=st.empty()
+
             for i in range(ENSEMBLE_SEEDS):
                 rng=np.random.default_rng(GLOBAL_SEED+i)
                 sims=run_monte_carlo_paths(model,X,Y,res,SIMS_PER_SEED,rng,i,blk_len,indicators)
@@ -346,8 +340,9 @@ def main():
             bar.empty(); txt.empty()
 
             paths=np.vstack(all_paths)
-            final=find_median_path(paths)
-            stats=compute_forecast_stats_from_path(final,start_cap,port_rets.index[-1])
+            median_path=compute_median_path(paths)
+            stats=compute_forecast_stats_from_path(median_path,start_cap,port_rets.index[-1])
+
             back={"CAGR":annualized_return_monthly(port_rets),
                   "Volatility":annualized_vol_monthly(port_rets),
                   "Sharpe":annualized_sharpe_monthly(port_rets),
@@ -363,9 +358,9 @@ def main():
                 st.markdown("**Forecast (Median Path)**")
                 for k,v in stats.items():
                     st.metric(k,f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
-            st.metric("Forecasted Portfolio Value",f"${final[-1]*start_cap:,.2f}")
+            st.metric("Forecasted Portfolio Value",f"${median_path[-1]*start_cap:,.2f}")
 
-            plot_forecasts(port_rets,start_cap,final,reb_label)
+            plot_forecasts(port_rets,start_cap,median_path,reb_label)
             plot_feature_attributions(model,X,X.iloc[[-1]])
 
         except Exception as e:
@@ -373,4 +368,5 @@ def main():
 
 if __name__=="__main__":
     main()
+
 
