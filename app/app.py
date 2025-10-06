@@ -261,11 +261,12 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, 
                     state[feat]=float(indicator_models[feat].predict(state.values.reshape(1,-1))[0])
     return np.exp(log_paths,dtype=np.float32)
 
-# ---------- Vol-Matched ----------
-def find_single_vol_closest_path(paths,hist_vol):
-    diffs=np.diff(np.log(paths),axis=1)
-    vols=diffs.std(axis=1)*np.sqrt(12)
-    return paths[np.argmin(np.abs(vols-hist_vol))]
+# ---------- Median Path Selection ----------
+def find_median_path(paths):
+    final_vals = paths[:,-1]
+    median_val = np.median(final_vals)
+    idx = np.argmin(np.abs(final_vals - median_val))
+    return paths[idx]
 
 # ---------- Stats ----------
 def compute_forecast_stats_from_path(path,start_cap,last_date):
@@ -301,12 +302,12 @@ def plot_forecasts(port_rets,start_cap,central,reb_label):
     dates=pd.date_range(start=last,periods=len(central),freq="M")
     fig,ax=plt.subplots(figsize=(12,6))
     ax.plot(port_cum.index,port_cum.values,label="Portfolio Backtest")
-    ax.plot([last,*dates],[port_cum.iloc[-1],*fore],label="Forecast (Vol-Scaled)",lw=2)
+    ax.plot([last,*dates],[port_cum.iloc[-1],*fore],label="Forecast (Median Path)",lw=2)
     ax.legend(); st.pyplot(fig)
 
 # ---------- Streamlit ----------
 def main():
-    st.title("Portfolio Forecasting Tool – Vol-Scaled Residuals")
+    st.title("Portfolio Forecasting Tool – Ensemble Median Path")
     tickers=st.text_input("Tickers","VTI,AGG")
     weights_str=st.text_input("Weights","0.6,0.4")
     start_cap=st.number_input("Starting Value ($)",1000.0,1000000.0,10000.0,1000.0)
@@ -345,7 +346,7 @@ def main():
             bar.empty(); txt.empty()
 
             paths=np.vstack(all_paths)
-            final=find_single_vol_closest_path(paths,hist_vol)
+            final=find_median_path(paths)
             stats=compute_forecast_stats_from_path(final,start_cap,port_rets.index[-1])
             back={"CAGR":annualized_return_monthly(port_rets),
                   "Volatility":annualized_vol_monthly(port_rets),
@@ -359,7 +360,7 @@ def main():
                 for k,v in back.items():
                     st.metric(k,f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
             with c2:
-                st.markdown("**Forecast (Vol-Scaled)**")
+                st.markdown("**Forecast (Median Path)**")
                 for k,v in stats.items():
                     st.metric(k,f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
             st.metric("Forecasted Portfolio Value",f"${final[-1]*start_cap:,.2f}")
@@ -372,3 +373,4 @@ def main():
 
 if __name__=="__main__":
     main()
+
