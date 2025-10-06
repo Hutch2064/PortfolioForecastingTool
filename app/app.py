@@ -24,7 +24,7 @@ np.random.seed(GLOBAL_SEED)
 # ---------- Config ----------
 DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 100
-SIMS_PER_SEED = 1000
+SIMS_PER_SEED = 10000
 FORECAST_YEARS = 1
 
 # ---------- Helpers ----------
@@ -265,7 +265,7 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
                           seed_id=None, block_len=12, indicator_models=None, port_rets=None):
     horizon = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon), dtype=np.float32)
-    state = np.repeat(X_base.iloc[[-1]].values, sims_per_seed, axis=0).astype(np.float32)
+    state = np.repeat(X_base.iloc[[-1]].values, sims_per_seed, axis=0).astype(np.float32)  # independent per path
     hist_std = port_rets[-12:].std(ddof=0) if port_rets is not None and len(port_rets) >= 12 else np.std(residuals, ddof=0)
 
     for t in range(horizon):
@@ -301,20 +301,10 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
 
     return np.exp(log_paths - log_paths[:, [0]], dtype=np.float32)
 
-# ---------- Vol-Conditioned Medoid Path ----------
-def find_vol_conditioned_medoid_path(paths, port_rets):
-    rolling_vol = port_rets.rolling(12).std(ddof=0) * np.sqrt(12)
-    hist_vol = rolling_vol.iloc[-1]
-    hist_vol_std = rolling_vol.iloc[-12:].std(ddof=0)
-    log_paths = np.log(paths)
-    diffs = np.diff(log_paths, axis=1)
-    vols = diffs.std(axis=1) * np.sqrt(12)
-    dist_matrix = np.abs(log_paths[:, None, :] - log_paths[None, :, :]).mean(axis=2)
-    total_dist = dist_matrix.sum(axis=1)
-    vol_penalty = (vols - hist_vol) ** 2 / (hist_vol_std**2 + 1e-8)
-    composite_score = total_dist + vol_penalty * np.median(total_dist)
-    medoid_idx = np.argmin(composite_score)
-    return paths[medoid_idx]
+# ---------- Median Forecast ----------
+def compute_median_forecast_path(paths):
+    median_vals = np.median(paths, axis=0)
+    return median_vals
 
 # ---------- Stats ----------
 def compute_forecast_stats_from_path(path, start_cap, last_date):
@@ -353,14 +343,13 @@ def plot_forecasts(port_rets, start_cap, central, reb_label):
     dates = pd.date_range(start=last, periods=len(central), freq="M")
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(port_cum.index, port_cum.values, label="Portfolio Backtest")
-    ax.plot([last, *dates], [port_cum.iloc[-1], *fore],
-            label="Forecast (Vol-Conditioned Medoid Path)", lw=2)
+    ax.plot([last, *dates], [port_cum.iloc[-1], *fore], label="Forecast (Median Path)", lw=2)
     ax.legend()
     st.pyplot(fig)
 
 # ---------- Streamlit ----------
 def main():
-    st.title("Portfolio Forecasting Tool – Independent Feature Evolution (Medoid Forecast)")
+    st.title("Portfolio Forecasting Tool – Independent Feature Evolution (Median Forecast)")
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1000000.0, 10000.0, 1000.0)
@@ -404,7 +393,7 @@ def main():
             txt.empty()
 
             paths = np.vstack(all_paths)
-            final = find_vol_conditioned_medoid_path(paths, port_rets)
+            final = compute_median_forecast_path(paths)
 
             stats = compute_forecast_stats_from_path(final, start_cap, port_rets.index[-1])
             back = {
@@ -421,7 +410,7 @@ def main():
                 for k, v in back.items():
                     st.metric(k, f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
             with c2:
-                st.markdown("**Forecast (Medoid Path)**")
+                st.markdown("**Forecast (Median Path)**")
                 for k, v in stats.items():
                     st.metric(k, f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
             st.metric("Forecasted Portfolio Value", f"${final[-1] * start_cap:,.2f}")
@@ -434,4 +423,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
