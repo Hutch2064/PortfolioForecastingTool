@@ -144,7 +144,7 @@ def _oos_years_available(idx: pd.DatetimeIndex, max_years=5) -> List[int]:
             complete_years.append(y)
     return complete_years[-max_years:] if len(complete_years) > max_years else complete_years
 
-def _split_train_test_for_year(X: pd.DataFrame, Y: pd.Series, test_year: int):
+def _split_train_test_for_year(X, Y, test_year):
     train_end = pd.Timestamp(f"{test_year-1}-12-31")
     test_start = pd.Timestamp(f"{test_year}-01-01")
     train_X = X.loc[:train_end]
@@ -153,7 +153,7 @@ def _split_train_test_for_year(X: pd.DataFrame, Y: pd.Series, test_year: int):
     test_Y = Y.loc[test_X.index]
     return train_X, train_Y, test_X, test_Y
 
-def _median_params(param_dicts: List[dict]) -> dict:
+def _median_params(param_dicts):
     if not param_dicts: return {}
     all_keys = set().union(*[d.keys() for d in param_dicts])
     consensus = {}
@@ -185,7 +185,7 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
         def objective(trial):
             nonlocal completed
             params = {
-                "n_estimators": trial.suggest_int("n_estimators",1000,8000),
+                "n_estimators": trial.suggest_int("n_estimators",500,3000),
                 "learning_rate": trial.suggest_float("learning_rate",0.005,0.2,log=True),
                 "max_depth": trial.suggest_int("max_depth",2,6),
                 "subsample": trial.suggest_float("subsample",0.5,1.0),
@@ -226,16 +226,13 @@ def train_indicator_models(X, feats):
 # ---------- Block Bootstrap Monte Carlo ----------
 def block_bootstrap_residuals(residuals, size, block_len, rng):
     n = len(residuals)
-    # Ensure at least one block
     num_blocks = max(1, int(np.ceil(size / block_len)))
     starts = rng.integers(0, n - block_len + 1, size=num_blocks)
     blocks = [residuals[s:s + block_len] for s in starts]
     flat = np.concatenate(blocks, axis=0)
-    # Pad or trim to exact requested size
+    # pad/trim
     if len(flat) < size:
-        repeats = (size - len(flat))
-        extra = rng.choice(residuals, size=repeats, replace=True)
-        flat = np.concatenate([flat, extra])
+        flat = np.concatenate([flat, rng.choice(residuals, size=size - len(flat), replace=True)])
     elif len(flat) > size:
         flat = flat[:size]
     return flat.astype(np.float32)
@@ -262,7 +259,8 @@ def run_monte_carlo_paths(model,X_base,Y_base,residuals,sims_per_seed,rng,seed_i
         state["mom_12m"]=np.float32(_mom_med(12,t)); state["dd_state"]=np.float32(dd_med)
         if indicator_models:
             for feat in("VIX","MOVE","YC_Spread"):
-                if feat in indicator_models: state[feat]=float(indicator_models[feat].predict(state.values.reshape(1,-1))[0])
+                if feat in indicator_models:
+                    state[feat]=float(indicator_models[feat].predict(state.values.reshape(1,-1))[0])
     return np.exp(log_paths,dtype=np.float32)
 
 # ---------- Vol-Matched Path ----------
@@ -318,6 +316,9 @@ def main():
             df=build_features(port_rets)
             Y=np.log(1+port_rets.loc[df.index]).astype(np.float32)
             X=df.shift(1).dropna(); Y=Y.loc[X.index]
+            # clean to avoid invalid array_struct
+            X=X.replace([np.inf,-np.inf],np.nan).dropna().astype(np.float32)
+            Y=Y.loc[X.index]
             cons,_,_,_=tune_across_recent_oos_years(X,Y,5,GLOBAL_SEED,50)
             st.json(cons)
             blk_len=int(cons.get("block_length",12))
@@ -354,5 +355,6 @@ def main():
 
 if __name__=="__main__":
     main()
+
 
 
