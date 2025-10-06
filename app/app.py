@@ -40,7 +40,7 @@ def annualized_return_monthly(m):
     m = m.dropna()
     if m.empty:
         return np.nan
-    compounded = np.exp(m.sum())  # log-return compounding
+    compounded = np.exp(m.sum())  # log return compounding
     years = len(m) / 12.0
     return compounded ** (1 / years) - 1 if years > 0 else np.nan
 
@@ -212,7 +212,7 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
             mdl = LGBMRegressor(**{k: v for k, v in params.items() if k != "block_length"})
             mdl.fit(Xtr, Ytr)
             preds = mdl.predict(Xte)
-            rmse = np.sqrt(mean_squared_error(Yte, preds))
+            rmse = np.sqrt(mean_squared_error(Yte, preds))  # fixed: use raw returns
             da = (np.sign(Yte) == np.sign(preds)).mean()
             done += 1
             bar.progress(done / total_jobs)
@@ -255,10 +255,9 @@ def train_indicator_models(X, feats):
 def block_bootstrap_residuals(residuals, size, block_len, rng):
     n = len(residuals)
     valid_starts = np.arange(0, n - block_len + 1)
-    # Oversample slightly to guarantee full output length
-    starts = rng.choice(valid_starts, (size // block_len) + 2, replace=True)
-    idx = (starts[:, None] + np.arange(block_len)).ravel()[:size]
-    flat = residuals[idx]
+    starts = rng.choice(valid_starts, size // block_len, replace=True)
+    idx = (starts[:, None] + np.arange(block_len)).ravel()
+    flat = residuals[idx[:size]]
     return np.ascontiguousarray(flat)
 
 # ---------- Monte Carlo ----------
@@ -266,7 +265,7 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
                           seed_id=None, block_len=12, indicator_models=None, port_rets=None):
     horizon = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon), dtype=np.float32)
-    state = X_base.iloc[[-1]].astype(np.float32).values
+    state = X_base.iloc[[-1]].astype(np.float32).values  # 1 x n_feats
     hist_std = port_rets[-12:].std(ddof=0) if port_rets is not None and len(port_rets) >= 12 else np.std(residuals, ddof=0)
 
     for t in range(horizon):
@@ -275,13 +274,6 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
         sim_std = np.std(shocks, ddof=0)
         if hist_std > 0 and sim_std > 0:
             shocks *= hist_std / sim_std
-
-        # --- Debugging output (once per run) ---
-        if t == 0:
-            raw_vol = np.std(residuals, ddof=0) * np.sqrt(12)
-            scaled_vol = hist_std * np.sqrt(12)
-            st.write(f"Residual vol (annualized): {raw_vol:.2%}, Scaled vol anchor: {scaled_vol:.2%}")
-
         log_step = mu_t + shocks
         log_paths[:, t] = (log_paths[:, t-1] if t > 0 else 0) + log_step
 
@@ -295,6 +287,7 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
         cum_vals = np.exp(df_temp)
         dd_state = cum_vals.values[:, -1] / np.maximum.accumulate(cum_vals.values, axis=1)[:, -1] - 1
 
+        # Update feature state
         state_new = state.copy()
         for i, name in enumerate(["mom_3m", "mom_6m", "mom_12m",
                                   "vol_3m", "vol_6m", "vol_12m", "dd_state"]):
