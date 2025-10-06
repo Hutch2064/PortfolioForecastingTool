@@ -70,6 +70,10 @@ def compute_current_drawdown(returns):
     roll_max = cum.cummax()
     return (cum / roll_max - 1.0).astype(np.float32)
 
+
+def realized_vol(returns, window):
+    return returns.rolling(window).std(ddof=0)
+
 # ---------- Data Fetch ----------
 def fetch_prices_monthly(tickers, start=DEFAULT_START):
     data = yf.download(tickers, start=start, interval="1mo", auto_adjust=False, progress=False, threads=False)
@@ -125,16 +129,17 @@ def portfolio_returns_monthly(prices, weights, rebalance):
 
 # ---------- Features ----------
 def build_features(returns):
-    df = pd.DataFrame()
+    df = pd.DataFrame(index=returns.index)
     df["mom_3m"] = returns.rolling(3).apply(lambda x: (1 + x).prod() - 1, raw=True)
     df["mom_6m"] = returns.rolling(6).apply(lambda x: (1 + x).prod() - 1, raw=True)
     df["mom_12m"] = returns.rolling(12).apply(lambda x: (1 + x).prod() - 1, raw=True)
+    df["vol_3m"] = realized_vol(returns, 3)
+    df["vol_6m"] = realized_vol(returns, 6)
+    df["vol_12m"] = realized_vol(returns, 12)
     df["dd_state"] = compute_current_drawdown(returns)
     macro = fetch_macro_features()
     df = df.join(macro, how="left").ffill()
-    valid_start = max(
-        [df[c].first_valid_index() for c in df.columns if df[c].first_valid_index()]
-    )
+    valid_start = max([df[c].first_valid_index() for c in df.columns if df[c].first_valid_index()])
     df = df.loc[valid_start:].dropna()
     return df.astype(np.float32)
 
@@ -213,14 +218,16 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
             txt.text(f"Tuning models... {int(done / total_jobs * 100)}%")
             return rmse, -da
 
-        study = optuna.create_study(
-            directions=["minimize", "minimize"], sampler=optuna.samplers.TPESampler(seed=seed)
-        )
+        study = optuna.create_study(directions=["minimize", "minimize"],
+                                    sampler=optuna.samplers.TPESampler(seed=seed))
         study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
         best = study.best_trials[0]
-        details.append(
-            {"year": y, "rmse": float(best.values[0]), "da": -float(best.values[1]), "best_params": dict(best.params)}
-        )
+        details.append({
+            "year": y,
+            "rmse": float(best.values[0]),
+            "da": -float(best.values[1]),
+            "best_params": dict(best.params),
+        })
         params_all.append(dict(best.params))
     bar.empty()
     txt.empty()
@@ -236,15 +243,9 @@ def train_indicator_models(X, feats):
         idx = y.index.intersection(X.index)
         if len(idx) < 24:
             continue
-        mdl = LGBMRegressor(
-            n_estimators=500,
-            max_depth=3,
-            learning_rate=0.05,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            random_state=GLOBAL_SEED,
-            n_jobs=1,
-        )
+        mdl = LGBMRegressor(n_estimators=500, max_depth=3, learning_rate=0.05,
+                            subsample=0.8, colsample_bytree=0.8,
+                            random_state=GLOBAL_SEED, n_jobs=1)
         mdl.fit(X.loc[idx], y.loc[idx])
         models[f] = mdl
     return models
@@ -252,86 +253,70 @@ def train_indicator_models(X, feats):
 # ---------- Block Bootstrap ----------
 def block_bootstrap_residuals(residuals, size, block_len, rng):
     n = len(residuals)
-    indices = []
-    for _ in range(size):
-        start = rng.integers(0, n)
-        block = [residuals[(start + j) % n] for j in range(block_len)]
-        indices.extend(block)
-        if len(indices) >= size:
-            break
-    arr = np.array(indices[:size], dtype=np.float32)
-    return np.ascontiguousarray(arr)
+    starts = rng.integers(0, n, size // block_len + 1)
+    idx = (starts[:, None] + np.arange(block_len)) % n
+    flat = residuals[idx.ravel()[:size]]
+    return np.ascontiguousarray(flat)
 
 # ---------- Monte Carlo ----------
-def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None,
-                          block_len=12, indicator_models=None, port_rets=None):
+def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
+                          seed_id=None, block_len=12, indicator_models=None, port_rets=None):
     horizon = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon), dtype=np.float32)
     ar_returns = np.zeros_like(log_paths)
-    state = pd.Series(X_base.iloc[-1].values, index=X_base.columns).astype(np.float32)
-    cum_val = np.ones(sims_per_seed, dtype=np.float32)
-    cum_max = np.ones_like(cum_val)
-
-    # Scale shocks to match most recent 12-month realized volatility of the portfolio
-    if port_rets is not None and len(port_rets) >= 12:
-        hist_std = port_rets[-12:].std(ddof=0)
-    else:
-        hist_std = port_rets.std(ddof=0) if port_rets is not None else np.std(residuals, ddof=0)
-
-    def _mom_med(k, t):
-        start = max(0, t - k + 1)
-        window = ar_returns[:, start:t + 1]
-        if window.shape[1] == 0:
-            return 0.0
-        prod = np.prod(1 + window, axis=1) - 1
-        return float(np.median(prod))
+    state = X_base.iloc[[-1]].astype(np.float32).values  # 1 x n_feats
+    hist_std = port_rets[-12:].std(ddof=0) if port_rets is not None and len(port_rets) >= 12 else np.std(residuals, ddof=0)
 
     for t in range(horizon):
-        mu_t = float(model.predict(state.values.reshape(1, -1))[0])
+        mu_t = model.predict(state)[0]
         shocks = block_bootstrap_residuals(residuals, sims_per_seed, block_len, rng)
         sim_std = np.std(shocks, ddof=0)
         if hist_std > 0 and sim_std > 0:
             shocks *= hist_std / sim_std
         log_step = mu_t + shocks
-        log_paths[:, t] = (log_paths[:, t - 1] if t > 0 else 0) + log_step
+        log_paths[:, t] = (log_paths[:, t-1] if t > 0 else 0) + log_step
         ar_t = np.expm1(log_step)
         ar_returns[:, t] = ar_t
-        cum_val *= (1 + ar_t)
-        cum_max = np.maximum(cum_max, cum_val)
-        dd_med = float(np.median(cum_val / cum_max - 1))
-        state["mom_3m"] = np.float32(_mom_med(3, t))
-        state["mom_6m"] = np.float32(_mom_med(6, t))
-        state["mom_12m"] = np.float32(_mom_med(12, t))
-        state["dd_state"] = np.float32(dd_med)
+
+        # Vectorized feature recomputation
+        df_temp = pd.DataFrame(ar_returns[:, :t+1])
+        mom_3m = (1 + df_temp.iloc[:, -3:]).prod(axis=1) - 1 if t >= 2 else np.zeros(sims_per_seed)
+        mom_6m = (1 + df_temp.iloc[:, -6:]).prod(axis=1) - 1 if t >= 5 else np.zeros(sims_per_seed)
+        mom_12m = (1 + df_temp.iloc[:, -12:]).prod(axis=1) - 1 if t >= 11 else np.zeros(sims_per_seed)
+        vol_3m = df_temp.iloc[:, -3:].std(axis=1, ddof=0) if t >= 2 else np.zeros(sims_per_seed)
+        vol_6m = df_temp.iloc[:, -6:].std(axis=1, ddof=0) if t >= 5 else np.zeros(sims_per_seed)
+        vol_12m = df_temp.iloc[:, -12:].std(axis=1, ddof=0) if t >= 11 else np.zeros(sims_per_seed)
+        cum_vals = (1 + df_temp).cumprod(axis=1).values
+        dd_state = cum_vals[:, -1] / np.maximum.accumulate(cum_vals, axis=1)[:, -1] - 1
+
+        # Update feature state
+        state_new = state.copy()
+        for i, name in enumerate(["mom_3m", "mom_6m", "mom_12m",
+                                  "vol_3m", "vol_6m", "vol_12m", "dd_state"]):
+            if name in X_base.columns:
+                col_idx = list(X_base.columns).index(name)
+                state_new[0, col_idx] = np.median(eval(name))
         if indicator_models:
             for feat in ("VIX", "MOVE", "YC_Spread"):
                 if feat in indicator_models:
-                    state[feat] = float(indicator_models[feat].predict(state.values.reshape(1, -1))[0])
+                    col_idx = list(X_base.columns).index(feat)
+                    state_new[0, col_idx] = float(indicator_models[feat].predict(state)[0])
+        state = state_new
     return np.exp(log_paths, dtype=np.float32)
 
-# ---------- Volatility-Conditioned Median-Rank Path ----------
-def find_vol_conditioned_path(paths, port_rets):
+# ---------- Vol-Conditioned Middle Path ----------
+def find_vol_conditioned_middle_path(paths, port_rets):
     rolling_vol = port_rets.rolling(12).std(ddof=0) * np.sqrt(12)
     hist_vol = rolling_vol.iloc[-1]
     hist_vol_std = rolling_vol.iloc[-12:].std(ddof=0)
-
-    # Compute realized vol of each path
     diffs = np.diff(np.log(paths), axis=1)
     vols = diffs.std(axis=1) * np.sqrt(12)
-
-    # Keep only paths within ±1σ of past-12m realized volatility
-    lower = hist_vol - hist_vol_std
-    upper = hist_vol + hist_vol_std
-    mask = (vols >= lower) & (vols <= upper)
-    subset = paths[mask] if mask.sum() > 0 else paths
-
-    # Compute rank at each timestep, find the path most "median-ranked" across time
-    ranks = np.argsort(np.argsort(subset, axis=0), axis=0)
-    median_rank = ranks.shape[0] // 2
-    avg_rank_distance = np.abs(ranks - median_rank).mean(axis=1)
-    chosen_idx = np.argmin(avg_rank_distance)
-    central_path = subset[chosen_idx]
-    return central_path
+    lower, upper = hist_vol - hist_vol_std, hist_vol + hist_vol_std
+    subset = paths[(vols >= lower) & (vols <= upper)]
+    if subset.size == 0:
+        subset = paths
+    med_idx = np.argsort(subset[:, -1])[len(subset)//2]
+    return subset[med_idx]
 
 # ---------- Stats ----------
 def compute_forecast_stats_from_path(path, start_cap, last_date):
@@ -370,13 +355,13 @@ def plot_forecasts(port_rets, start_cap, central, reb_label):
     dates = pd.date_range(start=last, periods=len(central), freq="M")
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(port_cum.index, port_cum.values, label="Portfolio Backtest")
-    ax.plot([last, *dates], [port_cum.iloc[-1], *fore], label="Forecast (Median-Rank Path)", lw=2)
+    ax.plot([last, *dates], [port_cum.iloc[-1], *fore], label="Forecast (Vol-Conditioned Middle Path)", lw=2)
     ax.legend()
     st.pyplot(fig)
 
 # ---------- Streamlit ----------
 def main():
-    st.title("Portfolio Forecasting Tool – Vol-Conditioned Median-Rank Path (12-Month Scaled Residuals)")
+    st.title("Portfolio Forecasting Tool – Dynamic Volatility Features")
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1000000.0, 10000.0, 1000.0)
@@ -420,7 +405,7 @@ def main():
             txt.empty()
 
             paths = np.vstack(all_paths)
-            final = find_vol_conditioned_path(paths, port_rets)
+            final = find_vol_conditioned_middle_path(paths, port_rets)
 
             stats = compute_forecast_stats_from_path(final, start_cap, port_rets.index[-1])
             back = {
@@ -437,7 +422,7 @@ def main():
                 for k, v in back.items():
                     st.metric(k, f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
             with c2:
-                st.markdown("**Forecast (Median-Rank Path)**")
+                st.markdown("**Forecast (Vol-Conditioned Middle Path)**")
                 for k, v in stats.items():
                     st.metric(k, f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
             st.metric("Forecasted Portfolio Value", f"${final[-1] * start_cap:,.2f}")
@@ -450,6 +435,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
