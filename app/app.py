@@ -257,16 +257,17 @@ def train_indicator_models(X, feats):
         models[f] = mdl
     return models
 
-# ---------- Block Bootstrap ----------
+# ---------- Block Bootstrap (fixed) ----------
 def block_bootstrap_residuals(residuals, size, block_len, rng):
     n = len(residuals)
-    if size < block_len:
+    if size <= block_len:
         return rng.choice(residuals, size=size, replace=True).astype(residuals.dtype, copy=False)
+
     valid_starts = np.arange(0, n - block_len + 1)
-    starts = rng.choice(valid_starts, size // block_len, replace=True)
-    idx = (starts[:, None] + np.arange(block_len)).ravel()
-    flat = residuals[idx[:size]]
-    return np.ascontiguousarray(flat)
+    n_blocks = int(np.ceil(size / block_len))
+    starts = rng.choice(valid_starts, n_blocks, replace=True)
+    idx = (starts[:, None] + np.arange(block_len)).ravel()[:size]
+    return np.ascontiguousarray(residuals[idx], dtype=residuals.dtype)
 
 # ---------- Monte Carlo ----------
 def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
@@ -450,6 +451,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
