@@ -24,7 +24,7 @@ np.random.seed(GLOBAL_SEED)
 # ---------- Config ----------
 DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 100
-SIMS_PER_SEED = 100
+SIMS_PER_SEED = 10000
 FORECAST_YEARS = 1
 
 # ---------- Helpers ----------
@@ -193,7 +193,7 @@ def _median_params(params_list):
     return out
 
 
-def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=50):
+def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=100)
     years = _oos_years_available(Y.index, years_back)
     params_all, details = [], []
     total_jobs = len(years) * n_trials
@@ -419,7 +419,7 @@ def main():
                 )
                 all_paths.append(sims)
                 bar.progress((i + 1) / ENSEMBLE_SEEDS)
-                txt.text(f"Running forecasts... {i + 1}/{ENSEMBLE_SEEDS}")
+                txt.text(f"Running forecasts... {i + 1}%/{ENSEMBLE_SEEDS}%")
             bar.empty()
             txt.empty()
 
