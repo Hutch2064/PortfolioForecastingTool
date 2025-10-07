@@ -270,7 +270,7 @@ def block_bootstrap_residuals(residuals, size, block_len, rng):
     flat = residuals[idx[:size]]
     return np.ascontiguousarray(flat)
 
-# ---------- Monte Carlo (no residual-vol scaling) ----------
+# ---------- Monte Carlo ----------
 def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
                           seed_id=None, block_len=12, indicator_models=None, port_rets=None):
     horizon = FORECAST_YEARS * 12
@@ -338,7 +338,7 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
         "Max Drawdown": max_drawdown_from_rets(rets),
     }
 
-# ---------- SHAP (Upgraded) ----------
+# ---------- SHAP (Cleaned - no interaction plot) ----------
 def plot_feature_attributions(model, X, medoid_states):
     expl = shap.TreeExplainer(model)
     shap_hist = np.abs(expl.shap_values(X)).mean(axis=0)
@@ -364,17 +364,11 @@ def plot_feature_attributions(model, X, medoid_states):
     ax.set_xticklabels(feats, rotation=45, ha="right")
     ax.set_ylabel("% of explained return variance")
     ax.legend()
+    ax.set_title("Feature Contribution to Returns (Backtest vs Forecast)")
     plt.tight_layout()
     st.pyplot(fig)
 
-    # interaction effects
-    shap_inter = np.abs(shap.TreeExplainer(model).shap_interaction_values(X)).mean(axis=(0, 1))
-    top_idx = np.argsort(shap_inter.sum(axis=1))[-10:][::-1]
-    fig2, ax2 = plt.subplots(figsize=(8, 5))
-    ax2.barh(np.array(feats)[top_idx], shap_inter.sum(axis=1)[top_idx])
-    ax2.set_title("Top 10 Interaction Effects (Backtest)")
-    st.pyplot(fig2)
-    st.metric("Residual (Unexplained %)", f"{unexplained_pct:.2f}%")
+    st.metric("Residual (Unexplained % of Return Variance)", f"{unexplained_pct:.2f}%")
 
 # ---------- Plot ----------
 def plot_forecasts(port_rets, start_cap, central, reb_label):
@@ -467,6 +461,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
