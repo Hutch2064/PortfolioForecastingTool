@@ -289,8 +289,8 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
         mom_6m  = df_temp.diff(6, axis=1).iloc[:, -1].fillna(0).values
         mom_12m = df_temp.diff(12, axis=1).iloc[:, -1].fillna(0).values
 
-        vol_3m  = inc.iloc[:, -3:].std(axis=1, ddof=0).values  if t >= 2  else np.zeros(sims_per_seed)
-        vol_6m  = inc.iloc[:, -6:].std(axis=1, ddof=0).values  if t >= 5  else np.zeros(sims_per_seed)
+        vol_3m  = inc.iloc[:, -3:].std(axis=1, ddof=0).values if t >= 2 else np.zeros(sims_per_seed)
+        vol_6m  = inc.iloc[:, -6:].std(axis=1, ddof=0).values if t >= 5 else np.zeros(sims_per_seed)
         vol_12m = inc.iloc[:, -12:].std(axis=1, ddof=0).values if t >= 11 else np.zeros(sims_per_seed)
 
         cum_vals = np.exp(df_temp)
@@ -338,53 +338,49 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
         "Max Drawdown": max_drawdown_from_rets(rets),
     }
 
-# ---------- SHAP (Upgraded, with explained vs unexplained %) ----------
+# ---------- SHAP (with R²-based unexplained bar) ----------
 def plot_feature_attributions(model, X, medoid_states, Y_base=None):
     expl = shap.TreeExplainer(model)
     shap_vals_hist = expl.shap_values(X)
     shap_hist = np.abs(shap_vals_hist).mean(axis=0)
 
-    # Forecast SHAP across medoid states
     shap_fore_all = []
     for s in medoid_states:
         val = np.abs(expl.shap_values(pd.DataFrame([s], columns=X.columns)))
         shap_fore_all.append(val.reshape(-1))
     shap_fore = np.mean(shap_fore_all, axis=0)
 
-    # ---- Compute unexplained % (based on real variance) ----
-    unexplained_back = np.nan
-    if Y_base is not None:
-        y_pred = model.predict(X)
-        total_var = np.sum(np.abs(Y_base - Y_base.mean()))
-        shap_explained = np.sum(np.abs(shap_vals_hist))
-        unexplained_back = max(0, 100 * (1 - shap_explained / total_var))
+    feats = list(X.columns)
 
-    # Forecast unexplained % (approx)
-    total_fore_mag = np.sum(np.abs(model.predict(pd.DataFrame(medoid_states, columns=X.columns))))
-    shap_explained_fore = np.sum(np.abs(shap_fore))
-    unexplained_fore = max(0, 100 * (1 - shap_explained_fore / total_fore_mag))
+    # Compute model R² for backtest and forecast
+    y_pred_back = model.predict(X)
+    r2_back = 1 - np.var(Y_base - y_pred_back) / np.var(Y_base)
+    unexpl_back = max(0, (1 - r2_back) * 100)
 
-    # ---- Normalize bars for readability ----
-    feats = X.columns
-    sh_hist_pct = shap_hist / shap_hist.sum() * 100
-    sh_fore_pct = shap_fore / shap_fore.sum() * 100
+    y_pred_fore = model.predict(pd.DataFrame(medoid_states, columns=X.columns))
+    r2_fore = 1 - np.var(y_pred_fore - y_pred_fore.mean()) / np.var(y_pred_fore)
+    unexpl_fore = max(0, (1 - r2_fore) * 100)
 
-    pos = np.arange(len(feats))
+    # Normalize SHAP values
+    sh_hist_pct = shap_hist / shap_hist.sum() * (r2_back * 100)
+    sh_fore_pct = shap_fore / shap_fore.sum() * (r2_fore * 100)
+
+    # Add unexplained as final bar
+    feats_ext = feats + ["Unexplained (Residual Variance)"]
+    sh_hist_ext = np.append(sh_hist_pct, unexpl_back)
+    sh_fore_ext = np.append(sh_fore_pct, unexpl_fore)
+
+    pos = np.arange(len(feats_ext))
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.bar(pos - 0.2, sh_hist_pct, width=0.4, label="Backtest (avg)")
-    ax.bar(pos + 0.2, sh_fore_pct, width=0.4, label="Forecast (medoid)")
+    ax.bar(pos - 0.2, sh_hist_ext, width=0.4, label="Backtest (avg)")
+    ax.bar(pos + 0.2, sh_fore_ext, width=0.4, label="Forecast (medoid)")
     ax.set_xticks(pos)
-    ax.set_xticklabels(feats, rotation=45, ha="right")
-    ax.set_ylabel("% of explained return variance (feature-level)")
+    ax.set_xticklabels(feats_ext, rotation=45, ha="right")
+    ax.set_ylabel("% of total return variance (explained + unexplained)")
     ax.legend()
     ax.set_title("Feature Contribution to Returns (Backtest vs Forecast)")
     plt.tight_layout()
     st.pyplot(fig)
-
-    # ---- Metrics ----
-    if not np.isnan(unexplained_back):
-        st.metric("Backtest Residual (Unexplained % of Return Variance)", f"{unexplained_back:.2f}%")
-    st.metric("Forecast Residual (Unexplained % of Return Variance)", f"{unexplained_fore:.2f}%")
 
 # ---------- Plot ----------
 def plot_forecasts(port_rets, start_cap, central, reb_label):
@@ -468,7 +464,6 @@ def main():
 
             plot_forecasts(port_rets, start_cap, final, reb_label)
 
-            # SHAP for backtest and medoid forecast line
             medoid_states = np.repeat(X.iloc[[-1]].values, FORECAST_YEARS*12, axis=0)
             plot_feature_attributions(model, X, medoid_states, Y_base=Y)
 
