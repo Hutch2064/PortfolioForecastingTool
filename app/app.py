@@ -227,8 +227,10 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
             txt.text(f"Tuning models... {int(done / total_jobs * 100)}%")
             return rmse, -da
 
-        study = optuna.create_study(directions=["minimize", "minimize"],
-                                    sampler=optuna.samplers.TPESampler(seed=seed))
+        study = optuna.create_study(
+            directions=["minimize", "minimize"],
+            sampler=optuna.samplers.TPESampler(seed=seed)
+        )
         study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
         best = study.best_trials[0]
         details.append({
@@ -252,9 +254,11 @@ def train_indicator_models(X, feats):
         df = pd.concat([X, y.rename("target")], axis=1).dropna()
         if len(df) < 24:
             continue
-        mdl = LGBMRegressor(n_estimators=500, max_depth=3, learning_rate=0.05,
-                            subsample=0.8, colsample_bytree=0.8,
-                            random_state=GLOBAL_SEED, n_jobs=1)
+        mdl = LGBMRegressor(
+            n_estimators=500, max_depth=3, learning_rate=0.05,
+            subsample=0.8, colsample_bytree=0.8,
+            random_state=GLOBAL_SEED, n_jobs=1
+        )
         mdl.fit(df[X.columns], df["target"])
         models[f] = mdl
     return models
@@ -280,17 +284,17 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
     for t in range(horizon):
         mu_t = model.predict(state)
         shocks = block_bootstrap_residuals(residuals, sims_per_seed, block_len, rng)
-        log_paths[:, t] = (log_paths[:, t-1] if t > 0 else 0) + mu_t + shocks
+        log_paths[:, t] = (log_paths[:, t - 1] if t > 0 else 0) + mu_t + shocks
 
-        df_temp = pd.DataFrame(log_paths[:, :t+1])
+        df_temp = pd.DataFrame(log_paths[:, :t + 1])
         inc = df_temp.diff(axis=1)
 
-        mom_3m  = df_temp.diff(3, axis=1).iloc[:, -1].fillna(0).values
-        mom_6m  = df_temp.diff(6, axis=1).iloc[:, -1].fillna(0).values
+        mom_3m = df_temp.diff(3, axis=1).iloc[:, -1].fillna(0).values
+        mom_6m = df_temp.diff(6, axis=1).iloc[:, -1].fillna(0).values
         mom_12m = df_temp.diff(12, axis=1).iloc[:, -1].fillna(0).values
 
-        vol_3m  = inc.iloc[:, -3:].std(axis=1, ddof=0).values if t >= 2 else np.zeros(sims_per_seed)
-        vol_6m  = inc.iloc[:, -6:].std(axis=1, ddof=0).values if t >= 5 else np.zeros(sims_per_seed)
+        vol_3m = inc.iloc[:, -3:].std(axis=1, ddof=0).values if t >= 2 else np.zeros(sims_per_seed)
+        vol_6m = inc.iloc[:, -6:].std(axis=1, ddof=0).values if t >= 5 else np.zeros(sims_per_seed)
         vol_12m = inc.iloc[:, -12:].std(axis=1, ddof=0).values if t >= 11 else np.zeros(sims_per_seed)
 
         cum_vals = np.exp(df_temp)
@@ -298,7 +302,7 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
 
         for name, vals in zip(
             ["mom_3m", "mom_6m", "mom_12m", "vol_3m", "vol_6m", "vol_12m", "dd_state"],
-            [mom_3m, mom_6m, mom_12m, vol_3m, vol_6m, vol_12m, dd_state],
+            [mom_3m, mom_6m, mom_12m, vol_3m, vol_6m, vol_12m, dd_state]
         ):
             if name in X_base.columns:
                 col_idx = list(X_base.columns).index(name)
@@ -338,11 +342,10 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
         "Max Drawdown": max_drawdown_from_rets(rets),
     }
 
-# ---------- SHAP (with R²-based unexplained bar) ----------
-def plot_feature_attributions(model, X, medoid_states, Y_base=None):
+# ---------- SHAP ----------
+def plot_feature_attributions(model, X, medoid_states):
     expl = shap.TreeExplainer(model)
-    shap_vals_hist = expl.shap_values(X)
-    shap_hist = np.abs(shap_vals_hist).mean(axis=0)
+    shap_hist = np.abs(expl.shap_values(X)).mean(axis=0)
 
     shap_fore_all = []
     for s in medoid_states:
@@ -350,35 +353,16 @@ def plot_feature_attributions(model, X, medoid_states, Y_base=None):
         shap_fore_all.append(val.reshape(-1))
     shap_fore = np.mean(shap_fore_all, axis=0)
 
-    feats = list(X.columns)
-
-    # Compute model R² for backtest and forecast
-    y_pred_back = model.predict(X)
-    r2_back = 1 - np.var(Y_base - y_pred_back) / np.var(Y_base)
-    unexpl_back = max(0, (1 - r2_back) * 100)
-
-    y_pred_fore = model.predict(pd.DataFrame(medoid_states, columns=X.columns))
-    r2_fore = 1 - np.var(y_pred_fore - y_pred_fore.mean()) / np.var(y_pred_fore)
-    unexpl_fore = max(0, (1 - r2_fore) * 100)
-
-    # Normalize SHAP values
-    sh_hist_pct = shap_hist / shap_hist.sum() * (r2_back * 100)
-    sh_fore_pct = shap_fore / shap_fore.sum() * (r2_fore * 100)
-
-    # Add unexplained as final bar
-    feats_ext = feats + ["Unexplained (Residual Variance)"]
-    sh_hist_ext = np.append(sh_hist_pct, unexpl_back)
-    sh_fore_ext = np.append(sh_fore_pct, unexpl_fore)
-
-    pos = np.arange(len(feats_ext))
+    feats = X.columns
+    pos = np.arange(len(feats))
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.bar(pos - 0.2, sh_hist_ext, width=0.4, label="Backtest (avg)")
-    ax.bar(pos + 0.2, sh_fore_ext, width=0.4, label="Forecast (medoid)")
+    ax.bar(pos - 0.2, shap_hist / shap_hist.sum() * 100, width=0.4, label="Backtest (avg)")
+    ax.bar(pos + 0.2, shap_fore / shap_fore.sum() * 100, width=0.4, label="Forecast (medoid)")
     ax.set_xticks(pos)
-    ax.set_xticklabels(feats_ext, rotation=45, ha="right")
-    ax.set_ylabel("% of total return variance (explained + unexplained)")
-    ax.legend()
+    ax.set_xticklabels(feats, rotation=45, ha="right")
+    ax.set_ylabel("% of explained return variance (feature-level)")
     ax.set_title("Feature Contribution to Returns (Backtest vs Forecast)")
+    ax.legend()
     plt.tight_layout()
     st.pyplot(fig)
 
@@ -416,7 +400,6 @@ def main():
             Y = Y.loc[X.index]
 
             cons, _, _, _ = tune_across_recent_oos_years(X, Y, 5, GLOBAL_SEED, 50)
-            st.json(cons)
             blk_len = int(cons.get("block_length", 12))
             lgb_params = {k: v for k, v in cons.items() if k != "block_length"}
             model = LGBMRegressor(**lgb_params)
@@ -431,8 +414,9 @@ def main():
             txt = st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng = np.random.default_rng(GLOBAL_SEED + i)
-                sims = run_monte_carlo_paths(model, X, Y, res, SIMS_PER_SEED, rng,
-                                             i, blk_len, indicators, port_rets)
+                sims = run_monte_carlo_paths(
+                    model, X, Y, res, SIMS_PER_SEED, rng, i, blk_len, indicators, port_rets
+                )
                 all_paths.append(sims)
                 bar.progress((i + 1) / ENSEMBLE_SEEDS)
                 txt.text(f"Running forecasts... {i + 1}/{ENSEMBLE_SEEDS}")
@@ -464,14 +448,15 @@ def main():
 
             plot_forecasts(port_rets, start_cap, final, reb_label)
 
-            medoid_states = np.repeat(X.iloc[[-1]].values, FORECAST_YEARS*12, axis=0)
-            plot_feature_attributions(model, X, medoid_states, Y_base=Y)
+            medoid_states = np.repeat(X.iloc[[-1]].values, FORECAST_YEARS * 12, axis=0)
+            plot_feature_attributions(model, X, medoid_states)
 
         except Exception as e:
             st.error(f"Error: {e}")
 
 if __name__ == "__main__":
     main()
+
 
 
 
