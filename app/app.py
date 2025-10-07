@@ -105,39 +105,35 @@ def fetch_macro_features(start=DEFAULT_START):
     df["YC_Spread"] = close["^TNX"] - close["^IRX"]
     return df
 
-# ---------- Portfolio (academically correct compounding) ----------
+# ---------- Portfolio (academically correct & numerically stable) ----------
 def portfolio_log_returns_monthly(prices, weights, rebalance):
     """
-    Compute portfolio log returns through wealth aggregation (academically correct),
-    not by directly averaging log returns.
+    Academically correct portfolio log returns using wealth aggregation,
+    fixed to maintain numerical stability and realistic scaling.
     """
     prices = prices.ffill().dropna()
     weights = np.array(weights, dtype=np.float64)
     gross = prices / prices.shift(1)
     gross.iloc[0] = 1.0
 
-    port_val = np.ones(len(prices))
-    holdings = weights / np.dot(weights, prices.iloc[0].values)
+    port_val = 1.0
+    port_vals = [port_val]
 
     freq_map = {"M": "M", "Q": "Q", "S": "2Q", "Y": "A", "N": None}
     rule = freq_map.get(rebalance)
+    rebalance_dates = gross.resample(rule).last().index if rule else []
 
-    if rule is None:
-        # No rebalancing (drift naturally)
-        for t in range(1, len(prices)):
-            port_val[t] = port_val[t - 1] * np.dot(holdings, gross.iloc[t].values)
-            holdings *= gross.iloc[t].values
-            holdings /= holdings.sum()
-    else:
-        rebalance_dates = gross.resample(rule).last().index
-        for t, date in enumerate(prices.index[1:], start=1):
-            port_val[t] = port_val[t - 1] * np.dot(holdings, gross.loc[date].values)
-            if date in rebalance_dates:
-                holdings = weights / np.dot(weights, prices.loc[date].values)
+    holdings = weights / np.dot(weights, prices.iloc[0].values)
 
-    log_rets = np.log(pd.Series(port_val, index=prices.index) /
-                      pd.Series(port_val, index=prices.index).shift(1))
-    return log_rets.dropna().astype(np.float32)
+    for date in prices.index[1:]:
+        port_val *= np.dot(holdings, gross.loc[date].values)
+        port_vals.append(port_val)
+        if rule and date in rebalance_dates:
+            holdings = weights / np.dot(weights, prices.loc[date].values)
+
+    port_series = pd.Series(port_vals, index=prices.index)
+    log_rets = np.log(port_series / port_series.shift(1)).dropna()
+    return log_rets.astype(np.float32)
 
 # ---------- Features ----------
 def build_features(returns):
@@ -273,12 +269,10 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
     horizon = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon), dtype=np.float32)
     state = np.repeat(X_base.iloc[[-1]].values, sims_per_seed, axis=0).astype(np.float32)
-
     for t in range(horizon):
         mu_t = model.predict(state)
         shocks = block_bootstrap_residuals(residuals, sims_per_seed, block_len, rng)
         log_paths[:, t] = (log_paths[:, t - 1] if t > 0 else 0) + mu_t + shocks
-
         df_temp = pd.DataFrame(log_paths[:, :t + 1])
         inc = df_temp.diff(axis=1)
         mom_3m = df_temp.diff(3, axis=1).iloc[:, -1].fillna(0).values
