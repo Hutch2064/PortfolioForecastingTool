@@ -213,30 +213,24 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
                 "max_depth": trial.suggest_int("max_depth", 2, 6),
                 "subsample": trial.suggest_float("subsample", 0.5, 1.0),
                 "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
-                "block_length": trial.suggest_int("block_length", 3, 6),
                 "random_state": seed,
                 "n_jobs": 1,
             }
-            mdl = LGBMRegressor(**{k: v for k, v in params.items() if k != "block_length"})
+            mdl = LGBMRegressor(**params)
             mdl.fit(Xtr, Ytr)
             preds = mdl.predict(Xte)
             rmse = np.sqrt(mean_squared_error(Yte, preds))
-            da = (np.sign(Yte) == np.sign(preds)).mean()
             done += 1
             bar.progress(done / total_jobs)
             txt.text(f"Tuning models... {int(done / total_jobs * 100)}%")
-            return rmse, -da
+            return rmse
 
-        study = optuna.create_study(
-            directions=["minimize", "minimize"],
-            sampler=optuna.samplers.TPESampler(seed=seed)
-        )
+        study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=seed))
         study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
-        best = study.best_trials[0]
+        best = study.best_trial
         details.append({
             "year": y,
-            "rmse": float(best.values[0]),
-            "da": -float(best.values[1]),
+            "rmse": float(best.value),
             "best_params": dict(best.params),
         })
         params_all.append(dict(best.params))
@@ -276,7 +270,7 @@ def block_bootstrap_residuals(residuals, size, block_len, rng):
 
 # ---------- Monte Carlo ----------
 def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
-                          seed_id=None, block_len=12, indicator_models=None, port_rets=None):
+                          seed_id=None, block_len=6, indicator_models=None, port_rets=None):
     horizon = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon), dtype=np.float32)
     state = np.repeat(X_base.iloc[[-1]].values, sims_per_seed, axis=0).astype(np.float32)
@@ -400,8 +394,8 @@ def main():
             Y = Y.loc[X.index]
 
             cons, _, _, _ = tune_across_recent_oos_years(X, Y, 5, GLOBAL_SEED, 50)
-            blk_len = int(cons.get("block_length", 12))
-            lgb_params = {k: v for k, v in cons.items() if k != "block_length"}
+            blk_len = 6  # Fixed block length instead of Optuna tuning
+            lgb_params = {k: v for k, v in cons.items()}
             model = LGBMRegressor(**lgb_params)
             model.fit(X, Y)
             res = (Y.values - model.predict(X)).astype(np.float32)
@@ -456,6 +450,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
