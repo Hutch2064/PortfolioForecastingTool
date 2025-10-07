@@ -105,35 +105,47 @@ def fetch_macro_features(start=DEFAULT_START):
     df["YC_Spread"] = close["^TNX"] - close["^IRX"]
     return df
 
-# ---------- Portfolio (academically correct & numerically stable) ----------
+# ---------- Portfolio (fixed drift) ----------
 def portfolio_log_returns_monthly(prices, weights, rebalance):
     """
-    Academically correct portfolio log returns using wealth aggregation,
-    fixed to maintain numerical stability and realistic scaling.
+    Computes portfolio log returns with proper weighting, rebalancing,
+    and log-space consistency. Guaranteed not to collapse to zero.
     """
-    prices = prices.ffill().dropna()
-    weights = np.array(weights, dtype=np.float64)
-    gross = prices / prices.shift(1)
-    gross.iloc[0] = 1.0
+    prices = prices.ffill().dropna().astype(np.float64)
+    n_assets = prices.shape[1]
+    weights = np.array(weights, dtype=np.float64).reshape(-1)
 
-    port_val = 1.0
-    port_vals = [port_val]
+    # Enforce dimension match
+    if len(weights) != n_assets:
+        raise ValueError(f"Weight count ({len(weights)}) does not match asset count ({n_assets})")
 
+    rets = np.log(prices / prices.shift(1)).dropna()
+
+    # Map rebalancing frequency
     freq_map = {"M": "M", "Q": "Q", "S": "2Q", "Y": "A", "N": None}
     rule = freq_map.get(rebalance)
-    rebalance_dates = gross.resample(rule).last().index if rule else []
+    if rule is None and rebalance != "N":
+        raise ValueError("Invalid rebalance frequency")
 
-    holdings = weights / np.dot(weights, prices.iloc[0].values)
+    # No rebalancing: static weights
+    if rebalance == "N":
+        port_rets = (rets * weights).sum(axis=1)
+        return port_rets.astype(np.float32)
 
-    for date in prices.index[1:]:
-        port_val *= np.dot(holdings, gross.loc[date].values)
-        port_vals.append(port_val)
-        if rule and date in rebalance_dates:
-            holdings = weights / np.dot(weights, prices.loc[date].values)
+    # Rebalancing: reset weights at interval
+    rebalance_dates = rets.resample(rule).last().index
+    port_vals = [1.0]
+    current_weights = weights.copy()
 
-    port_series = pd.Series(port_vals, index=prices.index)
-    log_rets = np.log(port_series / port_series.shift(1)).dropna()
-    return log_rets.astype(np.float32)
+    for i in range(1, len(rets)):
+        gross = np.exp(rets.iloc[i].values)
+        port_vals.append(port_vals[-1] * np.dot(current_weights, gross))
+        if rets.index[i] in rebalance_dates:
+            current_weights = weights.copy()
+
+    port_vals = pd.Series(port_vals, index=rets.index)
+    port_rets = np.log(port_vals / port_vals.shift(1)).dropna()
+    return port_rets.astype(np.float32)
 
 # ---------- Features ----------
 def build_features(returns):
@@ -227,7 +239,11 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
         study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=seed))
         study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
         best = study.best_trial
-        details.append({"year": y, "rmse": float(best.value), "best_params": dict(best.params)})
+        details.append({
+            "year": y,
+            "rmse": float(best.value),
+            "best_params": dict(best.params),
+        })
         params_all.append(dict(best.params))
     bar.empty()
     txt.empty()
@@ -257,6 +273,7 @@ def block_bootstrap_residuals(residuals, size, block_len, rng):
     n = len(residuals)
     if size <= block_len:
         return rng.choice(residuals, size=size, replace=True).astype(residuals.dtype, copy=False)
+
     valid_starts = np.arange(0, n - block_len + 1)
     n_blocks = int(np.ceil(size / block_len))
     starts = rng.choice(valid_starts, n_blocks, replace=True)
@@ -269,20 +286,26 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
     horizon = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon), dtype=np.float32)
     state = np.repeat(X_base.iloc[[-1]].values, sims_per_seed, axis=0).astype(np.float32)
+
     for t in range(horizon):
         mu_t = model.predict(state)
         shocks = block_bootstrap_residuals(residuals, sims_per_seed, block_len, rng)
         log_paths[:, t] = (log_paths[:, t - 1] if t > 0 else 0) + mu_t + shocks
+
         df_temp = pd.DataFrame(log_paths[:, :t + 1])
         inc = df_temp.diff(axis=1)
+
         mom_3m = df_temp.diff(3, axis=1).iloc[:, -1].fillna(0).values
         mom_6m = df_temp.diff(6, axis=1).iloc[:, -1].fillna(0).values
         mom_12m = df_temp.diff(12, axis=1).iloc[:, -1].fillna(0).values
+
         vol_3m = inc.iloc[:, -3:].std(axis=1, ddof=0).values if t >= 2 else np.zeros(sims_per_seed)
         vol_6m = inc.iloc[:, -6:].std(axis=1, ddof=0).values if t >= 5 else np.zeros(sims_per_seed)
         vol_12m = inc.iloc[:, -12:].std(axis=1, ddof=0).values if t >= 11 else np.zeros(sims_per_seed)
+
         cum_vals = np.exp(df_temp)
         dd_state = cum_vals.values[:, -1] / np.maximum.accumulate(cum_vals.values, axis=1)[:, -1] - 1
+
         for name, vals in zip(
             ["mom_3m", "mom_6m", "mom_12m", "vol_3m", "vol_6m", "vol_12m", "dd_state"],
             [mom_3m, mom_6m, mom_12m, vol_3m, vol_6m, vol_12m, dd_state]
@@ -290,12 +313,14 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
             if name in X_base.columns:
                 col_idx = list(X_base.columns).index(name)
                 state[:, col_idx] = vals
+
         if indicator_models:
             for feat in ("VIX", "MOVE", "YC_Spread"):
                 if feat in indicator_models:
                     col_idx = list(X_base.columns).index(feat)
                     preds = indicator_models[feat].predict(state)
                     state[:, col_idx] = preds
+
     return np.exp(log_paths - log_paths[:, [0]], dtype=np.float32)
 
 # ---------- True Medoid Path ----------
@@ -327,11 +352,13 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
 def plot_feature_attributions(model, X, medoid_states):
     expl = shap.TreeExplainer(model)
     shap_hist = np.abs(expl.shap_values(X)).mean(axis=0)
+
     shap_fore_all = []
     for s in medoid_states:
         val = np.abs(expl.shap_values(pd.DataFrame([s], columns=X.columns)))
         shap_fore_all.append(val.reshape(-1))
     shap_fore = np.mean(shap_fore_all, axis=0)
+
     feats = X.columns
     pos = np.arange(len(feats))
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -377,6 +404,7 @@ def main():
             Y = port_rets.loc[df.index].astype(np.float32)
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
+
             cons, _, _, _ = tune_across_recent_oos_years(X, Y, 5, GLOBAL_SEED, 50)
             blk_len = 3
             lgb_params = {k: v for k, v in cons.items()}
@@ -384,20 +412,26 @@ def main():
             model.fit(X, Y)
             res = (Y.values - model.predict(X)).astype(np.float32)
             res = np.ascontiguousarray(res[~np.isnan(res)])
+
             indicators = train_indicator_models(X, ["VIX", "MOVE", "YC_Spread"])
+
             all_paths = []
             bar = st.progress(0)
             txt = st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng = np.random.default_rng(GLOBAL_SEED + i)
-                sims = run_monte_carlo_paths(model, X, Y, res, SIMS_PER_SEED, rng, i, blk_len, indicators, port_rets)
+                sims = run_monte_carlo_paths(
+                    model, X, Y, res, SIMS_PER_SEED, rng, i, blk_len, indicators, port_rets
+                )
                 all_paths.append(sims)
                 bar.progress((i + 1) / ENSEMBLE_SEEDS)
                 txt.text(f"Running forecasts... {i + 1}%/{ENSEMBLE_SEEDS}%")
             bar.empty()
             txt.empty()
+
             paths = np.vstack(all_paths)
             final = compute_medoid_path(paths)
+
             stats = compute_forecast_stats_from_path(final, start_cap, port_rets.index[-1])
             back = {
                 "CAGR": annualized_return_monthly(port_rets),
@@ -405,6 +439,7 @@ def main():
                 "Sharpe": annualized_sharpe_monthly(port_rets),
                 "Max Drawdown": max_drawdown_from_rets(port_rets),
             }
+
             st.subheader("Results")
             c1, c2 = st.columns(2)
             with c1:
@@ -416,14 +451,18 @@ def main():
                 for k, v in stats.items():
                     st.metric(k, f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
             st.metric("Forecasted Portfolio Value", f"${final[-1] * start_cap:,.2f}")
+
             plot_forecasts(port_rets, start_cap, final, reb_label)
+
             medoid_states = np.repeat(X.iloc[[-1]].values, FORECAST_YEARS * 12, axis=0)
             plot_feature_attributions(model, X, medoid_states)
+
         except Exception as e:
             st.error(f"Error: {e}")
 
 if __name__ == "__main__":
     main()
+
 
 
 
