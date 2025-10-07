@@ -193,7 +193,7 @@ def _median_params(params_list):
     return out
 
 
-def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=100)
+def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=100):
     years = _oos_years_available(Y.index, years_back)
     params_all, details = [], []
     total_jobs = len(years) * n_trials
