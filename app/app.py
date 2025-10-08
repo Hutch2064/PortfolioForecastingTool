@@ -10,7 +10,7 @@ from lightgbm import LGBMRegressor
 import matplotlib.pyplot as plt
 import shap
 import streamlit as st
-from sklearn.metrics import mean_squared_error
+from sklearn.preprocessing import StandardScaler
 import optuna
 
 warnings.filterwarnings("ignore")
@@ -101,14 +101,12 @@ def fetch_macro_features(start=DEFAULT_START):
     data = yf.download(tickers, start=start, interval="1mo", progress=False, threads=False)
     close = data["Close"].ffill().astype(np.float32)
     df = pd.DataFrame(index=close.index)
-
     df["VIX"] = close["^VIX"]
     df["MOVE"] = close["^MOVE"]
     df["YC_Spread"] = close["^TNX"] - close["^IRX"]
     df["Gold"] = close["GC=F"]
     df["DXY"] = close["DX-Y.NYB"]
     df["SKEW"] = close["^SKEW"]
-
     df = df.ffill().bfill()
     return df
 
@@ -214,6 +212,11 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
         if len(Xtr) < 24 or len(Xte) < 6:
             continue
 
+        # --- standardize features ---
+        scaler = StandardScaler()
+        Xtr_s = pd.DataFrame(scaler.fit_transform(Xtr), columns=Xtr.columns, index=Xtr.index)
+        Xte_s = pd.DataFrame(scaler.transform(Xte), columns=Xte.columns, index=Xte.index)
+
         def objective(trial):
             nonlocal done
             params = {
@@ -226,22 +229,20 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
                 "n_jobs": 1,
             }
             mdl = LGBMRegressor(**params)
-            mdl.fit(Xtr, Ytr)
-            preds = mdl.predict(Xte)
-            rmse = np.sqrt(mean_squared_error(Yte, preds))
+            mdl.fit(Xtr_s, Ytr)
+            preds = mdl.predict(Xte_s)
+            acc = np.mean(np.sign(preds) == np.sign(Yte))
             done += 1
             bar.progress(done / total_jobs)
             txt.text(f"Tuning models... {int(done / total_jobs * 100)}%")
-            return rmse
+            return 1 - acc  # minimize 1 - directional accuracy
 
-        study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=seed))
+        study = optuna.create_study(direction="minimize",
+                                    sampler=optuna.samplers.TPESampler(seed=seed))
         study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
         best = study.best_trial
-        details.append({
-            "year": y,
-            "rmse": float(best.value),
-            "best_params": dict(best.params),
-        })
+        details.append({"year": y, "acc_loss": float(best.value),
+                        "best_params": dict(best.params)})
         params_all.append(dict(best.params))
     bar.empty()
     txt.empty()
@@ -273,7 +274,6 @@ def block_bootstrap_residuals(residuals, size, block_len, rng):
     n = len(residuals)
     if size <= block_len:
         return rng.choice(residuals, size=size, replace=True).astype(residuals.dtype, copy=False)
-
     valid_starts = np.arange(0, n - block_len + 1)
     n_blocks = int(np.ceil(size / block_len))
     starts = rng.choice(valid_starts, n_blocks, replace=True)
@@ -321,7 +321,6 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
                     col_idx = list(X_base.columns).index(feat)
                     preds = indicator_models[feat].predict(state)
                     state[:, col_idx] = preds
-
     return np.exp(log_paths - log_paths[:, [0]], dtype=np.float32)
 
 
@@ -356,7 +355,6 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
 def plot_feature_attributions(model, X, medoid_states):
     expl = shap.TreeExplainer(model)
     shap_hist = np.abs(expl.shap_values(X)).mean(axis=0)
-
     shap_fore_all = []
     for s in medoid_states:
         val = np.abs(expl.shap_values(pd.DataFrame([s], columns=X.columns)))
@@ -385,7 +383,8 @@ def plot_forecasts(port_rets, start_cap, central, reb_label):
     dates = pd.date_range(start=last, periods=len(central), freq="M")
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(port_cum.index, port_cum.values, label="Portfolio Backtest")
-    ax.plot([last, *dates], [port_cum.iloc[-1], *fore], label="Forecast (Medoid Path)", lw=2)
+    ax.plot([last, *dates], [port_cum.iloc[-1], *fore],
+            label="Forecast (Medoid Path)", lw=2)
     ax.legend()
     st.pyplot(fig)
 
@@ -395,8 +394,10 @@ def main():
     st.title("Portfolio Forecasting Tool")
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
-    start_cap = st.number_input("Starting Value ($)", 1000.0, 1000000.0, 10000.0, 1000.0)
-    freq_map = {"M": "Monthly", "Q": "Quarterly", "S": "Semiannual", "Y": "Yearly", "N": "None"}
+    start_cap = st.number_input("Starting Value ($)", 1000.0, 1000000.0,
+                                10000.0, 1000.0)
+    freq_map = {"M": "Monthly", "Q": "Quarterly", "S": "Semiannual",
+                "Y": "Yearly", "N": "None"}
     reb_label = st.selectbox("Rebalance", list(freq_map.values()), index=0)
     reb = [k for k, v in freq_map.items() if v == reb_label][0]
 
@@ -411,24 +412,31 @@ def main():
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
 
-            cons, _, _, _ = tune_across_recent_oos_years(X, Y, 5, GLOBAL_SEED, 50)
-            blk_len = 3
+            # --- standardize all features ---
+            scaler = StandardScaler()
+            X = pd.DataFrame(scaler.fit_transform(X), columns=X.columns,
+                             index=X.index)
+
+            cons, _, _, _ = tune_across_recent_oos_years(X, Y, 5,
+                                                         GLOBAL_SEED, 50)
+            blk_len = 1
             lgb_params = {k: v for k, v in cons.items()}
             model = LGBMRegressor(**lgb_params)
             model.fit(X, Y)
             res = (Y.values - model.predict(X)).astype(np.float32)
             res = np.ascontiguousarray(res[~np.isnan(res)])
 
-            indicators = train_indicator_models(X, ["VIX", "MOVE", "YC_Spread", "Gold", "DXY", "SKEW"])
+            indicators = train_indicator_models(X,
+                ["VIX", "MOVE", "YC_Spread", "Gold", "DXY", "SKEW"])
 
             all_paths = []
             bar = st.progress(0)
             txt = st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng = np.random.default_rng(GLOBAL_SEED + i)
-                sims = run_monte_carlo_paths(
-                    model, X, Y, res, SIMS_PER_SEED, rng, i, blk_len, indicators, port_rets
-                )
+                sims = run_monte_carlo_paths(model, X, Y, res, SIMS_PER_SEED,
+                                             rng, i, blk_len, indicators,
+                                             port_rets)
                 all_paths.append(sims)
                 progress = int((i + 1) / ENSEMBLE_SEEDS * 100)
                 bar.progress((i + 1) / ENSEMBLE_SEEDS)
@@ -439,7 +447,8 @@ def main():
             paths = np.vstack(all_paths)
             final = compute_medoid_path(paths)
 
-            stats = compute_forecast_stats_from_path(final, start_cap, port_rets.index[-1])
+            stats = compute_forecast_stats_from_path(final, start_cap,
+                                                     port_rets.index[-1])
             back = {
                 "CAGR": annualized_return_monthly(port_rets),
                 "Volatility": annualized_vol_monthly(port_rets),
@@ -457,11 +466,13 @@ def main():
                 st.markdown("**Forecast (Medoid Path)**")
                 for k, v in stats.items():
                     st.metric(k, f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
-            st.metric("Forecasted Portfolio Value", f"${final[-1] * start_cap:,.2f}")
+            st.metric("Forecasted Portfolio Value",
+                      f"${final[-1] * start_cap:,.2f}")
 
             plot_forecasts(port_rets, start_cap, final, reb_label)
 
-            medoid_states = np.repeat(X.iloc[[-1]].values, FORECAST_YEARS * 12, axis=0)
+            medoid_states = np.repeat(X.iloc[[-1]].values,
+                                      FORECAST_YEARS * 12, axis=0)
             plot_feature_attributions(model, X, medoid_states)
 
         except Exception as e:
@@ -470,6 +481,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
