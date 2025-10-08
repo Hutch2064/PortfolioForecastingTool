@@ -109,10 +109,6 @@ def fetch_macro_features(start=DEFAULT_START):
     df["DXY"] = close["DX-Y.NYB"]
     df["SKEW"] = close["^SKEW"]
 
-    # Add % change versions
-    for col in ["VIX", "MOVE", "Gold", "DXY", "SKEW"]:
-        df[f"{col}_chg"] = df[col].pct_change()
-
     df = df.ffill().bfill()
     return df
 
@@ -250,6 +246,8 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
     bar.empty()
     txt.empty()
     return _median_params(params_all), details, np.nan, np.nan
+
+
 # ---------- Indicator Models ----------
 def train_indicator_models(X, feats):
     models = {}
@@ -432,8 +430,9 @@ def main():
                     model, X, Y, res, SIMS_PER_SEED, rng, i, blk_len, indicators, port_rets
                 )
                 all_paths.append(sims)
+                progress = int((i + 1) / ENSEMBLE_SEEDS * 100)
                 bar.progress((i + 1) / ENSEMBLE_SEEDS)
-                txt.text(f"Running forecasts... {i + 1}/{ENSEMBLE_SEEDS}")
+                txt.text(f"Running forecasts... {progress}%")
             bar.empty()
             txt.empty()
 
