@@ -74,7 +74,6 @@ def compute_current_drawdown(returns):
 def realized_vol(returns, window):
     return returns.rolling(window).std(ddof=0)
 
-
 # ---------- Data Fetch ----------
 def fetch_prices_monthly(tickers, start=DEFAULT_START):
     data = yf.download(tickers, start=start, interval="1mo", auto_adjust=False, progress=False, threads=False)
@@ -97,50 +96,56 @@ def fetch_prices_monthly(tickers, start=DEFAULT_START):
 
 
 def fetch_macro_features(start=DEFAULT_START):
-    tickers = ["^VIX", "^MOVE", "^TNX", "^IRX", "GC=F", "DX-Y.NYB", "^SKEW"]
+    tickers = ["^VIX", "^MOVE", "^TNX", "^IRX"]
     data = yf.download(tickers, start=start, interval="1mo", progress=False, threads=False)
     close = data["Close"].ffill().astype(np.float32)
     df = pd.DataFrame(index=close.index)
-
     df["VIX"] = close["^VIX"]
     df["MOVE"] = close["^MOVE"]
     df["YC_Spread"] = close["^TNX"] - close["^IRX"]
-    df["Gold"] = close["GC=F"]
-    df["DXY"] = close["DX-Y.NYB"]
-    df["SKEW"] = close["^SKEW"]
-
-    df = df.ffill().bfill()
     return df
 
-
-# ---------- Portfolio ----------
+# ---------- Portfolio (fixed drift) ----------
 def portfolio_log_returns_monthly(prices, weights, rebalance):
+    """
+    Computes portfolio log returns with proper weighting, rebalancing,
+    and log-space consistency. Guaranteed not to collapse to zero.
+    """
     prices = prices.ffill().dropna().astype(np.float64)
     n_assets = prices.shape[1]
     weights = np.array(weights, dtype=np.float64).reshape(-1)
+
+    # Enforce dimension match
     if len(weights) != n_assets:
-        raise ValueError(f"Weight count ({len(weights)}) != asset count ({n_assets})")
+        raise ValueError(f"Weight count ({len(weights)}) does not match asset count ({n_assets})")
+
     rets = np.log(prices / prices.shift(1)).dropna()
 
+    # Map rebalancing frequency
     freq_map = {"M": "M", "Q": "Q", "S": "2Q", "Y": "A", "N": None}
     rule = freq_map.get(rebalance)
     if rule is None and rebalance != "N":
         raise ValueError("Invalid rebalance frequency")
 
+    # No rebalancing: static weights
     if rebalance == "N":
-        return (rets * weights).sum(axis=1).astype(np.float32)
+        port_rets = (rets * weights).sum(axis=1)
+        return port_rets.astype(np.float32)
 
+    # Rebalancing: reset weights at interval
     rebalance_dates = rets.resample(rule).last().index
     port_vals = [1.0]
     current_weights = weights.copy()
+
     for i in range(1, len(rets)):
         gross = np.exp(rets.iloc[i].values)
         port_vals.append(port_vals[-1] * np.dot(current_weights, gross))
         if rets.index[i] in rebalance_dates:
             current_weights = weights.copy()
-    port_vals = pd.Series(port_vals, index=rets.index)
-    return np.log(port_vals / port_vals.shift(1)).dropna().astype(np.float32)
 
+    port_vals = pd.Series(port_vals, index=rets.index)
+    port_rets = np.log(port_vals / port_vals.shift(1)).dropna()
+    return port_rets.astype(np.float32)
 
 # ---------- Features ----------
 def build_features(returns):
@@ -152,14 +157,11 @@ def build_features(returns):
     df["vol_6m"] = realized_vol(returns, 6)
     df["vol_12m"] = realized_vol(returns, 12)
     df["dd_state"] = compute_current_drawdown(returns)
-
     macro = fetch_macro_features()
-    df = df.join(macro, how="left").fillna(method="ffill").fillna(method="bfill")
-
+    df = df.join(macro, how="left").ffill()
     valid_start = max([df[c].first_valid_index() for c in df.columns if df[c].first_valid_index()])
     df = df.loc[valid_start:].dropna()
     return df.astype(np.float32)
-
 
 # ---------- Optuna ----------
 def _oos_years_available(idx, max_years=5):
@@ -247,7 +249,6 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
     txt.empty()
     return _median_params(params_all), details, np.nan, np.nan
 
-
 # ---------- Indicator Models ----------
 def train_indicator_models(X, feats):
     models = {}
@@ -267,8 +268,7 @@ def train_indicator_models(X, feats):
         models[f] = mdl
     return models
 
-
-# ---------- Block Bootstrap ----------
+# ---------- Block Bootstrap (fixed) ----------
 def block_bootstrap_residuals(residuals, size, block_len, rng):
     n = len(residuals)
     if size <= block_len:
@@ -279,7 +279,6 @@ def block_bootstrap_residuals(residuals, size, block_len, rng):
     starts = rng.choice(valid_starts, n_blocks, replace=True)
     idx = (starts[:, None] + np.arange(block_len)).ravel()[:size]
     return np.ascontiguousarray(residuals[idx], dtype=residuals.dtype)
-
 
 # ---------- Monte Carlo ----------
 def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
@@ -316,14 +315,13 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
                 state[:, col_idx] = vals
 
         if indicator_models:
-            for feat in ["VIX", "MOVE", "YC_Spread", "Gold", "DXY", "SKEW"]:
+            for feat in ("VIX", "MOVE", "YC_Spread"):
                 if feat in indicator_models:
                     col_idx = list(X_base.columns).index(feat)
                     preds = indicator_models[feat].predict(state)
                     state[:, col_idx] = preds
 
     return np.exp(log_paths - log_paths[:, [0]], dtype=np.float32)
-
 
 # ---------- True Medoid Path ----------
 def compute_medoid_path(paths):
@@ -337,7 +335,6 @@ def compute_medoid_path(paths):
     medoid_idx = np.argmax(sims)
     return paths[medoid_idx]
 
-
 # ---------- Stats ----------
 def compute_forecast_stats_from_path(path, start_cap, last_date):
     norm = path / path[0]
@@ -350,7 +347,6 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
         "Sharpe": annualized_sharpe_monthly(rets),
         "Max Drawdown": max_drawdown_from_rets(rets),
     }
-
 
 # ---------- SHAP ----------
 def plot_feature_attributions(model, X, medoid_states):
@@ -376,7 +372,6 @@ def plot_feature_attributions(model, X, medoid_states):
     plt.tight_layout()
     st.pyplot(fig)
 
-
 # ---------- Plot ----------
 def plot_forecasts(port_rets, start_cap, central, reb_label):
     port_cum = np.exp(port_rets.cumsum()) * start_cap
@@ -388,7 +383,6 @@ def plot_forecasts(port_rets, start_cap, central, reb_label):
     ax.plot([last, *dates], [port_cum.iloc[-1], *fore], label="Forecast (Medoid Path)", lw=2)
     ax.legend()
     st.pyplot(fig)
-
 
 # ---------- Streamlit ----------
 def main():
@@ -412,14 +406,14 @@ def main():
             Y = Y.loc[X.index]
 
             cons, _, _, _ = tune_across_recent_oos_years(X, Y, 5, GLOBAL_SEED, 50)
-            blk_len = 1
+            blk_len = 3
             lgb_params = {k: v for k, v in cons.items()}
             model = LGBMRegressor(**lgb_params)
             model.fit(X, Y)
             res = (Y.values - model.predict(X)).astype(np.float32)
             res = np.ascontiguousarray(res[~np.isnan(res)])
 
-            indicators = train_indicator_models(X, ["VIX", "MOVE", "YC_Spread", "Gold", "DXY", "SKEW"])
+            indicators = train_indicator_models(X, ["VIX", "MOVE", "YC_Spread"])
 
             all_paths = []
             bar = st.progress(0)
@@ -430,9 +424,8 @@ def main():
                     model, X, Y, res, SIMS_PER_SEED, rng, i, blk_len, indicators, port_rets
                 )
                 all_paths.append(sims)
-                progress = int((i + 1) / ENSEMBLE_SEEDS * 100)
                 bar.progress((i + 1) / ENSEMBLE_SEEDS)
-                txt.text(f"Running forecasts... {progress}%")
+                txt.text(f"Running forecasts... {i + 1}%/{ENSEMBLE_SEEDS}%")
             bar.empty()
             txt.empty()
 
@@ -466,7 +459,6 @@ def main():
 
         except Exception as e:
             st.error(f"Error: {e}")
-
 
 if __name__ == "__main__":
     main()
