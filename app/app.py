@@ -96,43 +96,46 @@ def fetch_prices_monthly(tickers, start=DEFAULT_START):
 
 
 def fetch_macro_features(start=DEFAULT_START):
-    tickers = ["^VIX", "^MOVE", "^TNX", "^IRX"]
+    tickers = [
+        "^VIX", "^MOVE", "^TNX", "^IRX",
+        "^SKEW", "DX-Y.NYB",
+        "GLD", "TLT", "VT", "BND"
+    ]
     data = yf.download(tickers, start=start, interval="1mo", progress=False, threads=False)
     close = data["Close"].ffill().astype(np.float32)
+
     df = pd.DataFrame(index=close.index)
     df["VIX"] = close["^VIX"]
     df["MOVE"] = close["^MOVE"]
     df["YC_Spread"] = close["^TNX"] - close["^IRX"]
+    df["SKEW"] = close["^SKEW"]
+    df["DXY"] = close["DX-Y.NYB"]
+
+    vt_bnd_combo = close["VT"] + close["BND"]
+    df["GLD_REL"] = close["GLD"] / vt_bnd_combo
+    df["TLT_REL"] = close["TLT"] / vt_bnd_combo
+
     return df
 
-# ---------- Portfolio (fixed drift) ----------
+# ---------- Portfolio ----------
 def portfolio_log_returns_monthly(prices, weights, rebalance):
-    """
-    Computes portfolio log returns with proper weighting, rebalancing,
-    and log-space consistency. Guaranteed not to collapse to zero.
-    """
     prices = prices.ffill().dropna().astype(np.float64)
     n_assets = prices.shape[1]
     weights = np.array(weights, dtype=np.float64).reshape(-1)
 
-    # Enforce dimension match
     if len(weights) != n_assets:
         raise ValueError(f"Weight count ({len(weights)}) does not match asset count ({n_assets})")
 
     rets = np.log(prices / prices.shift(1)).dropna()
-
-    # Map rebalancing frequency
     freq_map = {"M": "M", "Q": "Q", "S": "2Q", "Y": "A", "N": None}
     rule = freq_map.get(rebalance)
     if rule is None and rebalance != "N":
         raise ValueError("Invalid rebalance frequency")
 
-    # No rebalancing: static weights
     if rebalance == "N":
         port_rets = (rets * weights).sum(axis=1)
         return port_rets.astype(np.float32)
 
-    # Rebalancing: reset weights at interval
     rebalance_dates = rets.resample(rule).last().index
     port_vals = [1.0]
     current_weights = weights.copy()
@@ -268,29 +271,21 @@ def train_indicator_models(X, feats):
         models[f] = mdl
     return models
 
-# ---------- Block Bootstrap (fixed) ----------
-def block_bootstrap_residuals(residuals, size, block_len, rng):
-    n = len(residuals)
-    if size <= block_len:
-        return rng.choice(residuals, size=size, replace=True).astype(residuals.dtype, copy=False)
-
-    valid_starts = np.arange(0, n - block_len + 1)
-    n_blocks = int(np.ceil(size / block_len))
-    starts = rng.choice(valid_starts, n_blocks, replace=True)
-    idx = (starts[:, None] + np.arange(block_len)).ravel()[:size]
-    return np.ascontiguousarray(residuals[idx], dtype=residuals.dtype)
-
 # ---------- Monte Carlo ----------
-def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
-                          seed_id=None, block_len=3, indicator_models=None, port_rets=None):
+def run_monte_carlo_paths(model, X_base, residuals, sims_per_seed, rng,
+                          block_len=3, indicator_models=None):
     horizon = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon), dtype=np.float32)
+    mu_records = np.zeros((sims_per_seed, horizon), dtype=np.float32)
+    shock_records = np.zeros((sims_per_seed, horizon), dtype=np.float32)
     state = np.repeat(X_base.iloc[[-1]].values, sims_per_seed, axis=0).astype(np.float32)
 
     for t in range(horizon):
         mu_t = model.predict(state)
-        shocks = block_bootstrap_residuals(residuals, sims_per_seed, block_len, rng)
+        shocks = rng.choice(residuals, sims_per_seed, replace=True)
         log_paths[:, t] = (log_paths[:, t - 1] if t > 0 else 0) + mu_t + shocks
+        mu_records[:, t] = mu_t
+        shock_records[:, t] = shocks
 
         df_temp = pd.DataFrame(log_paths[:, :t + 1])
         inc = df_temp.diff(axis=1)
@@ -315,15 +310,15 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
                 state[:, col_idx] = vals
 
         if indicator_models:
-            for feat in ("VIX", "MOVE", "YC_Spread"):
+            for feat in ("VIX", "MOVE", "YC_Spread", "SKEW", "DXY", "GLD_REL", "TLT_REL"):
                 if feat in indicator_models:
                     col_idx = list(X_base.columns).index(feat)
                     preds = indicator_models[feat].predict(state)
                     state[:, col_idx] = preds
 
-    return np.exp(log_paths - log_paths[:, [0]], dtype=np.float32)
+    return np.exp(log_paths - log_paths[:, [0]], dtype=np.float32), mu_records, shock_records
 
-# ---------- True Medoid Path ----------
+# ---------- Medoid ----------
 def compute_medoid_path(paths):
     log_paths = np.log(paths)
     diffs = np.diff(log_paths, axis=1)
@@ -332,32 +327,13 @@ def compute_medoid_path(paths):
     dots = np.sum(normed * mean_traj, axis=1)
     norms = np.linalg.norm(normed, axis=1) * np.linalg.norm(mean_traj)
     sims = dots / (norms + 1e-9)
-    medoid_idx = np.argmax(sims)
-    return paths[medoid_idx]
-
-# ---------- Stats ----------
-def compute_forecast_stats_from_path(path, start_cap, last_date):
-    norm = path / path[0]
-    idx = pd.date_range(start=last_date, periods=len(norm) + 1, freq="M")
-    price = pd.Series(norm, index=idx[:-1]) * start_cap
-    rets = np.log(price / price.shift(1)).dropna()
-    return {
-        "CAGR": annualized_return_monthly(rets),
-        "Volatility": annualized_vol_monthly(rets),
-        "Sharpe": annualized_sharpe_monthly(rets),
-        "Max Drawdown": max_drawdown_from_rets(rets),
-    }
+    return np.argmax(sims)
 
 # ---------- SHAP ----------
 def plot_feature_attributions(model, X, medoid_states):
     expl = shap.TreeExplainer(model)
     shap_hist = np.abs(expl.shap_values(X)).mean(axis=0)
-
-    shap_fore_all = []
-    for s in medoid_states:
-        val = np.abs(expl.shap_values(pd.DataFrame([s], columns=X.columns)))
-        shap_fore_all.append(val.reshape(-1))
-    shap_fore = np.mean(shap_fore_all, axis=0)
+    shap_fore = np.abs(expl.shap_values(medoid_states)).mean(axis=0)
 
     feats = X.columns
     pos = np.arange(len(feats))
@@ -380,7 +356,7 @@ def plot_forecasts(port_rets, start_cap, central, reb_label):
     dates = pd.date_range(start=last, periods=len(central), freq="M")
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(port_cum.index, port_cum.values, label="Portfolio Backtest")
-    ax.plot([last, *dates], [port_cum.iloc[-1], *fore], label="Forecast (Medoid Path)", lw=2)
+    ax.plot([last, *dates], [port_cum.iloc[-1], *fore], label="Forecast (Medoid Path)", lw=2, color="red")
     ax.legend()
     st.pyplot(fig)
 
@@ -413,55 +389,67 @@ def main():
             res = (Y.values - model.predict(X)).astype(np.float32)
             res = np.ascontiguousarray(res[~np.isnan(res)])
 
-            indicators = train_indicator_models(X, ["VIX", "MOVE", "YC_Spread"])
+            indicators = train_indicator_models(X, [
+                "VIX", "MOVE", "YC_Spread", "SKEW", "DXY", "GLD_REL", "TLT_REL"
+            ])
 
-            all_paths = []
+            all_paths, all_mu, all_shocks = [], [], []
             bar = st.progress(0)
             txt = st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng = np.random.default_rng(GLOBAL_SEED + i)
-                sims = run_monte_carlo_paths(
-                    model, X, Y, res, SIMS_PER_SEED, rng, i, blk_len, indicators, port_rets
+                sims, mu_rec, shock_rec = run_monte_carlo_paths(
+                    model, X, res, SIMS_PER_SEED, rng, blk_len, indicators
                 )
                 all_paths.append(sims)
+                all_mu.append(mu_rec)
+                all_shocks.append(shock_rec)
                 bar.progress((i + 1) / ENSEMBLE_SEEDS)
-                txt.text(f"Running forecasts... {i + 1}%/{ENSEMBLE_SEEDS}%")
+                txt.text(f"Running forecasts... {i + 1}/{ENSEMBLE_SEEDS}")
             bar.empty()
             txt.empty()
 
             paths = np.vstack(all_paths)
-            final = compute_medoid_path(paths)
+            mu_mat = np.vstack(all_mu)
+            shock_mat = np.vstack(all_shocks)
 
-            stats = compute_forecast_stats_from_path(final, start_cap, port_rets.index[-1])
-            back = {
-                "CAGR": annualized_return_monthly(port_rets),
-                "Volatility": annualized_vol_monthly(port_rets),
-                "Sharpe": annualized_sharpe_monthly(port_rets),
-                "Max Drawdown": max_drawdown_from_rets(port_rets),
+            medoid_idx = compute_medoid_path(paths)
+            final = paths[medoid_idx]
+            mu_medoid = mu_mat[medoid_idx]
+            shock_medoid = shock_mat[medoid_idx]
+
+            stats = {
+                "CAGR": annualized_return_monthly(pd.Series(np.diff(np.log(final)))),
+                "Volatility": annualized_vol_monthly(pd.Series(np.diff(np.log(final)))),
+                "Sharpe": annualized_sharpe_monthly(pd.Series(np.diff(np.log(final)))),
+                "Max Drawdown": max_drawdown_from_rets(pd.Series(np.diff(np.log(final)))),
             }
 
             st.subheader("Results")
-            c1, c2 = st.columns(2)
-            with c1:
-                st.markdown("**Backtest**")
-                for k, v in back.items():
-                    st.metric(k, f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
-            with c2:
-                st.markdown("**Forecast (Medoid Path)**")
-                for k, v in stats.items():
-                    st.metric(k, f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
+            for k, v in stats.items():
+                st.metric(k, f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
             st.metric("Forecasted Portfolio Value", f"${final[-1] * start_cap:,.2f}")
 
             plot_forecasts(port_rets, start_cap, final, reb_label)
 
-            medoid_states = np.repeat(X.iloc[[-1]].values, FORECAST_YEARS * 12, axis=0)
+            medoid_states = pd.DataFrame(np.repeat(X.iloc[[-1]].values, FORECAST_YEARS * 12, axis=0), columns=X.columns)
             plot_feature_attributions(model, X, medoid_states)
+
+            # ---- Forecasted μ and Residual Table ----
+            idx = pd.date_range(start=port_rets.index[-1], periods=len(mu_medoid), freq="M")
+            table = pd.DataFrame({
+                "Forecasted μ": mu_medoid,
+                "Residual (Shock)": shock_medoid
+            }, index=idx)
+            st.subheader("Forecasted Medoid Path: Monthly μ and Residuals")
+            st.dataframe(table.style.format("{:.5f}"))
 
         except Exception as e:
             st.error(f"Error: {e}")
 
 if __name__ == "__main__":
     main()
+
 
 
 
