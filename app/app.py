@@ -419,7 +419,7 @@ def main():
 
             cons, _, _, _ = tune_across_recent_oos_years(X, Y, 5,
                                                          GLOBAL_SEED, 50)
-            blk_len = 1
+            blk_len = 6
             lgb_params = {k: v for k, v in cons.items()}
             model = LGBMRegressor(**lgb_params)
             model.fit(X, Y)
