@@ -26,6 +26,7 @@ DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 12
 SIMS_PER_SEED = 2000
 FORECAST_YEARS = 1
+P_STATIONARY = 0.1  # Probability of starting a new block (1/p = expected block length)
 
 # ---------- Helpers ----------
 def to_weights(raw: List[float]) -> np.ndarray:
@@ -116,35 +117,24 @@ def portfolio_log_returns_monthly(prices, weights, rebalance):
     prices = prices.ffill().dropna().astype(np.float64)
     n_assets = prices.shape[1]
     weights = np.array(weights, dtype=np.float64).reshape(-1)
-
-    # Enforce dimension match
     if len(weights) != n_assets:
         raise ValueError(f"Weight count ({len(weights)}) does not match asset count ({n_assets})")
-
     rets = np.log(prices / prices.shift(1)).dropna()
-
-    # Map rebalancing frequency
     freq_map = {"M": "M", "Q": "Q", "S": "2Q", "Y": "A", "N": None}
     rule = freq_map.get(rebalance)
     if rule is None and rebalance != "N":
         raise ValueError("Invalid rebalance frequency")
-
-    # No rebalancing: static weights
     if rebalance == "N":
         port_rets = (rets * weights).sum(axis=1)
         return port_rets.astype(np.float32)
-
-    # Rebalancing: reset weights at interval
     rebalance_dates = rets.resample(rule).last().index
     port_vals = [1.0]
     current_weights = weights.copy()
-
     for i in range(1, len(rets)):
         gross = np.exp(rets.iloc[i].values)
         port_vals.append(port_vals[-1] * np.dot(current_weights, gross))
         if rets.index[i] in rebalance_dates:
             current_weights = weights.copy()
-
     port_vals = pd.Series(port_vals, index=rets.index)
     port_rets = np.log(port_vals / port_vals.shift(1)).dropna()
     return port_rets.astype(np.float32)
@@ -217,7 +207,6 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
         Xtr, Ytr, Xte, Yte = _split_train_test_for_year(X, Y, y)
         if len(Xtr) < 24 or len(Xte) < 6:
             continue
-
         def objective(trial):
             nonlocal done
             params = {
@@ -237,15 +226,10 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
             bar.progress(done / total_jobs)
             txt.text(f"Tuning models... {int(done / total_jobs * 100)}%/100%")
             return rmse
-
         study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=seed))
         study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
         best = study.best_trial
-        details.append({
-            "year": y,
-            "rmse": float(best.value),
-            "best_params": dict(best.params),
-        })
+        details.append({"year": y, "rmse": float(best.value), "best_params": dict(best.params)})
         params_all.append(dict(best.params))
     bar.empty()
     txt.empty()
@@ -270,17 +254,27 @@ def train_indicator_models(X, feats):
         models[f] = mdl
     return models
 
-# ---------- Block Bootstrap (fixed) ----------
-def block_bootstrap_residuals(residuals, size, block_len, rng):
+# ---------- Stationary Bootstrap ----------
+def stationary_bootstrap_residuals(residuals, size, p=P_STATIONARY, rng=None):
+    """
+    Stationary Bootstrap (Politis & Romano, 1994)
+    - residuals: np.array of original residuals
+    - size: number of simulated steps to generate
+    - p: probability of starting a new block (1/p = expected block length)
+    - rng: np.random.Generator for reproducibility
+    """
+    if rng is None:
+        rng = np.random.default_rng()
     n = len(residuals)
-    if size <= block_len:
-        return rng.choice(residuals, size=size, replace=True).astype(residuals.dtype, copy=False)
-
-    valid_starts = np.arange(0, n - block_len + 1)
-    n_blocks = int(np.ceil(size / block_len))
-    starts = rng.choice(valid_starts, n_blocks, replace=True)
-    idx = (starts[:, None] + np.arange(block_len)).ravel()[:size]
-    return np.ascontiguousarray(residuals[idx], dtype=residuals.dtype)
+    out = np.empty(size, dtype=np.float32)
+    idx = rng.integers(0, n)
+    for t in range(size):
+        out[t] = residuals[idx]
+        if rng.random() < p:
+            idx = rng.integers(0, n)
+        else:
+            idx = (idx + 1) % n
+    return out
 
 # ---------- Monte Carlo ----------
 def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
@@ -288,26 +282,20 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
     horizon = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon), dtype=np.float32)
     state = np.repeat(X_base.iloc[[-1]].values, sims_per_seed, axis=0).astype(np.float32)
-
     for t in range(horizon):
         mu_t = model.predict(state)
-        shocks = block_bootstrap_residuals(residuals, sims_per_seed, block_len, rng)
+        shocks = stationary_bootstrap_residuals(residuals, sims_per_seed, p=P_STATIONARY, rng=rng)
         log_paths[:, t] = (log_paths[:, t - 1] if t > 0 else 0) + mu_t + shocks
-
         df_temp = pd.DataFrame(log_paths[:, :t + 1])
         inc = df_temp.diff(axis=1)
-
         mom_3m = df_temp.diff(3, axis=1).iloc[:, -1].fillna(0).values
         mom_6m = df_temp.diff(6, axis=1).iloc[:, -1].fillna(0).values
         mom_12m = df_temp.diff(12, axis=1).iloc[:, -1].fillna(0).values
-
         vol_3m = inc.iloc[:, -3:].std(axis=1, ddof=0).values if t >= 2 else np.zeros(sims_per_seed)
         vol_6m = inc.iloc[:, -6:].std(axis=1, ddof=0).values if t >= 5 else np.zeros(sims_per_seed)
         vol_12m = inc.iloc[:, -12:].std(axis=1, ddof=0).values if t >= 11 else np.zeros(sims_per_seed)
-
         cum_vals = np.exp(df_temp)
         dd_state = cum_vals.values[:, -1] / np.maximum.accumulate(cum_vals.values, axis=1)[:, -1] - 1
-
         for name, vals in zip(
             ["mom_3m", "mom_6m", "mom_12m", "vol_3m", "vol_6m", "vol_12m", "dd_state"],
             [mom_3m, mom_6m, mom_12m, vol_3m, vol_6m, vol_12m, dd_state]
@@ -315,14 +303,12 @@ def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
             if name in X_base.columns:
                 col_idx = list(X_base.columns).index(name)
                 state[:, col_idx] = vals
-
         if indicator_models:
             for feat in ("VIX", "MOVE", "YC_Spread", "SKEW", "DXY"):
                 if feat in indicator_models:
                     col_idx = list(X_base.columns).index(feat)
                     preds = indicator_models[feat].predict(state)
                     state[:, col_idx] = preds
-
     return np.exp(log_paths - log_paths[:, [0]], dtype=np.float32)
 
 # ---------- True Medoid Path ----------
@@ -354,13 +340,11 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
 def plot_feature_attributions(model, X, medoid_states):
     expl = shap.TreeExplainer(model)
     shap_hist = np.abs(expl.shap_values(X)).mean(axis=0)
-
     shap_fore_all = []
     for s in medoid_states:
         val = np.abs(expl.shap_values(pd.DataFrame([s], columns=X.columns)))
         shap_fore_all.append(val.reshape(-1))
     shap_fore = np.mean(shap_fore_all, axis=0)
-
     feats = X.columns
     pos = np.arange(len(feats))
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -395,7 +379,6 @@ def main():
     freq_map = {"M": "Monthly", "Q": "Quarterly", "S": "Semiannual", "Y": "Yearly", "N": "None"}
     reb_label = st.selectbox("Rebalance", list(freq_map.values()), index=0)
     reb = [k for k, v in freq_map.items() if v == reb_label][0]
-
     if st.button("Run Forecast"):
         try:
             weights = to_weights([float(x) for x in weights_str.split(",")])
@@ -406,7 +389,6 @@ def main():
             Y = port_rets.loc[df.index].astype(np.float32)
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
-
             cons, _, _, _ = tune_across_recent_oos_years(X, Y, 5, GLOBAL_SEED, 50)
             blk_len = 2
             lgb_params = {k: v for k, v in cons.items()}
@@ -414,9 +396,7 @@ def main():
             model.fit(X, Y)
             res = (Y.values - model.predict(X)).astype(np.float32)
             res = np.ascontiguousarray(res[~np.isnan(res)])
-
             indicators = train_indicator_models(X, ["VIX", "MOVE", "YC_Spread", "SKEW", "DXY"])
-
             all_paths = []
             bar = st.progress(0)
             txt = st.empty()
@@ -430,10 +410,8 @@ def main():
                 txt.text(f"Running forecasts... {int((i + 1) / ENSEMBLE_SEEDS * 100)}%/100%")
             bar.empty()
             txt.empty()
-
             paths = np.vstack(all_paths)
             final = compute_medoid_path(paths)
-
             stats = compute_forecast_stats_from_path(final, start_cap, port_rets.index[-1])
             back = {
                 "CAGR": annualized_return_monthly(port_rets),
@@ -441,7 +419,6 @@ def main():
                 "Sharpe": annualized_sharpe_monthly(port_rets),
                 "Max Drawdown": max_drawdown_from_rets(port_rets),
             }
-
             st.subheader("Results")
             c1, c2 = st.columns(2)
             with c1:
@@ -453,17 +430,15 @@ def main():
                 for k, v in stats.items():
                     st.metric(k, f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
             st.metric("Forecasted Portfolio Value", f"${final[-1] * start_cap:,.2f}")
-
             plot_forecasts(port_rets, start_cap, final, reb_label)
-
             medoid_states = np.repeat(X.iloc[[-1]].values, FORECAST_YEARS * 12, axis=0)
             plot_feature_attributions(model, X, medoid_states)
-
         except Exception as e:
             st.error(f"Error: {e}")
 
 if __name__ == "__main__":
     main()
+
 
 
 
