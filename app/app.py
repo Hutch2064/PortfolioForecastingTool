@@ -111,13 +111,11 @@ def fetch_macro_features(start=DEFAULT_START):
     df["SKEW"] = close["^SKEW"]
 
     # Percentage change versions
-    df["VIX_chg"] = df["VIX"].pct_change()
-    df["MOVE_chg"] = df["MOVE"].pct_change()
-    df["Gold_chg"] = df["Gold"].pct_change()
-    df["DXY_chg"] = df["DXY"].pct_change()
-    df["SKEW_chg"] = df["SKEW"].pct_change()
+    for col in ["VIX", "MOVE", "Gold", "DXY", "SKEW"]:
+        df[f"{col}_chg"] = df[col].pct_change()
 
-    return df.ffill()
+    df = df.ffill().bfill()
+    return df
 
 
 # ---------- Portfolio ----------
@@ -161,7 +159,8 @@ def build_features(returns):
     df["dd_state"] = compute_current_drawdown(returns)
 
     macro = fetch_macro_features()
-    df = df.join(macro, how="left").ffill()
+    df = df.join(macro, how="left").fillna(method="ffill").fillna(method="bfill")
+
     valid_start = max([df[c].first_valid_index() for c in df.columns if df[c].first_valid_index()])
     df = df.loc[valid_start:].dropna()
     return df.astype(np.float32)
@@ -268,7 +267,8 @@ def block_bootstrap_residuals(residuals, size, block_len, rng):
 
 
 # ---------- Monte Carlo ----------
-def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng, seed_id=None, block_len=3, indicator_models=None):
+def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
+                          seed_id=None, block_len=3, indicator_models=None):
     horizon = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon), dtype=np.float32)
     state = np.repeat(X_base.iloc[[-1]].values, sims_per_seed, axis=0).astype(np.float32)
@@ -374,10 +374,14 @@ def main():
             port_rets = portfolio_log_returns_monthly(prices, weights, reb)
             df = build_features(port_rets)
             Y = port_rets.loc[df.index].astype(np.float32)
-            X = df.shift(1).dropna(); Y = Y.loc[X.index]
+            X = df.shift(1).dropna()
+            Y = Y.loc[X.index]
+
+            st.write("Features used:", list(X.columns))
 
             cons, _, _, _ = tune_across_recent_oos_years(X, Y, 5, GLOBAL_SEED, 50)
-            model = LGBMRegressor(**cons); model.fit(X, Y)
+            model = LGBMRegressor(**cons)
+            model.fit(X, Y)
             res = (Y.values - model.predict(X)).astype(np.float32)
             res = res[~np.isnan(res)]
 
@@ -422,6 +426,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
