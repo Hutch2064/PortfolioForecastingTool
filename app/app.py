@@ -144,6 +144,25 @@ def build_features(returns):
     df = df.loc[valid_start:].dropna()
     return df.astype(np.float32)
 
+# ---------- Indicator Models ----------
+def train_indicator_models(X, feats):
+    models = {}
+    for f in feats:
+        if f not in X.columns:
+            continue
+        y = X[f].shift(-1)
+        df = pd.concat([X, y.rename("target")], axis=1).dropna()
+        if len(df) < 24:
+            continue
+        mdl = LGBMRegressor(
+            n_estimators=500, max_depth=3, learning_rate=0.05,
+            subsample=0.8, colsample_bytree=0.8,
+            random_state=GLOBAL_SEED, n_jobs=1
+        )
+        mdl.fit(df[X.columns], df["target"])
+        models[f] = mdl
+    return models
+
 # ---------- Monte Carlo ----------
 def block_bootstrap_residuals(residuals, size, block_len, rng):
     n = len(residuals)
@@ -308,6 +327,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
