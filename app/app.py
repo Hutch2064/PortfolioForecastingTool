@@ -26,7 +26,7 @@ DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 12
 SIMS_PER_SEED = 2000
 FORECAST_YEARS = 1
-P_STATIONARY = 0.1  # Probability of starting a new block (1/p = expected block length)
+P_STATIONARY = 0.5  # Probability of starting a new block (1/p = expected block length)
 
 # ---------- Helpers ----------
 def to_weights(raw: List[float]) -> np.ndarray:
