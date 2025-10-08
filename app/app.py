@@ -10,7 +10,7 @@ from lightgbm import LGBMRegressor
 import matplotlib.pyplot as plt
 import shap
 import streamlit as st
-from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error
 import optuna
 
 warnings.filterwarnings("ignore")
@@ -101,12 +101,14 @@ def fetch_macro_features(start=DEFAULT_START):
     data = yf.download(tickers, start=start, interval="1mo", progress=False, threads=False)
     close = data["Close"].ffill().astype(np.float32)
     df = pd.DataFrame(index=close.index)
+
     df["VIX"] = close["^VIX"]
     df["MOVE"] = close["^MOVE"]
     df["YC_Spread"] = close["^TNX"] - close["^IRX"]
     df["Gold"] = close["GC=F"]
     df["DXY"] = close["DX-Y.NYB"]
     df["SKEW"] = close["^SKEW"]
+
     df = df.ffill().bfill()
     return df
 
@@ -157,6 +159,8 @@ def build_features(returns):
     valid_start = max([df[c].first_valid_index() for c in df.columns if df[c].first_valid_index()])
     df = df.loc[valid_start:].dropna()
     return df.astype(np.float32)
+
+
 # ---------- Optuna ----------
 def _oos_years_available(idx, max_years=5):
     years = sorted(set(idx.year))
@@ -210,10 +214,6 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
         if len(Xtr) < 24 or len(Xte) < 6:
             continue
 
-        scaler = StandardScaler()
-        Xtr_s = pd.DataFrame(scaler.fit_transform(Xtr), columns=Xtr.columns, index=Xtr.index)
-        Xte_s = pd.DataFrame(scaler.transform(Xte), columns=Xte.columns, index=Xte.index)
-
         def objective(trial):
             nonlocal done
             params = {
@@ -226,19 +226,25 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
                 "n_jobs": 1,
             }
             mdl = LGBMRegressor(**params)
-            mdl.fit(Xtr_s, Ytr)
-            preds = mdl.predict(Xte_s)
-            acc = np.mean(np.sign(preds) == np.sign(Yte))
+            mdl.fit(Xtr, Ytr)
+            preds = mdl.predict(Xte)
+            rmse = np.sqrt(mean_squared_error(Yte, preds))
             done += 1
             bar.progress(done / total_jobs)
             txt.text(f"Tuning models... {int(done / total_jobs * 100)}%")
-            return 1 - acc
+            return rmse
 
-        study = optuna.create_study(direction="minimize",
-                                    sampler=optuna.samplers.TPESampler(seed=seed))
+        study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=seed))
         study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
-        params_all.append(dict(study.best_trial.params))
-    bar.empty(); txt.empty()
+        best = study.best_trial
+        details.append({
+            "year": y,
+            "rmse": float(best.value),
+            "best_params": dict(best.params),
+        })
+        params_all.append(dict(best.params))
+    bar.empty()
+    txt.empty()
     return _median_params(params_all), details, np.nan, np.nan
 
 
@@ -246,10 +252,12 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
 def train_indicator_models(X, feats):
     models = {}
     for f in feats:
-        if f not in X.columns: continue
+        if f not in X.columns:
+            continue
         y = X[f].shift(-1)
         df = pd.concat([X, y.rename("target")], axis=1).dropna()
-        if len(df) < 24: continue
+        if len(df) < 24:
+            continue
         mdl = LGBMRegressor(
             n_estimators=500, max_depth=3, learning_rate=0.05,
             subsample=0.8, colsample_bytree=0.8,
@@ -264,63 +272,76 @@ def train_indicator_models(X, feats):
 def block_bootstrap_residuals(residuals, size, block_len, rng):
     n = len(residuals)
     if size <= block_len:
-        return rng.choice(residuals, size=size, replace=True)
+        return rng.choice(residuals, size=size, replace=True).astype(residuals.dtype, copy=False)
+
     valid_starts = np.arange(0, n - block_len + 1)
-    starts = rng.choice(valid_starts, int(np.ceil(size / block_len)), replace=True)
+    n_blocks = int(np.ceil(size / block_len))
+    starts = rng.choice(valid_starts, n_blocks, replace=True)
     idx = (starts[:, None] + np.arange(block_len)).ravel()[:size]
-    return residuals[idx]
+    return np.ascontiguousarray(residuals[idx], dtype=residuals.dtype)
 
 
-# ---------- Monte Carlo with evolving μ tracking ----------
-def run_monte_carlo_paths(model, X_base, residuals, sims_per_seed, rng,
-                          block_len=3, indicator_models=None):
+# ---------- Monte Carlo ----------
+def run_monte_carlo_paths(model, X_base, Y_base, residuals, sims_per_seed, rng,
+                          seed_id=None, block_len=3, indicator_models=None, port_rets=None):
     horizon = FORECAST_YEARS * 12
     log_paths = np.zeros((sims_per_seed, horizon), dtype=np.float32)
-    mus_record = np.zeros_like(log_paths)
-    res_record = np.zeros_like(log_paths)
     state = np.repeat(X_base.iloc[[-1]].values, sims_per_seed, axis=0).astype(np.float32)
 
     for t in range(horizon):
         mu_t = model.predict(state)
         shocks = block_bootstrap_residuals(residuals, sims_per_seed, block_len, rng)
         log_paths[:, t] = (log_paths[:, t - 1] if t > 0 else 0) + mu_t + shocks
-        mus_record[:, t] = mu_t
-        res_record[:, t] = shocks
 
         df_temp = pd.DataFrame(log_paths[:, :t + 1])
         inc = df_temp.diff(axis=1)
-        moms = [df_temp.diff(x, axis=1).iloc[:, -1].fillna(0).values for x in [3,6,12]]
-        vols = [inc.iloc[:, -x:].std(axis=1, ddof=0).values if t >= x-1 else np.zeros(sims_per_seed) for x in [3,6,12]]
+
+        mom_3m = df_temp.diff(3, axis=1).iloc[:, -1].fillna(0).values
+        mom_6m = df_temp.diff(6, axis=1).iloc[:, -1].fillna(0).values
+        mom_12m = df_temp.diff(12, axis=1).iloc[:, -1].fillna(0).values
+
+        vol_3m = inc.iloc[:, -3:].std(axis=1, ddof=0).values if t >= 2 else np.zeros(sims_per_seed)
+        vol_6m = inc.iloc[:, -6:].std(axis=1, ddof=0).values if t >= 5 else np.zeros(sims_per_seed)
+        vol_12m = inc.iloc[:, -12:].std(axis=1, ddof=0).values if t >= 11 else np.zeros(sims_per_seed)
+
         cum_vals = np.exp(df_temp)
-        dd = cum_vals.values[:, -1] / np.maximum.accumulate(cum_vals.values, axis=1)[:, -1] - 1
-        for name, vals in zip(["mom_3m","mom_6m","mom_12m","vol_3m","vol_6m","vol_12m","dd_state"],
-                              moms+vols+[dd]):
+        dd_state = cum_vals.values[:, -1] / np.maximum.accumulate(cum_vals.values, axis=1)[:, -1] - 1
+
+        for name, vals in zip(
+            ["mom_3m", "mom_6m", "mom_12m", "vol_3m", "vol_6m", "vol_12m", "dd_state"],
+            [mom_3m, mom_6m, mom_12m, vol_3m, vol_6m, vol_12m, dd_state]
+        ):
             if name in X_base.columns:
-                state[:, list(X_base.columns).index(name)] = vals
+                col_idx = list(X_base.columns).index(name)
+                state[:, col_idx] = vals
 
         if indicator_models:
-            for feat, mdl in indicator_models.items():
-                if feat in X_base.columns:
-                    preds = mdl.predict(state)
-                    state[:, list(X_base.columns).index(feat)] = preds
+            for feat in ["VIX", "MOVE", "YC_Spread", "Gold", "DXY", "SKEW"]:
+                if feat in indicator_models:
+                    col_idx = list(X_base.columns).index(feat)
+                    preds = indicator_models[feat].predict(state)
+                    state[:, col_idx] = preds
 
-    return np.exp(log_paths - log_paths[:, [0]]), mus_record, res_record
+    return np.exp(log_paths - log_paths[:, [0]], dtype=np.float32)
 
 
-# ---------- Medoid ----------
+# ---------- True Medoid Path ----------
 def compute_medoid_path(paths):
-    logp = np.log(paths)
-    diff = np.diff(logp, axis=1)
-    mean_traj = diff.mean(axis=0)
-    sims = np.sum(diff * mean_traj, axis=1) / (np.linalg.norm(diff,axis=1)*np.linalg.norm(mean_traj)+1e-9)
-    idx = np.argmax(sims)
-    return idx, paths[idx]
+    log_paths = np.log(paths)
+    diffs = np.diff(log_paths, axis=1)
+    normed = diffs - diffs.mean(axis=1, keepdims=True)
+    mean_traj = normed.mean(axis=0)
+    dots = np.sum(normed * mean_traj, axis=1)
+    norms = np.linalg.norm(normed, axis=1) * np.linalg.norm(mean_traj)
+    sims = dots / (norms + 1e-9)
+    medoid_idx = np.argmax(sims)
+    return paths[medoid_idx]
 
 
-# ---------- Stats / Plot ----------
+# ---------- Stats ----------
 def compute_forecast_stats_from_path(path, start_cap, last_date):
     norm = path / path[0]
-    idx = pd.date_range(start=last_date, periods=len(norm)+1, freq="M")
+    idx = pd.date_range(start=last_date, periods=len(norm) + 1, freq="M")
     price = pd.Series(norm, index=idx[:-1]) * start_cap
     rets = np.log(price / price.shift(1)).dropna()
     return {
@@ -331,73 +352,124 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
     }
 
 
+# ---------- SHAP ----------
+def plot_feature_attributions(model, X, medoid_states):
+    expl = shap.TreeExplainer(model)
+    shap_hist = np.abs(expl.shap_values(X)).mean(axis=0)
+
+    shap_fore_all = []
+    for s in medoid_states:
+        val = np.abs(expl.shap_values(pd.DataFrame([s], columns=X.columns)))
+        shap_fore_all.append(val.reshape(-1))
+    shap_fore = np.mean(shap_fore_all, axis=0)
+
+    feats = X.columns
+    pos = np.arange(len(feats))
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.bar(pos - 0.2, shap_hist / shap_hist.sum() * 100, width=0.4, label="Backtest (avg)")
+    ax.bar(pos + 0.2, shap_fore / shap_fore.sum() * 100, width=0.4, label="Forecast (medoid)")
+    ax.set_xticks(pos)
+    ax.set_xticklabels(feats, rotation=45, ha="right")
+    ax.set_ylabel("% of explained return variance (feature-level)")
+    ax.set_title("Feature Contribution to Returns (Backtest vs Forecast)")
+    ax.legend()
+    plt.tight_layout()
+    st.pyplot(fig)
+
+
+# ---------- Plot ----------
 def plot_forecasts(port_rets, start_cap, central, reb_label):
     port_cum = np.exp(port_rets.cumsum()) * start_cap
     last = port_cum.index[-1]
     fore = port_cum.iloc[-1] * (central / central[0])
     dates = pd.date_range(start=last, periods=len(central), freq="M")
-    fig, ax = plt.subplots(figsize=(12,6))
-    ax.plot(port_cum.index, port_cum.values, label="Backtest")
-    ax.plot([last, *dates], [port_cum.iloc[-1], *fore], lw=2, label="Forecast (Medoid)")
-    ax.legend(); st.pyplot(fig)
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.plot(port_cum.index, port_cum.values, label="Portfolio Backtest")
+    ax.plot([last, *dates], [port_cum.iloc[-1], *fore], label="Forecast (Medoid Path)", lw=2)
+    ax.legend()
+    st.pyplot(fig)
 
 
 # ---------- Streamlit ----------
 def main():
     st.title("Portfolio Forecasting Tool")
-    tickers = st.text_input("Tickers","VTI,AGG")
-    weights_str = st.text_input("Weights","0.6,0.4")
-    start_cap = st.number_input("Starting Value ($)",1000.0,1000000.0,10000.0,1000.0)
-    freq_map = {"M":"Monthly","Q":"Quarterly","S":"Semiannual","Y":"Yearly","N":"None"}
-    reb_label = st.selectbox("Rebalance",list(freq_map.values()),index=0)
-    reb = [k for k,v in freq_map.items() if v==reb_label][0]
+    tickers = st.text_input("Tickers", "VTI,AGG")
+    weights_str = st.text_input("Weights", "0.6,0.4")
+    start_cap = st.number_input("Starting Value ($)", 1000.0, 1000000.0, 10000.0, 1000.0)
+    freq_map = {"M": "Monthly", "Q": "Quarterly", "S": "Semiannual", "Y": "Yearly", "N": "None"}
+    reb_label = st.selectbox("Rebalance", list(freq_map.values()), index=0)
+    reb = [k for k, v in freq_map.items() if v == reb_label][0]
 
     if st.button("Run Forecast"):
-        weights = to_weights([float(x) for x in weights_str.split(",")])
-        prices = fetch_prices_monthly([t.strip() for t in tickers.split(",")], DEFAULT_START)
-        port_rets = portfolio_log_returns_monthly(prices, weights, reb)
-        df = build_features(port_rets)
-        Y = port_rets.loc[df.index].astype(np.float32)
-        X = df.shift(1).dropna(); Y = Y.loc[X.index]
+        try:
+            weights = to_weights([float(x) for x in weights_str.split(",")])
+            tickers = [t.strip() for t in tickers.split(",") if t.strip()]
+            prices = fetch_prices_monthly(tickers, DEFAULT_START)
+            port_rets = portfolio_log_returns_monthly(prices, weights, reb)
+            df = build_features(port_rets)
+            Y = port_rets.loc[df.index].astype(np.float32)
+            X = df.shift(1).dropna()
+            Y = Y.loc[X.index]
 
-        scaler = StandardScaler()
-        X = pd.DataFrame(scaler.fit_transform(X), columns=X.columns, index=X.index)
+            cons, _, _, _ = tune_across_recent_oos_years(X, Y, 5, GLOBAL_SEED, 50)
+            blk_len = 1
+            lgb_params = {k: v for k, v in cons.items()}
+            model = LGBMRegressor(**lgb_params)
+            model.fit(X, Y)
+            res = (Y.values - model.predict(X)).astype(np.float32)
+            res = np.ascontiguousarray(res[~np.isnan(res)])
 
-        cons,_,_,_ = tune_across_recent_oos_years(X,Y,5,GLOBAL_SEED,50)
-        model = LGBMRegressor(**cons); model.fit(X,Y)
-        resids = (Y.values - model.predict(X)).astype(np.float32)
-        resids = resids[~np.isnan(resids)]
+            indicators = train_indicator_models(X, ["VIX", "MOVE", "YC_Spread", "Gold", "DXY", "SKEW"])
 
-        ind_models = train_indicator_models(X,["VIX","MOVE","YC_Spread","Gold","DXY","SKEW"])
+            all_paths = []
+            bar = st.progress(0)
+            txt = st.empty()
+            for i in range(ENSEMBLE_SEEDS):
+                rng = np.random.default_rng(GLOBAL_SEED + i)
+                sims = run_monte_carlo_paths(
+                    model, X, Y, res, SIMS_PER_SEED, rng, i, blk_len, indicators, port_rets
+                )
+                all_paths.append(sims)
+                progress = int((i + 1) / ENSEMBLE_SEEDS * 100)
+                bar.progress((i + 1) / ENSEMBLE_SEEDS)
+                txt.text(f"Running forecasts... {progress}%")
+            bar.empty()
+            txt.empty()
 
-        all_paths=[]; all_mus=[]; all_res=[]
-        bar=st.progress(0)
-        for i in range(ENSEMBLE_SEEDS):
-            rng=np.random.default_rng(GLOBAL_SEED+i)
-            sims,mus,res=run_monte_carlo_paths(model,X,resids,SIMS_PER_SEED,rng,6,ind_models)
-            all_paths.append(sims); all_mus.append(mus); all_res.append(res)
-            bar.progress((i+1)/ENSEMBLE_SEEDS)
-        bar.empty()
+            paths = np.vstack(all_paths)
+            final = compute_medoid_path(paths)
 
-        paths=np.vstack(all_paths); mus_all=np.vstack(all_mus); res_all=np.vstack(all_res)
-        medoid_idx,final=compute_medoid_path(paths)
-        mu_line=pd.Series(mus_all[medoid_idx]); res_line=pd.Series(res_all[medoid_idx])
+            stats = compute_forecast_stats_from_path(final, start_cap, port_rets.index[-1])
+            back = {
+                "CAGR": annualized_return_monthly(port_rets),
+                "Volatility": annualized_vol_monthly(port_rets),
+                "Sharpe": annualized_sharpe_monthly(port_rets),
+                "Max Drawdown": max_drawdown_from_rets(port_rets),
+            }
 
-        stats=compute_forecast_stats_from_path(final,start_cap,port_rets.index[-1])
-        st.subheader("Forecast μ and Residual Table (Medoid Path)")
-        table=pd.DataFrame({"Month":np.arange(1,len(mu_line)+1),
-                            "μ_t (Predicted)":mu_line,
-                            "Residual":res_line,
-                            "Total Step":mu_line+res_line})
-        st.dataframe(table.style.format({"μ_t (Predicted)":"{:.4f}","Residual":"{:.4f}","Total Step":"{:.4f}"}))
+            st.subheader("Results")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("**Backtest**")
+                for k, v in back.items():
+                    st.metric(k, f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
+            with c2:
+                st.markdown("**Forecast (Medoid Path)**")
+                for k, v in stats.items():
+                    st.metric(k, f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
+            st.metric("Forecasted Portfolio Value", f"${final[-1] * start_cap:,.2f}")
 
-        st.subheader("Forecast Stats")
-        for k,v in stats.items(): st.metric(k,f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
-        plot_forecasts(port_rets,start_cap,final,reb_label)
+            plot_forecasts(port_rets, start_cap, final, reb_label)
 
-if __name__=="__main__":
+            medoid_states = np.repeat(X.iloc[[-1]].values, FORECAST_YEARS * 12, axis=0)
+            plot_feature_attributions(model, X, medoid_states)
+
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+
+if __name__ == "__main__":
     main()
-
 
 
 
