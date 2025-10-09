@@ -100,6 +100,24 @@ def build_features(returns):
     df["lag_ret"] = returns.shift(1)
     return df.dropna().astype(np.float32)
 
+# ---------- Estimate Mean Reversion Parameters ----------
+def estimate_kappa_from_abs_returns(Y: pd.Series):
+    """Estimate mean reversion speed (kappa) and long-run volatility level from data."""
+    vol_proxy = Y.abs().dropna()
+    x = vol_proxy.shift(1).dropna()
+    y = vol_proxy.loc[x.index]
+    if len(x) < 50:
+        return 0.10, vol_proxy.mean()  # fallback
+    X = np.column_stack([np.ones(len(x)), x.values])
+    beta = np.linalg.lstsq(X, y.values, rcond=None)[0]
+    alpha_hat, phi_hat = float(beta[0]), float(beta[1])
+    phi_hat = max(min(phi_hat, 0.99), -0.99)
+    kappa_hat = 1.0 - phi_hat
+    kappa_hat = float(np.clip(kappa_hat, 0.01, 0.50))
+    long_run_vol = alpha_hat / (1.0 - phi_hat) if (1.0 - phi_hat) != 0 else vol_proxy.mean()
+    long_run_vol = float(max(long_run_vol, 1e-6))
+    return kappa_hat, long_run_vol
+
 # ---------- Stationary Bootstrap ----------
 def stationary_bootstrap_residuals(residuals, size, p=P_STATIONARY, rng=None):
     if rng is None:
@@ -117,13 +135,18 @@ def stationary_bootstrap_residuals(residuals, size, p=P_STATIONARY, rng=None):
 
 # ---------- Monte Carlo Simulation ----------
 def run_monte_carlo_paths(model, X_base, residuals, sims_per_seed, rng,
-                          base_mean=0.0, scale=1.0):
+                          base_mean=0.0, scale=1.0, kappa=0.1, long_run_vol=None):
     horizon = FORECAST_DAYS
     log_paths = np.zeros((sims_per_seed, horizon), dtype=np.float32)
     state = np.repeat(X_base.iloc[[-1]].values, sims_per_seed, axis=0).astype(np.float32)
+    if long_run_vol is None:
+        long_run_vol = float(np.std(residuals))
+    sigma_t = np.full(sims_per_seed, long_run_vol, dtype=np.float32)
 
     for t in range(horizon):
-        sigma_t = np.abs(model.predict(state)) * scale
+        sigma_pred = np.abs(model.predict(state)) * scale
+        # Mean-reverting update
+        sigma_t = sigma_t + kappa * (long_run_vol - sigma_t) + 0.1 * (sigma_pred - sigma_t)
         eps = stationary_bootstrap_residuals(residuals, sims_per_seed, p=P_STATIONARY, rng=rng)
         r_t = base_mean + sigma_t * eps
         log_paths[:, t] = (log_paths[:, t - 1] if t > 0 else 0) + r_t
@@ -196,7 +219,7 @@ def plot_forecasts(port_rets, start_cap, central):
 
 # ---------- Streamlit ----------
 def main():
-    st.title("Minimal ML-Integrated Monte Carlo (Daily, Featureless)")
+    st.title("Minimal ML-Integrated Monte Carlo (Daily, Featureless, Mean-Reverting)")
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1000000.0, 10000.0, 1000.0)
@@ -225,16 +248,19 @@ def main():
             )
             model.fit(X, vol_target)
 
-            # Compute standardized residuals + optional calibration
             sigma_hat = model.predict(X)
-            scale = 1.0  # toggle calibration manually if needed
+            scale = 1.0
             res = (Y.loc[X.index].values / (sigma_hat + 1e-8)).astype(np.float32)
             res = np.ascontiguousarray(res[~np.isnan(res)])
             res -= res.mean()
 
-            # Geometric-drift anchoring
             backtest_CAGR = annualized_return_daily(port_rets)
             base_mean = np.log(1.0 + backtest_CAGR) / 252.0
+
+            # Estimate kappa and long-run vol empirically
+            kappa_hat, long_run_vol = estimate_kappa_from_abs_returns(Y)
+            st.write(f"Estimated mean reversion speed (κ): {kappa_hat:.3f}")
+            st.write(f"Estimated long-run volatility level: {long_run_vol:.4f}")
 
             all_paths = []
             bar = st.progress(0)
@@ -242,7 +268,8 @@ def main():
             for i in range(ENSEMBLE_SEEDS):
                 rng = np.random.default_rng(GLOBAL_SEED + i)
                 sims = run_monte_carlo_paths(
-                    model, X, res, SIMS_PER_SEED, rng, base_mean, scale
+                    model, X, res, SIMS_PER_SEED, rng,
+                    base_mean, scale, kappa_hat, long_run_vol
                 )
                 all_paths.append(sims)
                 bar.progress((i + 1) / ENSEMBLE_SEEDS)
@@ -286,6 +313,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
