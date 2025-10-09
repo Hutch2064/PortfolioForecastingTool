@@ -199,6 +199,7 @@ def _median_params(params_list):
 def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=100):
     years = _oos_years_available(Y.index, years_back)
     params_all, details = [], []
+    results_summary = []
     total_jobs = len(years) * n_trials
     bar = st.progress(0)
     txt = st.empty()
@@ -207,6 +208,7 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
         Xtr, Ytr, Xte, Yte = _split_train_test_for_year(X, Y, y)
         if len(Xtr) < 24 or len(Xte) < 6:
             continue
+
         def objective(trial):
             nonlocal done
             params = {
@@ -215,6 +217,8 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
                 "max_depth": trial.suggest_int("max_depth", 2, 6),
                 "subsample": trial.suggest_float("subsample", 0.5, 1.0),
                 "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+                "reg_lambda": trial.suggest_float("reg_lambda", 0.01, 10.0, log=True),
+                "min_child_samples": trial.suggest_int("min_child_samples", 10, 50),
                 "random_state": seed,
                 "n_jobs": 1,
             }
@@ -226,13 +230,29 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
             bar.progress(done / total_jobs)
             txt.text(f"Tuning models... {int(done / total_jobs * 100)}%/100%")
             return rmse
+
         study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=seed))
         study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
         best = study.best_trial
-        details.append({"year": y, "rmse": float(best.value), "best_params": dict(best.params)})
-        params_all.append(dict(best.params))
+        best_params = dict(best.params)
+        mdl = LGBMRegressor(**best_params)
+        mdl.fit(Xtr, Ytr)
+        preds = mdl.predict(Xte)
+        rmse = np.sqrt(mean_squared_error(Yte, preds))
+        dir_acc = np.mean(np.sign(preds) == np.sign(Yte))
+        details.append({"year": y, "rmse": float(rmse), "directional_accuracy": float(dir_acc), "best_params": best_params})
+        params_all.append(best_params)
+        results_summary.append([y, rmse, dir_acc])
+
     bar.empty()
     txt.empty()
+
+    if results_summary:
+        df_results = pd.DataFrame(results_summary, columns=["Year", "RMSE", "Directional Accuracy"])
+        df_results.loc["Mean"] = ["Mean", df_results["RMSE"].mean(), df_results["Directional Accuracy"].mean()]
+        st.subheader("OOS Yearly Performance")
+        st.dataframe(df_results.style.format({"RMSE": "{:.4f}", "Directional Accuracy": "{:.2%}"}))
+
     return _median_params(params_all), details, np.nan, np.nan
 
 # ---------- Indicator Models ----------
@@ -438,6 +458,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
