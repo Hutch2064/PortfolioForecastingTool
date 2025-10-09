@@ -95,15 +95,15 @@ def build_features(returns):
     df["lag_ret"] = returns.shift(1)
     return df.dropna().astype(np.float32)
 
-# ---------- Estimate Mean Reversion Parameters (discrete-time consistent) ----------
+# ---------- Estimate Mean Reversion Parameters ----------
 def estimate_kappa_from_abs_returns(Y: pd.Series):
     """Estimate discrete daily mean reversion rate (kappa) and long-run vol level."""
     vol_proxy = np.log(np.abs(Y) + 1e-8).dropna()
     if len(vol_proxy) < 60:
-        return 0.10, np.exp(vol_proxy.mean())  # fallback for small samples
+        return 0.10, np.exp(vol_proxy.mean())
     phi = np.corrcoef(vol_proxy[1:], vol_proxy[:-1])[0, 1]
     phi = np.clip(phi, 0.0, 0.9999)
-    kappa_hat = 1 - phi  # discrete-time mean reversion speed
+    kappa_hat = 1 - phi
     long_run_vol = float(np.exp(vol_proxy.mean()))
     return kappa_hat, long_run_vol
 
@@ -136,15 +136,11 @@ def run_monte_carlo_paths(model, X_base, residuals, sims_per_seed, rng,
 
     for t in range(horizon):
         sigma_pred = np.abs(model.predict(state)) * scale
-        # Discrete-time OU evolution (academically correct)
-        sigma_t = long_run_vol + (sigma_t - long_run_vol) * (1 - kappa) \
-                  + kappa * (sigma_pred - long_run_vol)
+        sigma_t = long_run_vol + (sigma_t - long_run_vol) * (1 - kappa) + kappa * (sigma_pred - long_run_vol)
         eps = stationary_bootstrap_residuals(residuals, sims_per_seed, p=P_STATIONARY, rng=rng)
         eps = (eps - eps.mean()) / (eps.std(ddof=0) + 1e-8)
         r_t = base_mean + sigma_t * eps
         log_paths[:, t] = (log_paths[:, t - 1] if t > 0 else 0) + r_t
-
-        # Evolve lagged return dynamically
         if t > 0:
             state[:, 0] = log_paths[:, t] - log_paths[:, t - 1]
 
@@ -219,7 +215,7 @@ def plot_forecasts(port_rets, start_cap, central):
 
 # ---------- Streamlit ----------
 def main():
-    st.title("ML-Integrated Monte Carlo (Daily, Featureless, Discrete-Time OU)")
+    st.title("ML-Integrated Monte Carlo (Daily, Featureless, OU-Calibrated)")
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1000000.0, 10000.0, 1000.0)
@@ -249,6 +245,12 @@ def main():
             model.fit(X, vol_target)
 
             sigma_hat = model.predict(X)
+
+            # --- Volatility Calibration (Academically Defensible) ---
+            calibration = Y.std(ddof=0) / sigma_hat.std(ddof=0)
+            sigma_hat *= calibration  # Adjust scale bias of expected |r|
+
+            # Compute standardized residuals
             res = (Y.loc[X.index].values / (sigma_hat + 1e-8)).astype(np.float32)
             res = res[np.isfinite(res)]
             res = (res - res.mean()) / (res.std(ddof=0) + 1e-8)
@@ -256,10 +258,10 @@ def main():
             backtest_CAGR = annualized_return_daily(port_rets)
             base_mean = np.log(1.0 + backtest_CAGR) / 252.0
 
-            # Empirical kappa and long-run volatility (discrete-time)
             kappa_hat, long_run_vol = estimate_kappa_from_abs_returns(Y)
             st.write(f"Estimated discrete mean reversion rate (κ): {kappa_hat:.4f}")
             st.write(f"Estimated long-run volatility level: {long_run_vol:.6f}")
+            st.write(f"Volatility calibration ratio: {calibration:.3f}")
 
             all_paths = []
             bar = st.progress(0)
@@ -312,6 +314,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
