@@ -76,7 +76,8 @@ def realized_vol(returns, window):
 
 # ---------- Data Fetch ----------
 def fetch_prices_daily(tickers, start=DEFAULT_START):
-    data = yf.download(tickers, start=start, interval="1d", auto_adjust=False, progress=False, threads=False)
+    data = yf.download(tickers, start=start, interval="1d", auto_adjust=False,
+                       progress=False, threads=False)
     if data.empty:
         raise ValueError("No price data returned.")
     if isinstance(data.columns, pd.MultiIndex):
@@ -97,7 +98,8 @@ def fetch_prices_daily(tickers, start=DEFAULT_START):
 
 def fetch_macro_features_daily(start=DEFAULT_START):
     tickers = ["^VIX", "^MOVE", "^TNX", "^IRX", "^SKEW", "DX-Y.NYB"]
-    data = yf.download(tickers, start=start, interval="1d", progress=False, threads=False)
+    data = yf.download(tickers, start=start, interval="1d",
+                       progress=False, threads=False)
     close = data["Close"].ffill().astype(np.float32)
     df = pd.DataFrame(index=close.index)
     df["VIX"] = close["^VIX"]
@@ -170,18 +172,18 @@ def stationary_bootstrap_residuals(residuals, size, p=P_STATIONARY, rng=None):
 
 # ---------- Monte Carlo Simulation ----------
 def run_monte_carlo_paths(model, X_base, residuals, sims_per_seed, rng,
-                          indicator_models=None, base_mean=None):
+                          indicator_models=None, base_mean=0.0, scale=1.0):
     horizon = FORECAST_DAYS
     log_paths = np.zeros((sims_per_seed, horizon), dtype=np.float32)
     state = np.repeat(X_base.iloc[[-1]].values, sims_per_seed, axis=0).astype(np.float32)
 
     for t in range(horizon):
-        sigma_t = np.abs(model.predict(state))
+        sigma_t = np.abs(model.predict(state)) * scale
         eps = stationary_bootstrap_residuals(residuals, sims_per_seed, p=P_STATIONARY, rng=rng)
         r_t = base_mean + sigma_t * eps
         log_paths[:, t] = (log_paths[:, t - 1] if t > 0 else 0) + r_t
 
-        # Evolve state features dynamically
+        # evolve features dynamically
         df_temp = pd.DataFrame(log_paths[:, :t + 1])
         inc = df_temp.diff(axis=1)
         mom_21 = df_temp.diff(21, axis=1).iloc[:, -1].fillna(0).values
@@ -201,7 +203,6 @@ def run_monte_carlo_paths(model, X_base, residuals, sims_per_seed, rng,
                 col_idx = list(X_base.columns).index(name)
                 state[:, col_idx] = vals
 
-        # Update macro indicators dynamically
         if indicator_models:
             for feat in ("VIX", "MOVE", "YC_Spread", "SKEW", "DXY"):
                 if feat in indicator_models:
@@ -272,7 +273,7 @@ def plot_forecasts(port_rets, start_cap, central):
 
 # ---------- Streamlit ----------
 def main():
-    st.title("Daily Conditional Volatility Forecasting Tool")
+    st.title("Daily ML-Integrated Monte Carlo Forecasting Tool")
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1000000.0, 10000.0, 1000.0)
@@ -288,7 +289,7 @@ def main():
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
 
-            # --- Train volatility model on next-day absolute returns ---
+            # Train volatility model
             vol_target = Y.abs().shift(-1).dropna()
             valid_idx = vol_target.index.intersection(X.index)
             X = X.loc[valid_idx]
@@ -301,24 +302,32 @@ def main():
             )
             model.fit(X, vol_target)
 
-            # --- Compute standardized residuals ---
+            # Compute standardized residuals + optional vol calibration
             sigma_hat = model.predict(X)
+            scale = 1.0  # optional calibration disabled by default
+            # Uncomment to enable automatic scale calibration
+            # scale = np.std(Y) / (np.std(sigma_hat) + 1e-12)
+            # sigma_hat *= scale
+
             res = (Y.loc[X.index].values / (sigma_hat + 1e-8)).astype(np.float32)
             res = np.ascontiguousarray(res[~np.isnan(res)])
-            base_mean = Y.mean()  # portfolio’s daily drift
+            res -= res.mean()  # remove bias
+
+            backtest_CAGR = annualized_return_daily(port_rets)
+            base_mean = np.log(1.0 + backtest_CAGR) / 252.0
 
             indicators = train_indicator_models(X, ["VIX", "MOVE", "YC_Spread", "SKEW", "DXY"])
             all_paths = []
             bar = st.progress(0)
             txt = st.empty()
-
             for i in range(ENSEMBLE_SEEDS):
                 rng = np.random.default_rng(GLOBAL_SEED + i)
-                sims = run_monte_carlo_paths(model, X, res, SIMS_PER_SEED, rng, indicators, base_mean)
+                sims = run_monte_carlo_paths(
+                    model, X, res, SIMS_PER_SEED, rng, indicators, base_mean, scale
+                )
                 all_paths.append(sims)
                 bar.progress((i + 1) / ENSEMBLE_SEEDS)
-                txt.text(f"Running forecasts... {int((i + 1)/ENSEMBLE_SEEDS * 100)}%/100%")
-
+                txt.text(f"Running forecasts... {int((i + 1) / ENSEMBLE_SEEDS * 100)}%/100%")
             bar.empty()
             txt.empty()
 
@@ -348,11 +357,17 @@ def main():
             medoid_states = np.repeat(X.iloc[[-1]].values, FORECAST_DAYS, axis=0)
             plot_feature_attributions(model, X, medoid_states)
 
+            terminal_vals = paths[:, -1]
+            p10, p50, p90 = np.percentile(terminal_vals, [10, 50, 90])
+            st.write(f"12-month terminal value percentiles: "
+                     f"P10={p10:.3f}, P50={p50:.3f}, P90={p90:.3f}")
+
         except Exception as e:
             st.error(f"Error: {e}")
 
 if __name__ == "__main__":
     main()
+
 
 
 
