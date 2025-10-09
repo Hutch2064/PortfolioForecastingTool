@@ -7,8 +7,8 @@ import pandas as pd
 import yfinance as yf
 import matplotlib.pyplot as plt
 import streamlit as st
-import optuna
 from typing import List
+import optuna
 
 warnings.filterwarnings("ignore")
 
@@ -22,8 +22,8 @@ np.random.seed(GLOBAL_SEED)
 
 DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 10
-SIMS_PER_SEED = 10000
-FORECAST_DAYS = 252      # ~1 trading year
+SIMS_PER_SEED = 5000
+FORECAST_DAYS = 252  # ~1 trading year
 
 # ==========================================================
 # Basic Helpers
@@ -110,21 +110,18 @@ def stationary_bootstrap_residuals(residuals, size, sims, block_length, rng=None
     idx = rng.integers(0, n, size=(sims, size))
     cont = rng.random((sims, size)) > p
     for t in range(1, size):
-        idx[:, t] = np.where(
-            cont[:, t],
-            (idx[:, t - 1] + 1) % n,
-            rng.integers(0, n, size=sims)
-        )
+        idx[:, t] = np.where(cont[:, t],
+                             (idx[:, t - 1] + 1) % n,
+                             rng.integers(0, n, size=sims))
     return residuals[idx]
 
 # ==========================================================
 # Monte Carlo Simulation
 # ==========================================================
 def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, block_length):
-    """Fast simulation with constant drift and stationary bootstrap residuals."""
-    eps = stationary_bootstrap_residuals(residuals, FORECAST_DAYS, sims_per_seed, block_length, rng=rng)
-    drift = base_mean
-    log_paths = np.cumsum(drift + eps, axis=1, dtype=np.float32)
+    eps = stationary_bootstrap_residuals(residuals, FORECAST_DAYS, sims_per_seed,
+                                         block_length, rng=rng)
+    log_paths = np.cumsum(base_mean + eps, axis=1, dtype=np.float32)
     return np.exp(log_paths - log_paths[:, [0]])
 
 # ==========================================================
@@ -142,44 +139,50 @@ def compute_medoid_path(paths):
     return paths[medoid_idx]
 
 # ==========================================================
-# OOS Evaluation + Optuna
+# OOS Evaluation
 # ==========================================================
 def evaluate_block_length(port_rets, block_length):
-    """Expanding-window OOS R² by year."""
-    df = port_rets.to_frame("r")
-    df["year"] = df.index.year
-    years = sorted(df["year"].unique())
+    """Expanding-window OOS test over years; returns mean R² and table."""
+    years = port_rets.index.year.unique()
     if len(years) < 12:
-        return np.nan
-    oos_r2 = []
+        return -999, pd.DataFrame()
+
+    results = []
     for i in range(10, len(years) - 1):
-        train = df[df["year"].isin(years[:i])]
-        test = df[df["year"] == years[i]]
-        if len(train) < 2520 or len(test) < 50:
-            continue
-        mu, sigma = train["r"].mean(), train["r"].std(ddof=0)
-        base_mean = mu - 0.5 * sigma**2
-        residuals = (train["r"] - mu).to_numpy(dtype=np.float32)
+        train = port_rets[port_rets.index.year <= years[i - 1]]
+        test = port_rets[port_rets.index.year == years[i]]
+
+        mu = train.mean()
+        sigma = train.std(ddof=0)
+        base_mean = mu - 0.5 * sigma ** 2
+        residuals = (train - mu).to_numpy(dtype=np.float32)
         residuals -= residuals.mean()
-        rng = np.random.default_rng(GLOBAL_SEED)
-        sims = run_monte_carlo_paths(residuals, 500, rng, base_mean, block_length)
-        preds = np.log(sims[:, -1])
-        actual = test["r"].sum()
-        pred_mean = preds.mean()
-        ss_res = (actual - pred_mean) ** 2
-        ss_tot = (actual - train["r"].mean()) ** 2
+
+        # run full forecast pipeline
+        all_paths = []
+        for s in range(ENSEMBLE_SEEDS):
+            rng = np.random.default_rng(GLOBAL_SEED + s)
+            sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean, block_length)
+            all_paths.append(sims)
+        paths = np.vstack(all_paths)
+        medoid = compute_medoid_path(paths)
+
+        # actual vs forecast over that year
+        actual = np.exp(test.cumsum())
+        forecast = pd.Series(np.exp(np.log(medoid[:len(test)])), index=test.index)
+        actual = actual / actual.iloc[0]
+        forecast = forecast / forecast.iloc[0]
+
+        actual_log = np.log(actual)
+        forecast_log = np.log(forecast)
+        ss_res = np.sum((actual_log - forecast_log) ** 2)
+        ss_tot = np.sum((actual_log - actual_log.mean()) ** 2)
         r2 = 1 - ss_res / ss_tot if ss_tot != 0 else np.nan
-        oos_r2.append(r2)
-    return np.nanmean(oos_r2) if oos_r2 else np.nan
+        results.append((years[i], r2))
 
-
-def tune_block_length(port_rets):
-    def objective(trial):
-        block_len = trial.suggest_int("block_length", 5, 63)
-        return -evaluate_block_length(port_rets, block_len)
-    study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=20, show_progress_bar=False)
-    return int(study.best_params["block_length"]), -study.best_value
+    df = pd.DataFrame(results, columns=["Year", "OOS_R2"])
+    mean_r2 = df["OOS_R2"].mean(skipna=True)
+    return mean_r2, df
 
 # ==========================================================
 # Stats + Plot
@@ -213,10 +216,10 @@ def plot_forecasts(port_rets, start_cap, central):
 # Streamlit App
 # ==========================================================
 def main():
-    st.title("Monte Carlo Forecast (Expanding OOS + Optuna Block-Length Tuning)")
+    st.title("Monte Carlo Forecast (OOS-Validated + Optuna-Tuned Block Length)")
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
-    start_cap = st.number_input("Starting Value ($)", 1000.0, 1000000.0, 10000.0, 1000.0)
+    start_cap = st.number_input("Starting Value ($)", 1000.0, 1_000_000.0, 10_000.0, 1000.0)
 
     if st.button("Run Forecast"):
         try:
@@ -225,19 +228,29 @@ def main():
             prices = fetch_prices_daily(tickers, DEFAULT_START)
             port_rets = portfolio_log_returns_daily(prices, weights)
 
-            # Optuna tuning
             st.write("Running Optuna tuning for block length (5–63 days)...")
-            best_block, best_r2 = tune_block_length(port_rets)
-            st.success(f"Best block length: {best_block} days | Mean OOS R² = {best_r2:.4f}")
 
-            # Core stats
+            def objective(trial):
+                block_length = trial.suggest_int("block_length", 5, 63)
+                mean_r2, _ = evaluate_block_length(port_rets, block_length)
+                return -mean_r2  # maximize R²
+
+            study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=GLOBAL_SEED))
+            study.optimize(objective, n_trials=10, show_progress_bar=False)
+
+            best_block = study.best_params["block_length"]
+            best_mean_r2, df_r2 = evaluate_block_length(port_rets, best_block)
+            st.success(f"✅ Best block length: {best_block} days | Mean OOS R² = {best_mean_r2:.4f}")
+
+            st.dataframe(df_r2.set_index("Year").style.format("{:.4f}"))
+
+            # Final forecast using tuned block length
             mu = port_rets.mean()
             sigma = port_rets.std(ddof=0)
-            base_mean = mu - 0.5 * sigma**2
+            base_mean = mu - 0.5 * sigma ** 2
             residuals = (port_rets - mu).to_numpy(dtype=np.float32)
             residuals -= residuals.mean()
 
-            # Simulations
             all_paths = []
             bar = st.progress(0)
             txt = st.empty()
