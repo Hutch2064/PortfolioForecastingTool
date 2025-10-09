@@ -25,7 +25,7 @@ DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 10
 SIMS_PER_SEED = 100
 FORECAST_DAYS = 252  # ~1 trading year
-P_STATIONARY = 0.1  # Probability of new block for bootstrap
+P_STATIONARY = 0.1   # Probability of new block for bootstrap
 
 # ---------- Helpers ----------
 def to_weights(raw: List[float]) -> np.ndarray:
@@ -176,11 +176,8 @@ def run_monte_carlo_paths(model, X_base, residuals, sims_per_seed, rng,
     state = np.repeat(X_base.iloc[[-1]].values, sims_per_seed, axis=0).astype(np.float32)
 
     for t in range(horizon):
-        # Predict conditional volatility
         sigma_t = np.abs(model.predict(state))
-        # Draw bootstrapped standardized residuals
         eps = stationary_bootstrap_residuals(residuals, sims_per_seed, p=P_STATIONARY, rng=rng)
-        # Compute returns with fixed drift + evolving volatility
         r_t = base_mean + sigma_t * eps
         log_paths[:, t] = (log_paths[:, t - 1] if t > 0 else 0) + r_t
 
@@ -204,7 +201,7 @@ def run_monte_carlo_paths(model, X_base, residuals, sims_per_seed, rng,
                 col_idx = list(X_base.columns).index(name)
                 state[:, col_idx] = vals
 
-        # Update macro indicators via submodels
+        # Update macro indicators dynamically
         if indicator_models:
             for feat in ("VIX", "MOVE", "YC_Spread", "SKEW", "DXY"):
                 if feat in indicator_models:
@@ -279,6 +276,7 @@ def main():
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1000000.0, 10000.0, 1000.0)
+
     if st.button("Run Forecast"):
         try:
             weights = to_weights([float(x) for x in weights_str.split(",")])
@@ -290,8 +288,8 @@ def main():
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
 
-            # Train volatility model
-            vol_target = Y.rolling(21).std().shift(-1).dropna()
+            # --- Train volatility model on next-day absolute returns ---
+            vol_target = Y.abs().shift(-1).dropna()
             valid_idx = vol_target.index.intersection(X.index)
             X = X.loc[valid_idx]
             vol_target = vol_target.loc[valid_idx]
@@ -303,24 +301,24 @@ def main():
             )
             model.fit(X, vol_target)
 
-            # Compute standardized residuals
+            # --- Compute standardized residuals ---
             sigma_hat = model.predict(X)
             res = (Y.loc[X.index].values / (sigma_hat + 1e-8)).astype(np.float32)
             res = np.ascontiguousarray(res[~np.isnan(res)])
-            base_mean = Y.mean()
+            base_mean = Y.mean()  # portfolio’s daily drift
 
             indicators = train_indicator_models(X, ["VIX", "MOVE", "YC_Spread", "SKEW", "DXY"])
             all_paths = []
             bar = st.progress(0)
             txt = st.empty()
+
             for i in range(ENSEMBLE_SEEDS):
                 rng = np.random.default_rng(GLOBAL_SEED + i)
-                sims = run_monte_carlo_paths(
-                    model, X, res, SIMS_PER_SEED, rng, indicators, base_mean
-                )
+                sims = run_monte_carlo_paths(model, X, res, SIMS_PER_SEED, rng, indicators, base_mean)
                 all_paths.append(sims)
                 bar.progress((i + 1) / ENSEMBLE_SEEDS)
-                txt.text(f"Running forecasts... {int((i + 1) / ENSEMBLE_SEEDS * 100)}%/100%")
+                txt.text(f"Running forecasts... {int((i + 1)/ENSEMBLE_SEEDS * 100)}%/100%")
+
             bar.empty()
             txt.empty()
 
@@ -355,6 +353,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
