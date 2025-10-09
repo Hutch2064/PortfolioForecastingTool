@@ -22,8 +22,8 @@ np.random.seed(GLOBAL_SEED)
 
 # ---------- Config ----------
 DEFAULT_START = "2000-01-01"
-ENSEMBLE_SEEDS = 12
-SIMS_PER_SEED = 2000
+ENSEMBLE_SEEDS = 10
+SIMS_PER_SEED = 100
 FORECAST_DAYS = 252  # ~1 trading year
 P_STATIONARY = 0.1  # Probability of new block for bootstrap
 
