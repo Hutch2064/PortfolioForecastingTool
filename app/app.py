@@ -23,7 +23,7 @@ np.random.seed(GLOBAL_SEED)
 DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 10
 SIMS_PER_SEED = 5000
-FORECAST_DAYS = 252  # ~1 trading year
+FORECAST_DAYS = 252  # 1 trading year
 
 # ==========================================================
 # Basic Helpers
@@ -139,10 +139,10 @@ def compute_medoid_path(paths):
     return paths[medoid_idx]
 
 # ==========================================================
-# OOS Evaluation
+# OOS Evaluation (Directional Accuracy)
 # ==========================================================
 def evaluate_block_length(port_rets, block_length):
-    """Expanding-window OOS test over years; returns mean R² and table."""
+    """Expanding-window OOS test over years; returns mean directional accuracy (monthly)."""
     years = port_rets.index.year.unique()
     if len(years) < 12:
         return -999, pd.DataFrame()
@@ -167,24 +167,26 @@ def evaluate_block_length(port_rets, block_length):
         paths = np.vstack(all_paths)
         medoid = compute_medoid_path(paths)
 
-        # align forecast and actual to same length
+        # convert to monthly log returns
         steps = min(len(test), FORECAST_DAYS)
-        actual = np.exp(test.iloc[:steps].cumsum())
-        forecast = pd.Series(medoid[:steps], index=test.index[:steps])
-        actual = actual / actual.iloc[0]
-        forecast = forecast / forecast.iloc[0]
+        forecast_series = pd.Series(medoid[:steps], index=test.index[:steps])
+        forecast_rets = np.log(forecast_series / forecast_series.shift(1)).dropna()
+        actual_rets = test.iloc[:len(forecast_rets)]
 
-        # compute OOS R² on cumulative log returns
-        actual_log = np.log(actual)
-        forecast_log = np.log(forecast)
-        ss_res = np.sum((actual_log - forecast_log) ** 2)
-        ss_tot = np.sum((actual_log - actual_log.mean()) ** 2)
-        r2 = 1 - ss_res / ss_tot if ss_tot != 0 else np.nan
-        results.append((years[i], r2))
+        # resample to monthly
+        f_month = forecast_rets.resample("M").sum()
+        a_month = actual_rets.resample("M").sum()
 
-    df = pd.DataFrame(results, columns=["Year", "OOS_R2"])
-    mean_r2 = df["OOS_R2"].mean(skipna=True)
-    return mean_r2, df
+        # align and compute directional accuracy
+        min_len = min(len(f_month), len(a_month))
+        f_month = f_month.iloc[:min_len]
+        a_month = a_month.iloc[:min_len]
+        acc = np.mean(np.sign(f_month) == np.sign(a_month))
+        results.append((years[i], acc))
+
+    df = pd.DataFrame(results, columns=["Year", "Directional_Accuracy"])
+    mean_acc = df["Directional_Accuracy"].mean(skipna=True)
+    return mean_acc, df
 
 # ==========================================================
 # Stats + Plot
@@ -218,7 +220,7 @@ def plot_forecasts(port_rets, start_cap, central):
 # Streamlit App
 # ==========================================================
 def main():
-    st.title("Monte Carlo Forecast (OOS-Validated + Optuna-Tuned Block Length)")
+    st.title("Monte Carlo Forecast (Optuna-Tuned Block Length + Monthly Directional Accuracy)")
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1_000_000.0, 10_000.0, 1000.0)
@@ -231,21 +233,31 @@ def main():
             port_rets = portfolio_log_returns_daily(prices, weights)
 
             st.write("Running Optuna tuning for block length (5–63 days)...")
+            bar = st.progress(0)
+            txt = st.empty()
+
+            total_trials = 10
 
             def objective(trial):
                 block_length = trial.suggest_int("block_length", 5, 63)
-                mean_r2, _ = evaluate_block_length(port_rets, block_length)
-                return -mean_r2  # maximize R²
+                mean_acc, _ = evaluate_block_length(port_rets, block_length)
+                progress = (trial.number + 1) / total_trials
+                bar.progress(progress)
+                txt.text(f"Tuning... {int(progress * 100)}% / 100%")
+                return -mean_acc  # maximize accuracy
 
             study = optuna.create_study(direction="minimize",
                                         sampler=optuna.samplers.TPESampler(seed=GLOBAL_SEED))
-            study.optimize(objective, n_trials=10, show_progress_bar=False)
+            study.optimize(objective, n_trials=total_trials, show_progress_bar=False)
+
+            bar.empty()
+            txt.empty()
 
             best_block = study.best_params["block_length"]
-            best_mean_r2, df_r2 = evaluate_block_length(port_rets, best_block)
-            st.success(f"✅ Best block length: {best_block} days | Mean OOS R² = {best_mean_r2:.4f}")
+            best_mean_acc, df_acc = evaluate_block_length(port_rets, best_block)
+            st.success(f"✅ Best block length: {best_block} days | Mean OOS Monthly Directional Accuracy = {best_mean_acc:.4f}")
 
-            st.dataframe(df_r2.set_index("Year").style.format("{:.4f}"))
+            st.dataframe(df_acc.set_index("Year").style.format("{:.4f}"))
 
             # Final forecast using tuned block length
             mu = port_rets.mean()
@@ -255,16 +267,16 @@ def main():
             residuals -= residuals.mean()
 
             all_paths = []
-            bar = st.progress(0)
-            txt = st.empty()
+            bar2 = st.progress(0)
+            txt2 = st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng = np.random.default_rng(GLOBAL_SEED + i)
                 sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean, best_block)
                 all_paths.append(sims)
-                bar.progress((i + 1) / ENSEMBLE_SEEDS)
-                txt.text(f"Running forecasts... {int((i + 1) / ENSEMBLE_SEEDS * 100)}%")
-            bar.empty()
-            txt.empty()
+                bar2.progress((i + 1) / ENSEMBLE_SEEDS)
+                txt2.text(f"Running forecasts... {int((i + 1) / ENSEMBLE_SEEDS * 100)}%")
+            bar2.empty()
+            txt2.empty()
 
             paths = np.vstack(all_paths)
             final = compute_medoid_path(paths)
