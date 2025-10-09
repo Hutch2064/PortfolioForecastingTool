@@ -5,12 +5,11 @@ import os
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from typing import List, Dict
+from typing import List
 from lightgbm import LGBMRegressor
 import matplotlib.pyplot as plt
 import shap
 import streamlit as st
-from sklearn.metrics import mean_squared_error
 
 warnings.filterwarnings("ignore")
 
@@ -64,16 +63,6 @@ def max_drawdown_from_rets(returns):
     roll_max = cum.cummax()
     return (cum / roll_max - 1.0).min()
 
-
-def compute_current_drawdown(returns):
-    cum = np.exp(returns.cumsum())
-    roll_max = cum.cummax()
-    return (cum / roll_max - 1.0).astype(np.float32)
-
-
-def realized_vol(returns, window):
-    return returns.rolling(window).std(ddof=0)
-
 # ---------- Data Fetch ----------
 def fetch_prices_daily(tickers, start=DEFAULT_START):
     data = yf.download(tickers, start=start, interval="1d", auto_adjust=False,
@@ -96,21 +85,6 @@ def fetch_prices_daily(tickers, start=DEFAULT_START):
     return df.dropna(how="all")
 
 
-def fetch_macro_features_daily(start=DEFAULT_START):
-    tickers = ["^VIX", "^MOVE", "^TNX", "^IRX", "^SKEW", "DX-Y.NYB"]
-    data = yf.download(tickers, start=start, interval="1d",
-                       progress=False, threads=False)
-    close = data["Close"].ffill().astype(np.float32)
-    df = pd.DataFrame(index=close.index)
-    df["VIX"] = close["^VIX"]
-    df["MOVE"] = close["^MOVE"]
-    df["YC_Spread"] = close["^TNX"] - close["^IRX"]
-    df["SKEW"] = close["^SKEW"]
-    df["DXY"] = close["DX-Y.NYB"]
-    df = df.interpolate().ffill().bfill()
-    return df
-
-# ---------- Portfolio ----------
 def portfolio_log_returns_daily(prices, weights):
     prices = prices.ffill().dropna().astype(np.float64)
     weights = np.array(weights, dtype=np.float64)
@@ -120,40 +94,11 @@ def portfolio_log_returns_daily(prices, weights):
     port_rets = (rets * weights).sum(axis=1)
     return port_rets.astype(np.float32)
 
-# ---------- Features ----------
+# ---------- Build Simple Feature (lag only) ----------
 def build_features(returns):
     df = pd.DataFrame(index=returns.index)
-    df["mom_21d"] = returns.rolling(21).sum()
-    df["mom_63d"] = returns.rolling(63).sum()
-    df["mom_126d"] = returns.rolling(126).sum()
-    df["vol_21d"] = realized_vol(returns, 21)
-    df["vol_63d"] = realized_vol(returns, 63)
-    df["vol_126d"] = realized_vol(returns, 126)
-    df["dd_state"] = compute_current_drawdown(returns)
-    macro = fetch_macro_features_daily()
-    df = df.join(macro, how="left").ffill()
-    valid_start = max([df[c].first_valid_index() for c in df.columns if df[c].first_valid_index()])
-    df = df.loc[valid_start:].dropna()
-    return df.astype(np.float32)
-
-# ---------- Indicator Models ----------
-def train_indicator_models(X, feats):
-    models = {}
-    for f in feats:
-        if f not in X.columns:
-            continue
-        y = X[f].shift(-1)
-        df = pd.concat([X, y.rename("target")], axis=1).dropna()
-        if len(df) < 60:
-            continue
-        mdl = LGBMRegressor(
-            n_estimators=400, max_depth=3, learning_rate=0.03,
-            subsample=0.8, colsample_bytree=0.8,
-            random_state=GLOBAL_SEED, n_jobs=1
-        )
-        mdl.fit(df[X.columns], df["target"])
-        models[f] = mdl
-    return models
+    df["lag_ret"] = returns.shift(1)
+    return df.dropna().astype(np.float32)
 
 # ---------- Stationary Bootstrap ----------
 def stationary_bootstrap_residuals(residuals, size, p=P_STATIONARY, rng=None):
@@ -172,7 +117,7 @@ def stationary_bootstrap_residuals(residuals, size, p=P_STATIONARY, rng=None):
 
 # ---------- Monte Carlo Simulation ----------
 def run_monte_carlo_paths(model, X_base, residuals, sims_per_seed, rng,
-                          indicator_models=None, base_mean=0.0, scale=1.0):
+                          base_mean=0.0, scale=1.0):
     horizon = FORECAST_DAYS
     log_paths = np.zeros((sims_per_seed, horizon), dtype=np.float32)
     state = np.repeat(X_base.iloc[[-1]].values, sims_per_seed, axis=0).astype(np.float32)
@@ -183,32 +128,9 @@ def run_monte_carlo_paths(model, X_base, residuals, sims_per_seed, rng,
         r_t = base_mean + sigma_t * eps
         log_paths[:, t] = (log_paths[:, t - 1] if t > 0 else 0) + r_t
 
-        # evolve features dynamically
-        df_temp = pd.DataFrame(log_paths[:, :t + 1])
-        inc = df_temp.diff(axis=1)
-        mom_21 = df_temp.diff(21, axis=1).iloc[:, -1].fillna(0).values
-        mom_63 = df_temp.diff(63, axis=1).iloc[:, -1].fillna(0).values
-        mom_126 = df_temp.diff(126, axis=1).iloc[:, -1].fillna(0).values
-        vol_21 = inc.iloc[:, -21:].std(axis=1, ddof=0).values if t >= 20 else np.zeros(sims_per_seed)
-        vol_63 = inc.iloc[:, -63:].std(axis=1, ddof=0).values if t >= 62 else np.zeros(sims_per_seed)
-        vol_126 = inc.iloc[:, -126:].std(axis=1, ddof=0).values if t >= 125 else np.zeros(sims_per_seed)
-        cum_vals = np.exp(df_temp)
-        dd_state = cum_vals.values[:, -1] / np.maximum.accumulate(cum_vals.values, axis=1)[:, -1] - 1
-
-        for name, vals in zip(
-            ["mom_21d", "mom_63d", "mom_126d", "vol_21d", "vol_63d", "vol_126d", "dd_state"],
-            [mom_21, mom_63, mom_126, vol_21, vol_63, vol_126, dd_state]
-        ):
-            if name in X_base.columns:
-                col_idx = list(X_base.columns).index(name)
-                state[:, col_idx] = vals
-
-        if indicator_models:
-            for feat in ("VIX", "MOVE", "YC_Spread", "SKEW", "DXY"):
-                if feat in indicator_models:
-                    col_idx = list(X_base.columns).index(feat)
-                    preds = indicator_models[feat].predict(state)
-                    state[:, col_idx] = preds
+        # evolve lagged return dynamically
+        if t > 0:
+            state[:, 0] = log_paths[:, t] - log_paths[:, t - 1]
 
     return np.exp(log_paths - log_paths[:, [0]], dtype=np.float32)
 
@@ -248,13 +170,13 @@ def plot_feature_attributions(model, X, medoid_states):
     shap_fore = np.mean(shap_fore_all, axis=0)
     feats = X.columns
     pos = np.arange(len(feats))
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(8, 5))
     ax.bar(pos - 0.2, shap_hist / shap_hist.sum() * 100, width=0.4, label="Backtest (avg)")
     ax.bar(pos + 0.2, shap_fore / shap_fore.sum() * 100, width=0.4, label="Forecast (medoid)")
     ax.set_xticks(pos)
     ax.set_xticklabels(feats, rotation=45, ha="right")
-    ax.set_ylabel("% of explained volatility variance (feature-level)")
-    ax.set_title("Feature Contribution to Conditional Volatility (Backtest vs Forecast)")
+    ax.set_ylabel("% contribution")
+    ax.set_title("Feature Contribution (Volatility Model)")
     ax.legend()
     plt.tight_layout()
     st.pyplot(fig)
@@ -267,13 +189,14 @@ def plot_forecasts(port_rets, start_cap, central):
     dates = pd.date_range(start=last, periods=len(central), freq="B")
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(port_cum.index, port_cum.values, label="Portfolio Backtest")
-    ax.plot([last, *dates], [port_cum.iloc[-1], *fore], label="Forecast (Medoid Path)", lw=2)
+    ax.plot([last, *dates], [port_cum.iloc[-1], *fore],
+            label="Forecast (Medoid Path)", lw=2)
     ax.legend()
     st.pyplot(fig)
 
 # ---------- Streamlit ----------
 def main():
-    st.title("Daily ML-Integrated Monte Carlo Forecasting Tool")
+    st.title("Minimal ML-Integrated Monte Carlo (Daily, Featureless)")
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1000000.0, 10000.0, 1000.0)
@@ -289,7 +212,7 @@ def main():
             X = df.shift(1).dropna()
             Y = Y.loc[X.index]
 
-            # Train volatility model
+            # Train volatility model (predict next-day abs return)
             vol_target = Y.abs().shift(-1).dropna()
             valid_idx = vol_target.index.intersection(X.index)
             X = X.loc[valid_idx]
@@ -302,32 +225,28 @@ def main():
             )
             model.fit(X, vol_target)
 
-            # Compute standardized residuals + optional vol calibration
+            # Compute standardized residuals + optional calibration
             sigma_hat = model.predict(X)
-            scale = 1.0  # optional calibration disabled by default
-            # Uncomment to enable automatic scale calibration
-            # scale = np.std(Y) / (np.std(sigma_hat) + 1e-12)
-            # sigma_hat *= scale
-
+            scale = 1.0  # toggle calibration manually if needed
             res = (Y.loc[X.index].values / (sigma_hat + 1e-8)).astype(np.float32)
             res = np.ascontiguousarray(res[~np.isnan(res)])
-            res -= res.mean()  # remove bias
+            res -= res.mean()
 
+            # Geometric-drift anchoring
             backtest_CAGR = annualized_return_daily(port_rets)
             base_mean = np.log(1.0 + backtest_CAGR) / 252.0
 
-            indicators = train_indicator_models(X, ["VIX", "MOVE", "YC_Spread", "SKEW", "DXY"])
             all_paths = []
             bar = st.progress(0)
             txt = st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng = np.random.default_rng(GLOBAL_SEED + i)
                 sims = run_monte_carlo_paths(
-                    model, X, res, SIMS_PER_SEED, rng, indicators, base_mean, scale
+                    model, X, res, SIMS_PER_SEED, rng, base_mean, scale
                 )
                 all_paths.append(sims)
                 bar.progress((i + 1) / ENSEMBLE_SEEDS)
-                txt.text(f"Running forecasts... {int((i + 1) / ENSEMBLE_SEEDS * 100)}%/100%")
+                txt.text(f"Running forecasts... {int((i + 1) / ENSEMBLE_SEEDS * 100)}%")
             bar.empty()
             txt.empty()
 
@@ -367,6 +286,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
