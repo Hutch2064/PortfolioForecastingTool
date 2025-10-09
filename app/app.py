@@ -22,8 +22,8 @@ np.random.seed(GLOBAL_SEED)
 DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 10
 SIMS_PER_SEED = 10000
-FORECAST_DAYS = 252  # 1 trading year
-P_STATIONARY = 0.1   # Probability of new block in bootstrap
+FORECAST_DAYS = 252       # 1 trading year
+BLOCK_LEN = 21            # random block length (~1 month)
 
 # ==========================================================
 # Basic Helpers
@@ -38,7 +38,8 @@ def to_weights(raw: List[float]) -> np.ndarray:
 
 def annualized_return_daily(r):
     r = r.dropna()
-    if r.empty: return np.nan
+    if r.empty:
+        return np.nan
     compounded = np.exp(r.sum())
     years = len(r) / 252.0
     return compounded ** (1 / years) - 1 if years > 0 else np.nan
@@ -51,7 +52,8 @@ def annualized_vol_daily(r):
 
 def annualized_sharpe_daily(r, rf_daily=0.0):
     r = r.dropna()
-    if r.empty: return np.nan
+    if r.empty:
+        return np.nan
     excess = r - rf_daily
     mu, sigma = excess.mean(), excess.std(ddof=0)
     return (mu / sigma) * np.sqrt(252) if sigma and sigma > 0 else np.nan
@@ -62,12 +64,15 @@ def max_drawdown_from_rets(returns):
     roll_max = cum.cummax()
     return (cum / roll_max - 1.0).min()
 
+
 # ==========================================================
 # Data Fetch
 # ==========================================================
 def fetch_prices_daily(tickers, start=DEFAULT_START):
-    data = yf.download(tickers, start=start, interval="1d",
-                       auto_adjust=False, progress=False, threads=False)
+    data = yf.download(
+        tickers, start=start, interval="1d",
+        auto_adjust=False, progress=False, threads=False
+    )
     if data.empty:
         raise ValueError("No price data returned.")
     if isinstance(data.columns, pd.MultiIndex):
@@ -94,30 +99,73 @@ def portfolio_log_returns_daily(prices, weights):
     port_rets = (rets * weights).sum(axis=1)
     return port_rets.astype(np.float32)
 
+
 # ==========================================================
-# Stationary Bootstrap (Vectorized)
+# Feature Construction (1-, 3-, 6-, 12-MONTH rolling features)
 # ==========================================================
-def stationary_bootstrap_residuals(residuals, size, sims, p=P_STATIONARY, rng=None):
-    """Vectorized stationary bootstrap for many paths."""
-    if rng is None:
-        rng = np.random.default_rng()
+def build_features(returns):
+    """Feature set: 1, 3, 6, 12 month momentum & volatility + drawdown."""
+    df = pd.DataFrame(index=returns.index)
+    windows = {
+        "1m": 21,
+        "3m": 63,
+        "6m": 126,
+        "12m": 252,
+    }
+    for label, win in windows.items():
+        df[f"mom_{label}"] = returns.rolling(win).sum()
+        df[f"vol_{label}"] = returns.rolling(win).std(ddof=0)
+    cum = np.exp(returns.cumsum())
+    df["dd_state"] = cum / cum.cummax() - 1
+    df = df.dropna()
+    return df.astype(np.float32)
+
+
+# ==========================================================
+# Random Block + State-Matched Residual Selection
+# ==========================================================
+def random_block_state_pick(residuals, X_hist, X_now, rng, block_len=BLOCK_LEN):
+    """Select a random 21-day block, then within it choose residual with state closest to X_now."""
     n = len(residuals)
-    idx = rng.integers(0, n, size=(sims, size))
-    # geometric block continuation
-    cont = rng.random((sims, size)) > p
-    for t in range(1, size):
-        idx[:, t] = np.where(cont[:, t], (idx[:, t - 1] + 1) % n, idx[:, t])
-    return residuals[idx]
+    start_idx = rng.integers(0, n - block_len)
+    block_idx = np.arange(start_idx, start_idx + block_len)
+    X_block = X_hist[block_idx]
+    dists = np.linalg.norm(X_block - X_now, axis=1)
+    best_idx = block_idx[np.argmin(dists)]
+    return residuals[best_idx]
+
 
 # ==========================================================
 # Monte Carlo Simulation
 # ==========================================================
-def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean):
-    """Fast simulation with constant drift and empirical residuals."""
-    eps = stationary_bootstrap_residuals(residuals, FORECAST_DAYS, sims_per_seed, rng=rng)
-    drift = base_mean
-    log_paths = np.cumsum(drift + eps, axis=1, dtype=np.float32)
-    return np.exp(log_paths - log_paths[:, [0]])
+def run_monte_carlo_paths(residuals, X_hist, X_last, sims_per_seed, rng, base_mean):
+    """Simulate paths with constant drift + conditional residuals from random blocks."""
+    horizon = FORECAST_DAYS
+    log_paths = np.zeros((sims_per_seed, horizon), dtype=np.float32)
+    state = np.repeat(X_last.values, sims_per_seed, axis=0)
+
+    for t in range(horizon):
+        eps_t = np.array([
+            random_block_state_pick(residuals, X_hist, state[i], rng, BLOCK_LEN)
+            for i in range(sims_per_seed)
+        ], dtype=np.float32)
+        r_t = base_mean + eps_t
+        log_paths[:, t] = (log_paths[:, t - 1] if t > 0 else 0) + r_t
+
+        # Evolve features (approximate dynamic update)
+        new_ret = r_t
+        for i, days in enumerate([21, 63, 126, 252]):
+            col_mom = 2 * i       # momentum column index
+            col_vol = 2 * i + 1   # volatility column index
+            state[:, col_mom] = (state[:, col_mom] * (days - 1) + new_ret) / days
+            state[:, col_vol] = np.sqrt(
+                (state[:, col_vol] ** 2 * (days - 1) + new_ret ** 2) / days
+            )
+        # Drawdown proxy
+        state[:, -1] = np.minimum(0, state[:, -1] + new_ret)
+
+    return np.exp(log_paths - log_paths[:, [0]], dtype=np.float32)
+
 
 # ==========================================================
 # Medoid Path
@@ -132,6 +180,7 @@ def compute_medoid_path(paths):
     sims = dots / (norms + 1e-9)
     medoid_idx = np.argmax(sims)
     return paths[medoid_idx]
+
 
 # ==========================================================
 # Stats + Plot
@@ -161,11 +210,12 @@ def plot_forecasts(port_rets, start_cap, central):
     ax.legend()
     st.pyplot(fig)
 
+
 # ==========================================================
 # Streamlit App
 # ==========================================================
 def main():
-    st.title("Pure Monte Carlo Forecast (Constant Drift + Empirical Residuals)")
+    st.title("Monte Carlo Forecast (Drift + Conditional 21-Day Residual Blocks)")
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1000000.0, 10000.0, 1000.0)
@@ -177,12 +227,15 @@ def main():
             prices = fetch_prices_daily(tickers, DEFAULT_START)
             port_rets = portfolio_log_returns_daily(prices, weights)
 
-            # Core stats
+            # Features + residual setup
+            X_hist = build_features(port_rets)
+            residuals = (port_rets.loc[X_hist.index] - port_rets.loc[X_hist.index].mean()).to_numpy(dtype=np.float32)
+            X_hist = X_hist.to_numpy(dtype=np.float32)
+            X_last = pd.DataFrame(X_hist[-1:])
+
+            # Drift
             back_cagr = annualized_return_daily(port_rets)
             base_mean = np.log(1.0 + back_cagr) / 252.0
-            residuals = port_rets - port_rets.mean()
-            residuals = residuals.to_numpy(dtype=np.float32)
-            residuals -= residuals.mean()
 
             # Simulations
             all_paths = []
@@ -190,7 +243,7 @@ def main():
             txt = st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng = np.random.default_rng(GLOBAL_SEED + i)
-                sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean)
+                sims = run_monte_carlo_paths(residuals, X_hist, X_last, SIMS_PER_SEED, rng, base_mean)
                 all_paths.append(sims)
                 bar.progress((i + 1) / ENSEMBLE_SEEDS)
                 txt.text(f"Running forecasts... {int((i + 1) / ENSEMBLE_SEEDS * 100)}%")
@@ -228,8 +281,10 @@ def main():
         except Exception as e:
             st.error(f"Error: {e}")
 
+
 if __name__ == "__main__":
     main()
+
 
 
 
