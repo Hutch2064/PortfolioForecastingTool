@@ -34,6 +34,7 @@ def to_weights(raw: List[float]) -> np.ndarray:
         raise ValueError("Weights must sum to a positive number.")
     return arr / s
 
+
 def annualized_return_daily(r):
     r = r.dropna()
     if r.empty:
@@ -42,9 +43,11 @@ def annualized_return_daily(r):
     years = len(r) / 252.0
     return compounded ** (1 / years) - 1 if years > 0 else np.nan
 
+
 def annualized_vol_daily(r):
     r = r.dropna()
     return r.std(ddof=0) * np.sqrt(252) if len(r) > 1 else np.nan
+
 
 def annualized_sharpe_daily(r, rf_daily=0.0):
     r = r.dropna()
@@ -53,6 +56,7 @@ def annualized_sharpe_daily(r, rf_daily=0.0):
     excess = r - rf_daily
     mu, sigma = excess.mean(), excess.std(ddof=0)
     return (mu / sigma) * np.sqrt(252) if sigma and sigma > 0 else np.nan
+
 
 def max_drawdown_from_rets(returns):
     cum = np.exp(returns.cumsum())
@@ -80,6 +84,7 @@ def fetch_prices_daily(tickers, start=DEFAULT_START):
         df.columns = df.columns.get_level_values(1)
     return df.dropna(how="all")
 
+
 def portfolio_log_returns_daily(prices, weights):
     prices = prices.ffill().dropna().astype(np.float64)
     weights = np.array(weights, dtype=np.float64)
@@ -94,18 +99,6 @@ def build_features(returns):
     df = pd.DataFrame(index=returns.index)
     df["lag_ret"] = returns.shift(1)
     return df.dropna().astype(np.float32)
-
-# ---------- Estimate Mean Reversion Parameters (empirical OU calibration) ----------
-def estimate_kappa_from_abs_returns(Y: pd.Series):
-    """Estimate discrete daily mean reversion rate (kappa) and long-run vol (empirically anchored)."""
-    vol_proxy = np.log(np.abs(Y) + 1e-8).dropna()
-    if len(vol_proxy) < 60:
-        return 0.10, Y.std(ddof=0)
-    phi = np.corrcoef(vol_proxy[1:], vol_proxy[:-1])[0, 1]
-    phi = np.clip(phi, 0.90, 0.9999)  # realistic daily persistence
-    kappa_hat = 1 - phi
-    long_run_vol = Y.std(ddof=0)     # empirical long-run anchor
-    return kappa_hat, long_run_vol
 
 # ---------- Stationary Bootstrap ----------
 def stationary_bootstrap_residuals(residuals, size, p=P_STATIONARY, rng=None):
@@ -122,25 +115,20 @@ def stationary_bootstrap_residuals(residuals, size, p=P_STATIONARY, rng=None):
             idx = (idx + 1) % n
     return out
 
-# ---------- Monte Carlo Simulation (discrete-time OU) ----------
+# ---------- Monte Carlo Simulation ----------
 def run_monte_carlo_paths(model, X_base, residuals, sims_per_seed, rng,
-                          base_mean=0.0, scale=1.0, kappa=0.1, long_run_vol=None):
+                          base_mean=0.0, scale=1.0):
     horizon = FORECAST_DAYS
     log_paths = np.zeros((sims_per_seed, horizon), dtype=np.float32)
     state = np.repeat(X_base.iloc[[-1]].values, sims_per_seed, axis=0).astype(np.float32)
 
-    if long_run_vol is None:
-        long_run_vol = float(np.std(residuals))
-
-    sigma_t = np.full(sims_per_seed, long_run_vol, dtype=np.float32)
-
     for t in range(horizon):
-        sigma_pred = np.abs(model.predict(state)) * scale
-        sigma_t = long_run_vol + (sigma_t - long_run_vol) * (1 - kappa) + kappa * (sigma_pred - long_run_vol)
+        sigma_t = np.abs(model.predict(state)) * scale
         eps = stationary_bootstrap_residuals(residuals, sims_per_seed, p=P_STATIONARY, rng=rng)
-        eps = (eps - eps.mean()) / (eps.std(ddof=0) + 1e-8)
         r_t = base_mean + sigma_t * eps
         log_paths[:, t] = (log_paths[:, t - 1] if t > 0 else 0) + r_t
+
+        # evolve lagged return dynamically
         if t > 0:
             state[:, 0] = log_paths[:, t] - log_paths[:, t - 1]
 
@@ -174,18 +162,11 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
 # ---------- SHAP ----------
 def plot_feature_attributions(model, X, medoid_states):
     expl = shap.TreeExplainer(model)
-    vals = expl.shap_values(X)
-    if isinstance(vals, list):
-        vals = vals[0]
-    if vals.ndim == 1:
-        vals = vals[:, None]
-    shap_hist = np.abs(vals).mean(axis=0)
+    shap_hist = np.abs(expl.shap_values(X)).mean(axis=0)
     shap_fore_all = []
     for s in medoid_states:
-        v = np.abs(expl.shap_values(pd.DataFrame([s], columns=X.columns)))
-        if isinstance(v, list):
-            v = v[0]
-        shap_fore_all.append(v.reshape(-1))
+        val = np.abs(expl.shap_values(pd.DataFrame([s], columns=X.columns)))
+        shap_fore_all.append(val.reshape(-1))
     shap_fore = np.mean(shap_fore_all, axis=0)
     feats = X.columns
     pos = np.arange(len(feats))
@@ -215,7 +196,7 @@ def plot_forecasts(port_rets, start_cap, central):
 
 # ---------- Streamlit ----------
 def main():
-    st.title("ML-Integrated Monte Carlo (Daily, Drift-Bounded, Empirical OU)")
+    st.title("Minimal ML-Integrated Monte Carlo (Daily, Featureless)")
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1000000.0, 10000.0, 1000.0)
@@ -244,28 +225,16 @@ def main():
             )
             model.fit(X, vol_target)
 
+            # Compute standardized residuals + optional calibration
             sigma_hat = model.predict(X)
-            calibration = Y.std(ddof=0) / sigma_hat.std(ddof=0)
-            sigma_hat *= calibration
-
+            scale = 1.0  # toggle calibration manually if needed
             res = (Y.loc[X.index].values / (sigma_hat + 1e-8)).astype(np.float32)
-            res = res[np.isfinite(res)]
-            res = (res - res.mean()) / (res.std(ddof=0) + 1e-8)
+            res = np.ascontiguousarray(res[~np.isnan(res)])
+            res -= res.mean()
 
-            # --- Drift Correction (bounded) ---
+            # Geometric-drift anchoring
             backtest_CAGR = annualized_return_daily(port_rets)
-            sigma_hist = annualized_vol_daily(port_rets) / np.sqrt(252)
-            sigma_fore = sigma_hat.std(ddof=0)
-            mu_geom = np.log(1.0 + backtest_CAGR) / 252.0
-            mu_adj = mu_geom - 0.5 * (sigma_fore**2 - sigma_hist**2)
-            base_mean = min(mu_geom, mu_adj)  # prevent upward inflation
-
-            # Empirical mean reversion parameters
-            kappa_hat, long_run_vol = estimate_kappa_from_abs_returns(Y)
-            st.write(f"Estimated discrete mean reversion rate (κ): {kappa_hat:.4f}")
-            st.write(f"Estimated long-run volatility level: {long_run_vol:.6f}")
-            st.write(f"Volatility calibration ratio: {calibration:.3f}")
-            st.write(f"Adjusted daily drift (μ): {base_mean:.6e}")
+            base_mean = np.log(1.0 + backtest_CAGR) / 252.0
 
             all_paths = []
             bar = st.progress(0)
@@ -273,8 +242,7 @@ def main():
             for i in range(ENSEMBLE_SEEDS):
                 rng = np.random.default_rng(GLOBAL_SEED + i)
                 sims = run_monte_carlo_paths(
-                    model, X, res, SIMS_PER_SEED, rng,
-                    base_mean, 1.0, kappa_hat, long_run_vol
+                    model, X, res, SIMS_PER_SEED, rng, base_mean, scale
                 )
                 all_paths.append(sims)
                 bar.progress((i + 1) / ENSEMBLE_SEEDS)
@@ -318,6 +286,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
