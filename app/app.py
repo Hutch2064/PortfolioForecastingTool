@@ -225,7 +225,7 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
             dir_acc = np.mean(np.sign(preds) == np.sign(Yte))
             pred_vol = annualized_vol_monthly(pd.Series(preds, index=Yte.index))
             real_vol = annualized_vol_monthly(Yte)
-            vol_pen = abs(pred_vol - real_vol) / (abs(real_vol) + 1e-8)
+            vol_pen = (pred_vol - real_vol) / (real_vol + 1e-8)
             score = (rmse + vol_pen + (1 - dir_acc)) / 3
             done += 1
             bar.progress(done / total_jobs)
