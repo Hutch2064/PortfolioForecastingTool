@@ -249,7 +249,7 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
 
     if results_summary:
         df_results = pd.DataFrame(results_summary, columns=["Year", "RMSE", "Directional Accuracy"])
-        df_results.loc["Mean"] = ["Mean", df_results["RMSE"].mean(), df_results["Directional Accuracy"].mean()]
+        df_results.loc["Total"] = ["Mean", df_results["RMSE"].mean(), df_results["Directional Accuracy"].mean()]
         st.subheader("OOS Yearly Performance")
         st.dataframe(df_results.style.format({"RMSE": "{:.4f}", "Directional Accuracy": "{:.2%}"}))
 
