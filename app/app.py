@@ -95,9 +95,9 @@ def build_features(returns):
     df["lag_ret"] = returns.shift(1)
     return df.dropna().astype(np.float32)
 
-# ---------- Estimate Mean Reversion Parameters (academically consistent) ----------
+# ---------- Estimate Mean Reversion Parameters (empirical OU calibration) ----------
 def estimate_kappa_from_abs_returns(Y: pd.Series):
-    """Estimate discrete daily mean reversion rate (kappa) and long-run vol (data-consistent)."""
+    """Estimate discrete daily mean reversion rate (kappa) and long-run vol (empirically anchored)."""
     vol_proxy = np.log(np.abs(Y) + 1e-8).dropna()
     if len(vol_proxy) < 60:
         return 0.10, Y.std(ddof=0)
@@ -122,7 +122,7 @@ def stationary_bootstrap_residuals(residuals, size, p=P_STATIONARY, rng=None):
             idx = (idx + 1) % n
     return out
 
-# ---------- Monte Carlo Simulation (OU discrete-time consistent) ----------
+# ---------- Monte Carlo Simulation (discrete-time OU) ----------
 def run_monte_carlo_paths(model, X_base, residuals, sims_per_seed, rng,
                           base_mean=0.0, scale=1.0, kappa=0.1, long_run_vol=None):
     horizon = FORECAST_DAYS
@@ -215,7 +215,7 @@ def plot_forecasts(port_rets, start_cap, central):
 
 # ---------- Streamlit ----------
 def main():
-    st.title("ML-Integrated Monte Carlo (Daily, OU-Calibrated, Empirical Vol)")
+    st.title("ML-Integrated Monte Carlo (Daily, Drift-Bounded, Empirical OU)")
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1000000.0, 10000.0, 1000.0)
@@ -245,31 +245,28 @@ def main():
             model.fit(X, vol_target)
 
             sigma_hat = model.predict(X)
-
-            # --- Volatility Calibration (data-driven) ---
             calibration = Y.std(ddof=0) / sigma_hat.std(ddof=0)
             sigma_hat *= calibration
 
-            # Compute standardized residuals
             res = (Y.loc[X.index].values / (sigma_hat + 1e-8)).astype(np.float32)
             res = res[np.isfinite(res)]
             res = (res - res.mean()) / (res.std(ddof=0) + 1e-8)
 
-            # --- Drift Correction (geometric consistency) ---
+            # --- Drift Correction (bounded) ---
             backtest_CAGR = annualized_return_daily(port_rets)
             sigma_hist = annualized_vol_daily(port_rets) / np.sqrt(252)
             sigma_fore = sigma_hat.std(ddof=0)
             mu_geom = np.log(1.0 + backtest_CAGR) / 252.0
-            base_mean = mu_geom - 0.5 * (sigma_fore**2 - sigma_hist**2)
+            mu_adj = mu_geom - 0.5 * (sigma_fore**2 - sigma_hist**2)
+            base_mean = min(mu_geom, mu_adj)  # prevent upward inflation
 
-            # Empirical kappa and long-run vol (improved)
+            # Empirical mean reversion parameters
             kappa_hat, long_run_vol = estimate_kappa_from_abs_returns(Y)
             st.write(f"Estimated discrete mean reversion rate (κ): {kappa_hat:.4f}")
             st.write(f"Estimated long-run volatility level: {long_run_vol:.6f}")
             st.write(f"Volatility calibration ratio: {calibration:.3f}")
             st.write(f"Adjusted daily drift (μ): {base_mean:.6e}")
 
-            # --- Monte Carlo Simulation ---
             all_paths = []
             bar = st.progress(0)
             txt = st.empty()
@@ -321,6 +318,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
