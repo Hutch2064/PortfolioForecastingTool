@@ -167,12 +167,14 @@ def evaluate_block_length(port_rets, block_length):
         paths = np.vstack(all_paths)
         medoid = compute_medoid_path(paths)
 
-        # actual vs forecast over that year
-        actual = np.exp(test.cumsum())
-        forecast = pd.Series(np.exp(np.log(medoid[:len(test)])), index=test.index)
+        # align forecast and actual to same length
+        steps = min(len(test), FORECAST_DAYS)
+        actual = np.exp(test.iloc[:steps].cumsum())
+        forecast = pd.Series(medoid[:steps], index=test.index[:steps])
         actual = actual / actual.iloc[0]
         forecast = forecast / forecast.iloc[0]
 
+        # compute OOS R² on cumulative log returns
         actual_log = np.log(actual)
         forecast_log = np.log(forecast)
         ss_res = np.sum((actual_log - forecast_log) ** 2)
@@ -235,7 +237,8 @@ def main():
                 mean_r2, _ = evaluate_block_length(port_rets, block_length)
                 return -mean_r2  # maximize R²
 
-            study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=GLOBAL_SEED))
+            study = optuna.create_study(direction="minimize",
+                                        sampler=optuna.samplers.TPESampler(seed=GLOBAL_SEED))
             study.optimize(objective, n_trials=10, show_progress_bar=False)
 
             best_block = study.best_params["block_length"]
