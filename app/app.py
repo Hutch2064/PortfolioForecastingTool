@@ -5,10 +5,9 @@ import os
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from typing import List
-from lightgbm import LGBMRegressor
 import matplotlib.pyplot as plt
 import streamlit as st
+from typing import List
 
 warnings.filterwarnings("ignore")
 
@@ -22,9 +21,9 @@ np.random.seed(GLOBAL_SEED)
 
 DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 8
-SIMS_PER_SEED = 1000
-FORECAST_DAYS = 252  # 1 year horizon
-P_STATIONARY = 0.1   # Bootstrap block probability
+SIMS_PER_SEED = 2000
+FORECAST_DAYS = 252  # 1 trading year
+P_STATIONARY = 0.1   # Probability of new block in bootstrap
 
 # ==========================================================
 # Basic Helpers
@@ -96,49 +95,28 @@ def portfolio_log_returns_daily(prices, weights):
     return port_rets.astype(np.float32)
 
 # ==========================================================
-# Simple Lag Feature
+# Stationary Bootstrap (Vectorized)
 # ==========================================================
-def build_features(returns):
-    df = pd.DataFrame(index=returns.index)
-    df["lag_ret"] = returns.shift(1)
-    return df.dropna().astype(np.float32)
-
-# ==========================================================
-# Stationary Bootstrap
-# ==========================================================
-def stationary_bootstrap_residuals(residuals, size, p=P_STATIONARY, rng=None):
+def stationary_bootstrap_residuals(residuals, size, sims, p=P_STATIONARY, rng=None):
+    """Vectorized stationary bootstrap for many paths."""
     if rng is None:
         rng = np.random.default_rng()
     n = len(residuals)
-    out = np.empty(size, dtype=np.float32)
-    idx = rng.integers(0, n)
-    for t in range(size):
-        out[t] = residuals[idx]
-        if rng.random() < p:
-            idx = rng.integers(0, n)
-        else:
-            idx = (idx + 1) % n
-    return out
+    idx = rng.integers(0, n, size=(sims, size))
+    # geometric block continuation
+    cont = rng.random((sims, size)) > p
+    for t in range(1, size):
+        idx[:, t] = np.where(cont[:, t], (idx[:, t - 1] + 1) % n, idx[:, t])
+    return residuals[idx]
 
 # ==========================================================
 # Monte Carlo Simulation
 # ==========================================================
-def run_monte_carlo_paths(model, X_base, residuals, sims_per_seed, rng, base_mean):
-    horizon = FORECAST_DAYS
-    log_paths = np.zeros((sims_per_seed, horizon), dtype=np.float32)
-    state = np.repeat(X_base.iloc[[-1]].values, sims_per_seed, axis=0).astype(np.float32)
-
-    for t in range(horizon):
-        # ML predicts volatility scaling (conditional sigma)
-        sigma_t = np.abs(model.predict(state))
-        eps = stationary_bootstrap_residuals(residuals, sims_per_seed, p=P_STATIONARY, rng=rng)
-        r_t = base_mean + sigma_t * eps
-        log_paths[:, t] = (log_paths[:, t - 1] if t > 0 else 0) + r_t
-
-        # update lag feature for next step
-        if t > 0:
-            state[:, 0] = log_paths[:, t] - log_paths[:, t - 1]
-
+def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean):
+    """Fast simulation with constant drift and empirical residuals."""
+    eps = stationary_bootstrap_residuals(residuals, FORECAST_DAYS, sims_per_seed, rng=rng)
+    drift = base_mean
+    log_paths = np.cumsum(drift + eps, axis=1, dtype=np.float32)
     return np.exp(log_paths - log_paths[:, [0]])
 
 # ==========================================================
@@ -187,7 +165,7 @@ def plot_forecasts(port_rets, start_cap, central):
 # Streamlit App
 # ==========================================================
 def main():
-    st.title("Simplified ML-Enhanced Monte Carlo Forecaster")
+    st.title("Pure Monte Carlo Forecast (Constant Drift + Empirical Residuals)")
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1000000.0, 10000.0, 1000.0)
@@ -199,40 +177,20 @@ def main():
             prices = fetch_prices_daily(tickers, DEFAULT_START)
             port_rets = portfolio_log_returns_daily(prices, weights)
 
-            df = build_features(port_rets)
-            Y = port_rets.loc[df.index].astype(np.float32)
-            X = df.shift(1).dropna()
-            Y = Y.loc[X.index]
+            # Core stats
+            back_cagr = annualized_return_daily(port_rets)
+            base_mean = np.log(1.0 + back_cagr) / 252.0
+            residuals = port_rets - port_rets.mean()
+            residuals = residuals.to_numpy(dtype=np.float32)
+            residuals -= residuals.mean()
 
-            # ML model predicts conditional volatility (|returns|)
-            vol_target = Y.abs().shift(-1).dropna()
-            valid_idx = vol_target.index.intersection(X.index)
-            X, vol_target = X.loc[valid_idx], vol_target.loc[valid_idx]
-
-            model = LGBMRegressor(
-                n_estimators=300, learning_rate=0.03, max_depth=3,
-                subsample=0.8, colsample_bytree=0.7,
-                random_state=GLOBAL_SEED, n_jobs=1
-            )
-            model.fit(X, vol_target)
-
-            # Standardized residuals
-            sigma_hat = model.predict(X)
-            res = (Y.loc[X.index].values / (sigma_hat + 1e-8)).astype(np.float32)
-            res = np.ascontiguousarray(res[~np.isnan(res)])
-            res -= res.mean()
-            res /= res.std(ddof=0)
-
-            # Constant drift (historical CAGR)
-            base_mean = np.log(1.0 + annualized_return_daily(port_rets)) / 252.0
-
-            # Monte Carlo simulation
+            # Simulations
             all_paths = []
             bar = st.progress(0)
             txt = st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng = np.random.default_rng(GLOBAL_SEED + i)
-                sims = run_monte_carlo_paths(model, X, res, SIMS_PER_SEED, rng, base_mean)
+                sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean)
                 all_paths.append(sims)
                 bar.progress((i + 1) / ENSEMBLE_SEEDS)
                 txt.text(f"Running forecasts... {int((i + 1) / ENSEMBLE_SEEDS * 100)}%")
@@ -261,11 +219,18 @@ def main():
             st.metric("Forecasted Portfolio Value", f"${final[-1] * start_cap:,.2f}")
             plot_forecasts(port_rets, start_cap, final)
 
+            # Distribution summary
+            terminal_vals = paths[:, -1]
+            p10, p50, p90 = np.percentile(terminal_vals, [10, 50, 90])
+            st.write(f"12-month terminal value percentiles: "
+                     f"P10={p10:.3f}, P50={p50:.3f}, P90={p90:.3f}")
+
         except Exception as e:
             st.error(f"Error: {e}")
 
 if __name__ == "__main__":
     main()
+
 
 
 
