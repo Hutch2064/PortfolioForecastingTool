@@ -215,7 +215,7 @@ def plot_forecasts(port_rets, start_cap, central):
 
 # ---------- Streamlit ----------
 def main():
-    st.title("ML-Integrated Monte Carlo (Daily, Featureless, OU-Calibrated)")
+    st.title("ML-Integrated Monte Carlo (Daily, OU-Calibrated, Drift-Adjusted)")
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1000000.0, 10000.0, 1000.0)
@@ -246,23 +246,30 @@ def main():
 
             sigma_hat = model.predict(X)
 
-            # --- Volatility Calibration (Academically Defensible) ---
+            # --- Volatility Calibration (no arbitrariness) ---
             calibration = Y.std(ddof=0) / sigma_hat.std(ddof=0)
-            sigma_hat *= calibration  # Adjust scale bias of expected |r|
+            sigma_hat *= calibration
 
             # Compute standardized residuals
             res = (Y.loc[X.index].values / (sigma_hat + 1e-8)).astype(np.float32)
             res = res[np.isfinite(res)]
             res = (res - res.mean()) / (res.std(ddof=0) + 1e-8)
 
+            # --- Drift Correction (maintain geometric CAGR consistency) ---
             backtest_CAGR = annualized_return_daily(port_rets)
-            base_mean = np.log(1.0 + backtest_CAGR) / 252.0
+            sigma_hist = annualized_vol_daily(port_rets) / np.sqrt(252)
+            sigma_fore = sigma_hat.std(ddof=0)
+            mu_geom = np.log(1.0 + backtest_CAGR) / 252.0
+            base_mean = mu_geom - 0.5 * (sigma_fore**2 - sigma_hist**2)
 
+            # Empirical kappa and long-run volatility (discrete-time)
             kappa_hat, long_run_vol = estimate_kappa_from_abs_returns(Y)
             st.write(f"Estimated discrete mean reversion rate (κ): {kappa_hat:.4f}")
             st.write(f"Estimated long-run volatility level: {long_run_vol:.6f}")
             st.write(f"Volatility calibration ratio: {calibration:.3f}")
+            st.write(f"Adjusted daily drift (μ): {base_mean:.6e}")
 
+            # --- Monte Carlo Simulation ---
             all_paths = []
             bar = st.progress(0)
             txt = st.empty()
@@ -314,6 +321,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
