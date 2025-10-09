@@ -110,10 +110,6 @@ def fetch_macro_features(start=DEFAULT_START):
 
 # ---------- Portfolio (fixed drift) ----------
 def portfolio_log_returns_monthly(prices, weights, rebalance):
-    """
-    Computes portfolio log returns with proper weighting, rebalancing,
-    and log-space consistency. Guaranteed not to collapse to zero.
-    """
     prices = prices.ffill().dropna().astype(np.float64)
     n_assets = prices.shape[1]
     weights = np.array(weights, dtype=np.float64).reshape(-1)
@@ -212,13 +208,13 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
         def objective(trial):
             nonlocal done
             params = {
-                "n_estimators": trial.suggest_int("n_estimators", 100, 2500),
+                "n_estimators": trial.suggest_int("n_estimators", 100, 2000),
                 "learning_rate": trial.suggest_float("learning_rate", 0.001, 0.005, log=True),
                 "max_depth": trial.suggest_int("max_depth", 2, 3),
                 "subsample": trial.suggest_float("subsample", 0.5, 1.0),
-                "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
-                "reg_lambda": trial.suggest_float("reg_lambda", 0.01, 10.0, log=True),
-                "min_child_samples": trial.suggest_int("min_child_samples", 10, 50),
+                "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 0.1),
+                "reg_lambda": trial.suggest_float("reg_lambda", 0.1, 3.0, log=True),
+                "min_child_samples": trial.suggest_int("min_child_samples", 20, 50),
                 "random_state": seed,
                 "n_jobs": 1,
             }
@@ -226,11 +222,15 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
             mdl.fit(Xtr, Ytr)
             preds = mdl.predict(Xte)
             rmse = np.sqrt(mean_squared_error(Yte, preds))
+            dir_acc = np.mean(np.sign(preds) == np.sign(Yte))
+            pred_vol = annualized_vol_monthly(pd.Series(preds, index=Yte.index))
+            real_vol = annualized_vol_monthly(Yte)
+            vol_pen = abs(pred_vol - real_vol) / (abs(real_vol) + 1e-8)
+            score = (rmse + vol_pen + (1 - dir_acc)) / 3
             done += 1
             bar.progress(done / total_jobs)
             txt.text(f"Tuning models... {int(done / total_jobs * 100)}%/100%")
-            return rmse
-
+            return score
         study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=seed))
         study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
         best = study.best_trial
@@ -240,18 +240,29 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
         preds = mdl.predict(Xte)
         rmse = np.sqrt(mean_squared_error(Yte, preds))
         dir_acc = np.mean(np.sign(preds) == np.sign(Yte))
-        details.append({"year": y, "rmse": float(rmse), "directional_accuracy": float(dir_acc), "best_params": best_params})
+        pred_vol = annualized_vol_monthly(pd.Series(preds, index=Yte.index))
+        real_vol = annualized_vol_monthly(Yte)
+        vol_pen = abs(pred_vol - real_vol) / (abs(real_vol) + 1e-8)
+        details.append({"year": y, "rmse": float(rmse), "directional_accuracy": float(dir_acc),
+                        "vol_penalty": float(vol_pen), "best_params": best_params})
         params_all.append(best_params)
-        results_summary.append([y, rmse, dir_acc])
+        results_summary.append([y, rmse, dir_acc, vol_pen])
 
     bar.empty()
     txt.empty()
 
     if results_summary:
-        df_results = pd.DataFrame(results_summary, columns=["Year", "RMSE", "Directional Accuracy"])
-        df_results.loc["Total"] = ["Mean", df_results["RMSE"].mean(), df_results["Directional Accuracy"].mean()]
+        df_results = pd.DataFrame(results_summary, columns=["Year", "RMSE", "Directional Accuracy", "Vol Penalty"])
+        df_results.loc["Total"] = ["Mean",
+                                   df_results["RMSE"].mean(),
+                                   df_results["Directional Accuracy"].mean(),
+                                   df_results["Vol Penalty"].mean()]
         st.subheader("OOS Yearly Performance")
-        st.dataframe(df_results.style.format({"RMSE": "{:.4f}", "Directional Accuracy": "{:.2%}"}))
+        st.dataframe(df_results.style.format({
+            "RMSE": "{:.1%}",
+            "Directional Accuracy": "{:.1%}",
+            "Vol Penalty": "{:.1%}"
+        }))
 
     return _median_params(params_all), details, np.nan, np.nan
 
@@ -276,13 +287,6 @@ def train_indicator_models(X, feats):
 
 # ---------- Stationary Bootstrap ----------
 def stationary_bootstrap_residuals(residuals, size, p=P_STATIONARY, rng=None):
-    """
-    Stationary Bootstrap (Politis & Romano, 1994)
-    - residuals: np.array of original residuals
-    - size: number of simulated steps to generate
-    - p: probability of starting a new block (1/p = expected block length)
-    - rng: np.random.Generator for reproducibility
-    """
     if rng is None:
         rng = np.random.default_rng()
     n = len(residuals)
@@ -458,6 +462,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
