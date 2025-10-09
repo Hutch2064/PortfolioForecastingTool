@@ -213,8 +213,8 @@ def tune_across_recent_oos_years(X, Y, years_back=5, seed=GLOBAL_SEED, n_trials=
             nonlocal done
             params = {
                 "n_estimators": trial.suggest_int("n_estimators", 100, 2500),
-                "learning_rate": trial.suggest_float("learning_rate", 0.001, 1, log=True),
-                "max_depth": trial.suggest_int("max_depth", 2, 6),
+                "learning_rate": trial.suggest_float("learning_rate", 0.001, 0.005, log=True),
+                "max_depth": trial.suggest_int("max_depth", 2, 3),
                 "subsample": trial.suggest_float("subsample", 0.5, 1.0),
                 "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
                 "reg_lambda": trial.suggest_float("reg_lambda", 0.01, 10.0, log=True),
