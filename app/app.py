@@ -7,6 +7,7 @@ import pandas as pd
 import yfinance as yf
 import matplotlib.pyplot as plt
 import streamlit as st
+import optuna
 from typing import List
 
 warnings.filterwarnings("ignore")
@@ -22,9 +23,7 @@ np.random.seed(GLOBAL_SEED)
 DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 10
 SIMS_PER_SEED = 10000
-FORECAST_DAYS = 252      # 1 trading year
-BLOCK_LENGTH = 21        # expected block length for stationary bootstrap
-P_STATIONARY = 1.0 / BLOCK_LENGTH  # probability of new block ≈ 1/21
+FORECAST_DAYS = 252      # ~1 trading year
 
 # ==========================================================
 # Basic Helpers
@@ -39,7 +38,7 @@ def to_weights(raw: List[float]) -> np.ndarray:
 
 def annualized_return_daily(r):
     r = r.dropna()
-    if r.empty: 
+    if r.empty:
         return np.nan
     compounded = np.exp(r.sum())
     years = len(r) / 252.0
@@ -53,7 +52,7 @@ def annualized_vol_daily(r):
 
 def annualized_sharpe_daily(r, rf_daily=0.0):
     r = r.dropna()
-    if r.empty: 
+    if r.empty:
         return np.nan
     excess = r - rf_daily
     mu, sigma = excess.mean(), excess.std(ddof=0)
@@ -100,27 +99,30 @@ def portfolio_log_returns_daily(prices, weights):
     return port_rets.astype(np.float32)
 
 # ==========================================================
-# Stationary Bootstrap (Vectorized, 21-day expected block)
+# Stationary Bootstrap (Vectorized)
 # ==========================================================
-def stationary_bootstrap_residuals(residuals, size, sims, p=P_STATIONARY, rng=None):
-    """Vectorized stationary bootstrap for many paths with expected block length = 1/p."""
+def stationary_bootstrap_residuals(residuals, size, sims, block_length, rng=None):
+    """Vectorized stationary bootstrap for many paths with expected block length."""
     if rng is None:
         rng = np.random.default_rng()
     n = len(residuals)
-    # initial random starting indices
+    p = 1.0 / block_length
     idx = rng.integers(0, n, size=(sims, size))
-    # geometric continuation flags
     cont = rng.random((sims, size)) > p
     for t in range(1, size):
-        idx[:, t] = np.where(cont[:, t], (idx[:, t - 1] + 1) % n, rng.integers(0, n, size=sims))
+        idx[:, t] = np.where(
+            cont[:, t],
+            (idx[:, t - 1] + 1) % n,
+            rng.integers(0, n, size=sims)
+        )
     return residuals[idx]
 
 # ==========================================================
 # Monte Carlo Simulation
 # ==========================================================
-def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean):
+def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, block_length):
     """Fast simulation with constant drift and stationary bootstrap residuals."""
-    eps = stationary_bootstrap_residuals(residuals, FORECAST_DAYS, sims_per_seed, rng=rng)
+    eps = stationary_bootstrap_residuals(residuals, FORECAST_DAYS, sims_per_seed, block_length, rng=rng)
     drift = base_mean
     log_paths = np.cumsum(drift + eps, axis=1, dtype=np.float32)
     return np.exp(log_paths - log_paths[:, [0]])
@@ -138,6 +140,46 @@ def compute_medoid_path(paths):
     sims = dots / (norms + 1e-9)
     medoid_idx = np.argmax(sims)
     return paths[medoid_idx]
+
+# ==========================================================
+# OOS Evaluation + Optuna
+# ==========================================================
+def evaluate_block_length(port_rets, block_length):
+    """Expanding-window OOS R² by year."""
+    df = port_rets.to_frame("r")
+    df["year"] = df.index.year
+    years = sorted(df["year"].unique())
+    if len(years) < 12:
+        return np.nan
+    oos_r2 = []
+    for i in range(10, len(years) - 1):
+        train = df[df["year"].isin(years[:i])]
+        test = df[df["year"] == years[i]]
+        if len(train) < 2520 or len(test) < 50:
+            continue
+        mu, sigma = train["r"].mean(), train["r"].std(ddof=0)
+        base_mean = mu - 0.5 * sigma**2
+        residuals = (train["r"] - mu).to_numpy(dtype=np.float32)
+        residuals -= residuals.mean()
+        rng = np.random.default_rng(GLOBAL_SEED)
+        sims = run_monte_carlo_paths(residuals, 500, rng, base_mean, block_length)
+        preds = np.log(sims[:, -1])
+        actual = test["r"].sum()
+        pred_mean = preds.mean()
+        ss_res = (actual - pred_mean) ** 2
+        ss_tot = (actual - train["r"].mean()) ** 2
+        r2 = 1 - ss_res / ss_tot if ss_tot != 0 else np.nan
+        oos_r2.append(r2)
+    return np.nanmean(oos_r2) if oos_r2 else np.nan
+
+
+def tune_block_length(port_rets):
+    def objective(trial):
+        block_len = trial.suggest_int("block_length", 5, 63)
+        return -evaluate_block_length(port_rets, block_len)
+    study = optuna.create_study(direction="minimize")
+    study.optimize(objective, n_trials=20, show_progress_bar=False)
+    return int(study.best_params["block_length"]), -study.best_value
 
 # ==========================================================
 # Stats + Plot
@@ -171,7 +213,7 @@ def plot_forecasts(port_rets, start_cap, central):
 # Streamlit App
 # ==========================================================
 def main():
-    st.title("Monte Carlo Forecast (Constant Drift + 21-Day Stationary Bootstrap)")
+    st.title("Monte Carlo Forecast (Expanding OOS + Optuna Block-Length Tuning)")
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1000000.0, 10000.0, 1000.0)
@@ -183,10 +225,15 @@ def main():
             prices = fetch_prices_daily(tickers, DEFAULT_START)
             port_rets = portfolio_log_returns_daily(prices, weights)
 
+            # Optuna tuning
+            st.write("Running Optuna tuning for block length (5–63 days)...")
+            best_block, best_r2 = tune_block_length(port_rets)
+            st.success(f"Best block length: {best_block} days | Mean OOS R² = {best_r2:.4f}")
+
             # Core stats
             mu = port_rets.mean()
             sigma = port_rets.std(ddof=0)
-            base_mean = mu - 0.5 * sigma**2  # GBM drift correction
+            base_mean = mu - 0.5 * sigma**2
             residuals = (port_rets - mu).to_numpy(dtype=np.float32)
             residuals -= residuals.mean()
 
@@ -196,7 +243,7 @@ def main():
             txt = st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng = np.random.default_rng(GLOBAL_SEED + i)
-                sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean)
+                sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean, best_block)
                 all_paths.append(sims)
                 bar.progress((i + 1) / ENSEMBLE_SEEDS)
                 txt.text(f"Running forecasts... {int((i + 1) / ENSEMBLE_SEEDS * 100)}%")
@@ -225,7 +272,6 @@ def main():
             st.metric("Forecasted Portfolio Value", f"${final[-1] * start_cap:,.2f}")
             plot_forecasts(port_rets, start_cap, final)
 
-            # Distribution summary
             terminal_vals = paths[:, -1]
             p10, p50, p90 = np.percentile(terminal_vals, [10, 50, 90])
             st.write(f"12-month terminal value percentiles: "
@@ -236,46 +282,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
