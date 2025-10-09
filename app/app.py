@@ -22,7 +22,9 @@ np.random.seed(GLOBAL_SEED)
 DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 10
 SIMS_PER_SEED = 10000
-FORECAST_DAYS = 252  # 1 trading year
+FORECAST_DAYS = 252      # 1 trading year
+BLOCK_LENGTH = 21        # expected block length for stationary bootstrap
+P_STATIONARY = 1.0 / BLOCK_LENGTH  # probability of new block ≈ 1/21
 
 # ==========================================================
 # Basic Helpers
@@ -37,7 +39,7 @@ def to_weights(raw: List[float]) -> np.ndarray:
 
 def annualized_return_daily(r):
     r = r.dropna()
-    if r.empty:
+    if r.empty: 
         return np.nan
     compounded = np.exp(r.sum())
     years = len(r) / 252.0
@@ -51,7 +53,7 @@ def annualized_vol_daily(r):
 
 def annualized_sharpe_daily(r, rf_daily=0.0):
     r = r.dropna()
-    if r.empty:
+    if r.empty: 
         return np.nan
     excess = r - rf_daily
     mu, sigma = excess.mean(), excess.std(ddof=0)
@@ -98,22 +100,27 @@ def portfolio_log_returns_daily(prices, weights):
     return port_rets.astype(np.float32)
 
 # ==========================================================
-# Random Residual Sampling (no block bootstrap)
+# Stationary Bootstrap (Vectorized, 21-day expected block)
 # ==========================================================
-def random_residual_sampling(residuals, size, sims, rng=None):
-    """Fully random sampling of residuals (no block structure)."""
+def stationary_bootstrap_residuals(residuals, size, sims, p=P_STATIONARY, rng=None):
+    """Vectorized stationary bootstrap for many paths with expected block length = 1/p."""
     if rng is None:
         rng = np.random.default_rng()
     n = len(residuals)
+    # initial random starting indices
     idx = rng.integers(0, n, size=(sims, size))
+    # geometric continuation flags
+    cont = rng.random((sims, size)) > p
+    for t in range(1, size):
+        idx[:, t] = np.where(cont[:, t], (idx[:, t - 1] + 1) % n, rng.integers(0, n, size=sims))
     return residuals[idx]
 
 # ==========================================================
 # Monte Carlo Simulation
 # ==========================================================
 def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean):
-    """Simulation with GBM drift correction and random residuals."""
-    eps = random_residual_sampling(residuals, FORECAST_DAYS, sims_per_seed, rng=rng)
+    """Fast simulation with constant drift and stationary bootstrap residuals."""
+    eps = stationary_bootstrap_residuals(residuals, FORECAST_DAYS, sims_per_seed, rng=rng)
     drift = base_mean
     log_paths = np.cumsum(drift + eps, axis=1, dtype=np.float32)
     return np.exp(log_paths - log_paths[:, [0]])
@@ -164,7 +171,7 @@ def plot_forecasts(port_rets, start_cap, central):
 # Streamlit App
 # ==========================================================
 def main():
-    st.title("Pure Monte Carlo Forecast (GBM Drift + Random Residuals)")
+    st.title("Monte Carlo Forecast (Constant Drift + 21-Day Stationary Bootstrap)")
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1000000.0, 10000.0, 1000.0)
@@ -176,14 +183,11 @@ def main():
             prices = fetch_prices_daily(tickers, DEFAULT_START)
             port_rets = portfolio_log_returns_daily(prices, weights)
 
-            # GBM drift correction
-            mu_daily = port_rets.mean()
-            sigma_daily = port_rets.std(ddof=0)
-            base_mean = mu_daily - 0.5 * sigma_daily**2
-
-            # Residuals (demeaned returns)
-            residuals = port_rets - port_rets.mean()
-            residuals = residuals.to_numpy(dtype=np.float32)
+            # Core stats
+            mu = port_rets.mean()
+            sigma = port_rets.std(ddof=0)
+            base_mean = mu - 0.5 * sigma**2  # GBM drift correction
+            residuals = (port_rets - mu).to_numpy(dtype=np.float32)
             residuals -= residuals.mean()
 
             # Simulations
@@ -232,6 +236,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
