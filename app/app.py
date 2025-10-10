@@ -24,6 +24,7 @@ DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 10
 SIMS_PER_SEED = 2000
 DEFAULT_BLOCK = 21   # fallback if tuning disabled
+FORECAST_DAYS = 252
 
 # ==========================================================
 # Basic Helpers
