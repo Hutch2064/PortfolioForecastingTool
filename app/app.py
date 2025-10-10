@@ -21,8 +21,8 @@ random.seed(GLOBAL_SEED)
 np.random.seed(GLOBAL_SEED)
 
 DEFAULT_START = "2000-01-01"
-ENSEMBLE_SEEDS = 25
-SIMS_PER_SEED = 4000
+ENSEMBLE_SEEDS = 10
+SIMS_PER_SEED = 2000
 DEFAULT_BLOCK = 21   # fallback if tuning disabled
 
 # ==========================================================
