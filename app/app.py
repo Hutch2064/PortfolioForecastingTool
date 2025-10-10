@@ -111,17 +111,20 @@ def stationary_bootstrap_residuals(residuals, size, sims, block_length, rng=None
     idx = rng.integers(0, n, size=(sims, size))
     cont = rng.random((sims, size)) > p
     for t in range(1, size):
-        idx[:, t] = np.where(cont[:, t],
-                             (idx[:, t - 1] + 1) % n,
-                             rng.integers(0, n, size=sims))
+        idx[:, t] = np.where(
+            cont[:, t],
+            (idx[:, t - 1] + 1) % n,
+            rng.integers(0, n, size=sims)
+        )
     return residuals[idx]
 
 # ==========================================================
 # Monte Carlo Simulation
 # ==========================================================
 def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, block_length):
-    eps = stationary_bootstrap_residuals(residuals, FORECAST_DAYS, sims_per_seed,
-                                         block_length, rng=rng)
+    eps = stationary_bootstrap_residuals(
+        residuals, FORECAST_DAYS, sims_per_seed, block_length, rng=rng
+    )
     log_paths = np.cumsum(base_mean + eps, axis=1, dtype=np.float32)
     return np.exp(log_paths - log_paths[:, [0]])
 
@@ -159,26 +162,24 @@ def evaluate_block_length(port_rets, block_length):
         residuals = (train - mu).to_numpy(dtype=np.float32)
         residuals -= residuals.mean()
 
-        # run full forecast pipeline
         all_paths = []
         for s in range(ENSEMBLE_SEEDS):
             rng = np.random.default_rng(GLOBAL_SEED + s)
-            sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean, block_length)
+            sims = run_monte_carlo_paths(
+                residuals, SIMS_PER_SEED, rng, base_mean, block_length
+            )
             all_paths.append(sims)
         paths = np.vstack(all_paths)
         medoid = compute_medoid_path(paths)
 
-        # convert to monthly log returns
         steps = min(len(test), FORECAST_DAYS)
         forecast_series = pd.Series(medoid[:steps], index=test.index[:steps])
         forecast_rets = np.log(forecast_series / forecast_series.shift(1)).dropna()
         actual_rets = test.iloc[:len(forecast_rets)]
 
-        # resample to monthly
         f_month = forecast_rets.resample("M").sum()
         a_month = actual_rets.resample("M").sum()
 
-        # align and compute directional accuracy
         min_len = min(len(f_month), len(a_month))
         f_month = f_month.iloc[:min_len]
         a_month = a_month.iloc[:min_len]
@@ -204,18 +205,42 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
         "Max Drawdown": max_drawdown_from_rets(rets),
     }
 
-
-def plot_forecasts(port_rets, start_cap, central):
+def plot_forecasts(port_rets, start_cap, central, paths):
+    """Fan chart with 5–95 percentile transparent lines and medoid path."""
     port_cum = np.exp(port_rets.cumsum()) * start_cap
     last = port_cum.index[-1]
-    fore = port_cum.iloc[-1] * (central / central[0])
     dates = pd.date_range(start=last, periods=len(central), freq="B")
+
+    # determine 5–95 percentile indices
+    terminal_vals = paths[:, -1]
+    low_cut, high_cut = np.percentile(terminal_vals, [5, 95])
+    mask = (terminal_vals >= low_cut) & (terminal_vals <= high_cut)
+    filtered_paths = paths[mask]
+
     fig, ax = plt.subplots(figsize=(12, 6))
-    ax.plot(port_cum.index, port_cum.values, label="Portfolio Backtest")
-    ax.plot([last, *dates], [port_cum.iloc[-1], *fore],
-            label="Forecast (Medoid Path)", lw=2)
+    ax.plot(port_cum.index, port_cum.values, color="black", lw=2, label="Portfolio Backtest")
+
+    # gray fan lines (5–95 percentile paths)
+    for sim in filtered_paths[:200]:
+        ax.plot(dates, port_cum.iloc[-1] * sim / sim[0], color="gray", alpha=0.05)
+
+    # red medoid line
+    ax.plot(dates, port_cum.iloc[-1] * central / central[0],
+            color="red", lw=2, label="Forecast (Medoid Path)")
+
+    ax.set_title("Monte Carlo Forecast (Medoid Path + 5–95% Fan Lines)")
+    ax.set_ylabel("Portfolio Value ($)")
     ax.legend()
     st.pyplot(fig)
+
+    # terminal percentile summary table
+    percentiles_end = np.percentile(terminal_vals, [5, 10, 25, 50, 75, 90, 95])
+    df = pd.DataFrame({
+        "Percentile": ["P5", "P10", "P25", "P50", "P75", "P90", "P95"],
+        "Terminal Value ($)": [f"${v * start_cap:,.2f}" for v in percentiles_end]
+    })
+    st.subheader("Forecasted Terminal Portfolio Values (12-Month Horizon)")
+    st.table(df)
 
 # ==========================================================
 # Streamlit App
@@ -248,15 +273,20 @@ def main():
                     txt.text(f"Tuning... {int(progress * 100)}% / 100%")
                     return -mean_acc
 
-                study = optuna.create_study(direction="minimize",
-                                            sampler=optuna.samplers.TPESampler(seed=GLOBAL_SEED))
+                study = optuna.create_study(
+                    direction="minimize",
+                    sampler=optuna.samplers.TPESampler(seed=GLOBAL_SEED)
+                )
                 study.optimize(objective, n_trials=total_trials, show_progress_bar=False)
                 bar.empty()
                 txt.empty()
 
                 best_block = study.best_params["block_length"]
                 best_mean_acc, df_acc = evaluate_block_length(port_rets, best_block)
-                st.success(f"✅ Best block length: {best_block} days | Mean OOS Monthly Directional Accuracy = {best_mean_acc:.4f}")
+                st.success(
+                    f"✅ Best block length: {best_block} days | "
+                    f"Mean OOS Monthly Directional Accuracy = {best_mean_acc:.4f}"
+                )
                 st.dataframe(df_acc.set_index("Year").style.format("{:.4f}"))
             else:
                 st.info("Skipping OOS testing. Using default block length = 21 days.")
@@ -274,7 +304,9 @@ def main():
             txt2 = st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng = np.random.default_rng(GLOBAL_SEED + i)
-                sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean, best_block)
+                sims = run_monte_carlo_paths(
+                    residuals, SIMS_PER_SEED, rng, base_mean, best_block
+                )
                 all_paths.append(sims)
                 bar2.progress((i + 1) / ENSEMBLE_SEEDS)
                 txt2.text(f"Running forecasts... {int((i + 1) / ENSEMBLE_SEEDS * 100)}%")
@@ -300,13 +332,10 @@ def main():
                     for k, v in data.items():
                         st.metric(k, f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
 
-            st.metric("Forecasted Portfolio Value", f"${final[-1] * start_cap:,.2f}")
-            plot_forecasts(port_rets, start_cap, final)
-
-            terminal_vals = paths[:, -1]
-            p10, p50, p90 = np.percentile(terminal_vals, [10, 50, 90])
-            st.write(f"12-month terminal value percentiles: "
-                     f"P10={p10:.3f}, P50={p50:.3f}, P90={p90:.3f}")
+            st.metric(
+                "Forecasted Portfolio Value", f"${final[-1] * start_cap:,.2f}"
+            )
+            plot_forecasts(port_rets, start_cap, final, paths)
 
         except Exception as e:
             st.error(f"Error: {e}")
