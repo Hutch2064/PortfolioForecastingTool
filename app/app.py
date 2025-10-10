@@ -24,6 +24,7 @@ DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 10
 SIMS_PER_SEED = 5000
 FORECAST_DAYS = 252  # 1 trading year
+DEFAULT_BLOCK = 21   # fallback if tuning disabled
 
 # ==========================================================
 # Basic Helpers
@@ -224,6 +225,7 @@ def main():
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1_000_000.0, 10_000.0, 1000.0)
+    run_oos = st.selectbox("Run OOS + Optuna tuning?", ["Yes", "No"])
 
     if st.button("Run Forecast"):
         try:
@@ -232,34 +234,35 @@ def main():
             prices = fetch_prices_daily(tickers, DEFAULT_START)
             port_rets = portfolio_log_returns_daily(prices, weights)
 
-            st.write("Running Optuna tuning for block length (5–63 days)...")
-            bar = st.progress(0)
-            txt = st.empty()
+            if run_oos == "Yes":
+                st.write("Running Optuna tuning for block length (5–63 days)...")
+                bar = st.progress(0)
+                txt = st.empty()
+                total_trials = 10
 
-            total_trials = 10
+                def objective(trial):
+                    block_length = trial.suggest_int("block_length", 5, 63)
+                    mean_acc, _ = evaluate_block_length(port_rets, block_length)
+                    progress = (trial.number + 1) / total_trials
+                    bar.progress(progress)
+                    txt.text(f"Tuning... {int(progress * 100)}% / 100%")
+                    return -mean_acc
 
-            def objective(trial):
-                block_length = trial.suggest_int("block_length", 5, 63)
-                mean_acc, _ = evaluate_block_length(port_rets, block_length)
-                progress = (trial.number + 1) / total_trials
-                bar.progress(progress)
-                txt.text(f"Tuning... {int(progress * 100)}% / 100%")
-                return -mean_acc  # maximize accuracy
+                study = optuna.create_study(direction="minimize",
+                                            sampler=optuna.samplers.TPESampler(seed=GLOBAL_SEED))
+                study.optimize(objective, n_trials=total_trials, show_progress_bar=False)
+                bar.empty()
+                txt.empty()
 
-            study = optuna.create_study(direction="minimize",
-                                        sampler=optuna.samplers.TPESampler(seed=GLOBAL_SEED))
-            study.optimize(objective, n_trials=total_trials, show_progress_bar=False)
+                best_block = study.best_params["block_length"]
+                best_mean_acc, df_acc = evaluate_block_length(port_rets, best_block)
+                st.success(f"✅ Best block length: {best_block} days | Mean OOS Monthly Directional Accuracy = {best_mean_acc:.4f}")
+                st.dataframe(df_acc.set_index("Year").style.format("{:.4f}"))
+            else:
+                st.info("Skipping OOS testing. Using default block length = 21 days.")
+                best_block = DEFAULT_BLOCK
 
-            bar.empty()
-            txt.empty()
-
-            best_block = study.best_params["block_length"]
-            best_mean_acc, df_acc = evaluate_block_length(port_rets, best_block)
-            st.success(f"Optimized block length: {best_block} days | Mean OOS Monthly Directional Accuracy = {best_mean_acc:.4f}")
-
-            st.dataframe(df_acc.set_index("Year").style.format("{:.4f}"))
-
-            # Final forecast using tuned block length
+            # Run forecast (same logic)
             mu = port_rets.mean()
             sigma = port_rets.std(ddof=0)
             base_mean = mu - 0.5 * sigma ** 2
