@@ -255,7 +255,7 @@ def main():
 
             best_block = study.best_params["block_length"]
             best_mean_acc, df_acc = evaluate_block_length(port_rets, best_block)
-            st.success(f"✅ Best block length: {best_block} days | Mean OOS Monthly Directional Accuracy = {best_mean_acc:.4f}")
+            st.success(f"Optimized block length: {best_block} days | Mean OOS Monthly Directional Accuracy = {best_mean_acc:.4f}")
 
             st.dataframe(df_acc.set_index("Year").style.format("{:.4f}"))
 
@@ -291,7 +291,7 @@ def main():
 
             st.subheader("Results")
             c1, c2 = st.columns(2)
-            for (col, data, label) in [(c1, back, "Backtest"), (c2, stats, "Forecast (Medoid)")]:
+            for (col, data, label) in [(c1, back, "Backtest"), (c2, stats, "Forecast")]:
                 with col:
                     st.markdown(f"**{label}**")
                     for k, v in data.items():
