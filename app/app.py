@@ -164,13 +164,13 @@ def evaluate_block_length(port_rets, block_length):
         for s in range(ENSEMBLE_SEEDS):
             rng = np.random.default_rng(GLOBAL_SEED + s)
             sims = run_monte_carlo_paths(
-                residuals, SIMS_PER_SEED, rng, base_mean, block_length, size := FORECAST_DAYS  # uses default days
+                residuals, SIMS_PER_SEED, rng, base_mean, block_length, size := 252  # use one‑year default here
             )
             all_paths.append(sims)
         paths = np.vstack(all_paths)
         medoid = compute_medoid_path(paths)
 
-        steps = min(len(test), FORECAST_DAYS)
+        steps = min(len(test), 252)
         forecast_series = pd.Series(medoid[:steps], index=test.index[:steps])
         forecast_rets = np.log(forecast_series / forecast_series.shift(1)).dropna()
         actual_rets = test.iloc[:len(forecast_rets)]
@@ -210,34 +210,37 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     dates = pd.date_range(start=last, periods=len(central), freq="B")
 
     terminal_vals = paths[:, -1]
-    low_cut, high_cut = np.percentile(terminal_vals, [5, 95])
+    # For plotting, use 10–90 percentiles to filter fan lines
+    low_cut, high_cut = np.percentile(terminal_vals, [10, 90])
     mask = (terminal_vals >= low_cut) & (terminal_vals <= high_cut)
     filtered_paths = paths[mask]
 
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(port_cum.index, port_cum.values, color="black", lw=2, label="Portfolio Backtest")
 
-    for sim in filtered_paths[:100]:
+    for sim in filtered_paths:
         ax.plot(dates, port_cum.iloc[-1] * sim / sim[0], color="gray", alpha=0.05)
 
     ax.plot(dates, port_cum.iloc[-1] * central / central[0],
             color="red", lw=2, label="Forecast (Medoid Path)")
 
-    ax.set_title("Monte Carlo Forecast (Medoid Path + 5–95% Fan Lines)")
+    ax.set_title("Monte Carlo Forecast (Medoid Path + 10–90% Fan Lines)")
     ax.set_ylabel("Portfolio Value ($)")
     ax.legend()
     st.pyplot(fig)
 
-    percentiles_end = np.percentile(terminal_vals, [5,95])
+    # Also show terminal summary using 5th/95th percentiles
+    percentiles_end = np.percentile(terminal_vals, [5, 95])
     df = pd.DataFrame({
-        "Percentile": ["P5","P95"],
+        "Percentile": ["P5", "P95"],
         "Terminal Value ($)": [f"${v * start_cap:,.2f}" for v in percentiles_end]
     })
-    st.subheader("Forecasted Terminal Portfolio Values")
+    st.subheader("Forecasted Terminal Portfolio Values (5–95%)")
     st.table(df)
 
 # ==========================================================
 # Rebalancing (Portfolio-level “snap back to weights”) Logic
+# (Remains no-op under this simplified method)
 # ==========================================================
 def apply_rebalance_snapback(port_paths, rebalance_freq, weights):
     """
@@ -247,35 +250,8 @@ def apply_rebalance_snapback(port_paths, rebalance_freq, weights):
     weights: target weights (not used in this pseudo approach, but included for extension)
     Returns: adjusted paths with “rebalance snapback” effect
     """
-    n_sims, total_days = port_paths.shape
-    # create a daily time index
-    dates = pd.date_range(start=0, periods=total_days, freq="B")
-    df_dummy = pd.Series(0, index=dates)  # dummy for resampling
-
-    # mapping freq to pandas offset for resample (we only need indices)
-    freq_map = {
-        "Daily": "B",
-        "Weekly": "W-FRI",
-        "Monthly": "M",
-        "Quarterly": "Q",
-        "Semiannually": "2Q",
-        "Annually": "A"
-    }
-    rb = freq_map.get(rebalance_freq, "M")
-    # compute rebalance dates (the first trading day of each period)
-    rebalance_dates = pd.Series(1, index=dates).resample(rb).first().dropna().index
-
-    # Create a mask array: for each day, whether rebalance occurs
-    rebalance_mask = np.isin(dates, rebalance_dates).astype(int)
-
-    # For each simulation path, apply snap‑back:
-    # At each rebalance date, adjust value such that drift from weights is reset
-    # Here, since we have only portfolio-level paths, we approximate that the rebalancing
-    # is neutral (does nothing) — so this is a no-op unless you wish to scale paths.
-    # For now: **no change** — you might choose to dampen drift over the interval.
-    # So we return paths unchanged.
+    # In this simplified approach, we leave paths unchanged
     return port_paths
-
 
 # ==========================================================
 # Streamlit App
@@ -284,7 +260,8 @@ def main():
     st.title("Portfolio Forecasting Tool")
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
-    start_cap = st.number_input("Starting Value ($)", 1000.0, 1_000_000.0, 10_000.0, 1000.0)
+    # Allow any positive starting capital > 0
+    start_cap = st.number_input("Starting Value ($)", min_value=0.0001, value=10000.0, step=100.0)
     run_oos = st.selectbox("Out-Of-Sample Testing", ["Yes", "No"])
 
     # New dropdowns
@@ -338,7 +315,11 @@ def main():
             residuals = (port_rets - mu).to_numpy(dtype=np.float32)
             residuals -= residuals.mean()
 
-            # We generate fully for 5 years (max), then slice down
+            # Clip residuals to 5–95 percentile
+            low, high = np.percentile(residuals, [5, 95])
+            residuals = np.clip(residuals, low, high)
+
+            # Generate full paths for max horizon (5 years), then slice down
             total_days = 5 * 252
             all_paths = []
             bar2 = st.progress(0)
@@ -354,11 +335,11 @@ def main():
 
             paths_full = np.vstack(all_paths)  # shape (n_paths, total_days)
 
-            # Now slice to user horizon
+            # Slice according to selected horizon
             forecast_days = forecast_years * 252
             paths = paths_full[:, :forecast_days]
 
-            # (Optionally) apply pseudo rebalancing snap‑back — but here it's a no-op
+            # (Optionally) apply pseudo rebalancing snapback
             paths = apply_rebalance_snapback(paths, rebalance_freq, weights)
 
             final = compute_medoid_path(paths)
@@ -371,17 +352,25 @@ def main():
                 "Max Drawdown": max_drawdown_from_rets(port_rets),
             }
 
-            st.subheader("Results")
-            c1, c2 = st.columns(2)
-            for (col, data, label) in [(c1, back, "Backtest"), (c2, stats, "Forecast")]:
-                with col:
-                    st.markdown(f"**{label}**")
-                    for k, v in data.items():
-                        st.metric(k, f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
+            # Compute forecast total return and ending value
+            forecast_ending = final[-1] * start_cap
+            forecast_total_return = forecast_ending / start_cap - 1.0
 
-            st.metric(
-                "Forecasted Portfolio Value", f"${final[-1] * start_cap:,.2f}"
-            )
+            # Display results
+            st.subheader("Performance Summary")
+            cols = st.columns(len(back))
+            # Headers
+            for i, k in enumerate(back.keys()):
+                cols[i].markdown(f"**{k}**")
+            # Backtest / Forecast values
+            for i, (k, v) in enumerate(back.items()):
+                cols[i].write(f"Backtest: {v:.2%}" if k != "Sharpe" else f"Backtest: {v:.2f}")
+            for i, (k, v) in enumerate(stats.items()):
+                cols[i].write(f"Forecast: {v:.2%}" if k != "Sharpe" else f"Forecast: {v:.2f}")
+
+            st.write(f"**Forecast Ending Value:** ${forecast_ending:,.2f}")
+            st.write(f"**Forecast Total Return:** {forecast_total_return:.2%}")
+
             plot_forecasts(port_rets, start_cap, final, paths)
 
         except Exception as e:
