@@ -221,11 +221,11 @@ def plot_forecasts(port_rets, start_cap, central):
 # Streamlit App
 # ==========================================================
 def main():
-    st.title("Monte Carlo Forecast (Optuna-Tuned Block Length + Monthly Directional Accuracy)")
+    st.title("Portfolio Forecasting Tool")
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1_000_000.0, 10_000.0, 1000.0)
-    run_oos = st.selectbox("Run OOS + Optuna tuning?", ["Yes", "No"])
+    run_oos = st.selectbox("Out-Of-Sample Testing", ["Yes", "No"])
 
     if st.button("Run Forecast"):
         try:
