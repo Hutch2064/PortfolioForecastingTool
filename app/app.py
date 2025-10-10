@@ -284,7 +284,7 @@ def main():
                 best_block = study.best_params["block_length"]
                 best_mean_acc, df_acc = evaluate_block_length(port_rets, best_block)
                 st.success(
-                    f"✅ Best block length: {best_block} days | "
+                    f"Best block length: {best_block} days | "
                     f"Mean OOS Monthly Directional Accuracy = {best_mean_acc:.4f}"
                 )
                 st.dataframe(df_acc.set_index("Year").style.format("{:.4f}"))
