@@ -260,10 +260,10 @@ def main():
             port_rets = portfolio_log_returns_daily(prices, weights)
 
             if run_oos == "Yes":
-                st.write("Running Optuna tuning for block length (5–63 days)...")
+                st.write("Tuning...")
                 bar = st.progress(0)
                 txt = st.empty()
-                total_trials = 10
+                total_trials = 100
 
                 def objective(trial):
                     block_length = trial.suggest_int("block_length", 5, 63)
