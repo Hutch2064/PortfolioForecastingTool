@@ -221,7 +221,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     ax.plot(port_cum.index, port_cum.values, color="black", lw=2, label="Portfolio Backtest")
 
     # gray fan lines (5–95 percentile paths)
-    for sim in filtered_paths[:200]:
+    for sim in filtered_paths[:100]:
         ax.plot(dates, port_cum.iloc[-1] * sim / sim[0], color="gray", alpha=0.05)
 
     # red medoid line
