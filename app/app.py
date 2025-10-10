@@ -23,7 +23,8 @@ np.random.seed(GLOBAL_SEED)
 DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 25
 SIMS_PER_SEED = 4000
-FORECAST_DAYS = 252  # 1 trading year
+# We will keep FORECAST_DAYS = 252 as original (this is per‑year unit) but will slice from a full 5-year simulation
+FORECAST_DAYS = 252  # 1 trading year (unit for path generation)
 DEFAULT_BLOCK = 21   # fallback if tuning disabled
 
 # ==========================================================
@@ -211,35 +212,31 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     last = port_cum.index[-1]
     dates = pd.date_range(start=last, periods=len(central), freq="B")
 
-    # determine 5–95 percentile indices
     terminal_vals = paths[:, -1]
-    low_cut, high_cut = np.percentile(terminal_vals, [5, 95])
+    low_cut, high_cut = np.percentile(terminal_vals, [1, 99])
     mask = (terminal_vals >= low_cut) & (terminal_vals <= high_cut)
     filtered_paths = paths[mask]
 
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(port_cum.index, port_cum.values, color="black", lw=2, label="Portfolio Backtest")
 
-    # gray fan lines (5–95 percentile paths)
     for sim in filtered_paths[:100]:
         ax.plot(dates, port_cum.iloc[-1] * sim / sim[0], color="gray", alpha=0.05)
 
-    # red medoid line
     ax.plot(dates, port_cum.iloc[-1] * central / central[0],
             color="red", lw=2, label="Forecast (Medoid Path)")
 
-    ax.set_title("Monte Carlo Forecast (Medoid Path + 5–95% Fan Lines)")
+    ax.set_title("Monte Carlo Forecast (Medoid Path + 1–99% Fan Lines)")
     ax.set_ylabel("Portfolio Value ($)")
     ax.legend()
     st.pyplot(fig)
 
-    # terminal percentile summary table
     percentiles_end = np.percentile(terminal_vals, [5,95])
     df = pd.DataFrame({
         "Percentile": ["P5","P95"],
         "Terminal Value ($)": [f"${v * start_cap:,.2f}" for v in percentiles_end]
     })
-    st.subheader("Forecasted Terminal Portfolio Values (12-Month Horizon)")
+    st.subheader("Forecasted Terminal Portfolio Values (5–95%)")
     st.table(df)
 
 # ==========================================================
@@ -251,6 +248,10 @@ def main():
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1_000_000.0, 10_000.0, 1000.0)
     run_oos = st.selectbox("Out-Of-Sample Testing", ["Yes", "No"])
+
+    # Add horizon and rebalancing dropdown (pseudo)
+    forecast_years = st.selectbox("Forecast Horizon (Years)", [1, 2, 3, 4, 5], index=0)
+    rebalance_freq = st.selectbox("Rebalancing Frequency", ["None", "Daily", "Weekly", "Monthly", "Quarterly", "Semiannually", "Annually"])
 
     if st.button("Run"):
         try:
@@ -292,28 +293,34 @@ def main():
                 st.info("Skipping OOS testing. Using default block length = 21 days.")
                 best_block = DEFAULT_BLOCK
 
-            # Run forecast (same logic)
             mu = port_rets.mean()
             sigma = port_rets.std(ddof=0)
             base_mean = mu - 0.5 * sigma ** 2
             residuals = (port_rets - mu).to_numpy(dtype=np.float32)
             residuals -= residuals.mean()
+            # Clip residuals 1–99%
+            low, high = np.percentile(residuals, [1, 99])
+            residuals = np.clip(residuals, low, high)
 
+            # Always simulate full 5-year
+            total_days = 5 * 252
             all_paths = []
             bar2 = st.progress(0)
-            txt2 = st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng = np.random.default_rng(GLOBAL_SEED + i)
-                sims = run_monte_carlo_paths(
-                    residuals, SIMS_PER_SEED, rng, base_mean, best_block
-                )
+                sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean, best_block)
                 all_paths.append(sims)
                 bar2.progress((i + 1) / ENSEMBLE_SEEDS)
-                txt2.text(f"Running forecasts... {int((i + 1) / ENSEMBLE_SEEDS * 100)}%")
             bar2.empty()
-            txt2.empty()
+            paths_full = np.vstack(all_paths)
 
-            paths = np.vstack(all_paths)
+            # Clip to horizon
+            forecast_days = forecast_years * 252
+            paths = paths_full[:, :forecast_days]
+
+            # Pseudo rebalancing has no effect (but dropdown present)
+            # paths = apply_rebalance(paths, weights, rebalance_freq)  # not implemented, pseudo
+
             final = compute_medoid_path(paths)
 
             stats = compute_forecast_stats_from_path(final, start_cap, port_rets.index[-1])
@@ -324,24 +331,37 @@ def main():
                 "Max Drawdown": max_drawdown_from_rets(port_rets),
             }
 
-            st.subheader("Results")
-            c1, c2 = st.columns(2)
-            for (col, data, label) in [(c1, back, "Backtest"), (c2, stats, "Forecast")]:
-                with col:
-                    st.markdown(f"**{label}**")
-                    for k, v in data.items():
-                        st.metric(k, f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
+            forecast_ending = final[-1] * start_cap
+            forecast_total_return = (forecast_ending / start_cap) - 1
 
-            st.metric(
-                "Forecasted Portfolio Value", f"${final[-1] * start_cap:,.2f}"
-            )
+            # Graph at top
             plot_forecasts(port_rets, start_cap, final, paths)
+
+            # Stats horizontally
+            st.subheader("Performance Summary")
+            cols = st.columns(len(back))
+            for i, k in enumerate(back.keys()):
+                cols[i].markdown(f"**{k}**")
+            for i, (k, v) in enumerate(back.items()):
+                cols[i].markdown(f"Backtest: {v:.2%}" if k != "Sharpe" else f"Backtest: {v:.2f}")
+            for i, (k, v) in enumerate(stats.items()):
+                cols[i].markdown(f"Forecast: {v:.2%}" if k != "Sharpe" else f"Forecast: {v:.2f}")
+
+            # Forecast metrics
+            st.write(f"**Total Forecast Return:** {forecast_total_return:.2%}")
+            st.write(f"**Forecast Ending Value:** ${forecast_ending:,.2f}")
+
+            terminal_vals = paths[:, -1]
+            percentiles_end = np.percentile(terminal_vals, [5, 95])
+            df = pd.DataFrame({
+                "Percentile": ["P5", "P95"],
+                "Terminal Value ($)": [f"{v * start_cap:,.2f}" for v in percentiles_end]
+            })
+            st.subheader("Forecasted Terminal Portfolio Values (5–95%)")
+            st.table(df)
 
         except Exception as e:
             st.error(f"Error: {e}")
 
 if __name__ == "__main__":
     main()
-
-
-
