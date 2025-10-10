@@ -252,7 +252,7 @@ def main():
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1_000_000.0, 10_000.0, 1000.0)
     run_oos = st.selectbox("Out-Of-Sample Testing", ["Yes", "No"])
 
-    if st.button("Run Forecast"):
+    if st.button("Run"):
         try:
             weights = to_weights([float(x) for x in weights_str.split(",")])
             tickers = [t.strip() for t in tickers.split(",") if t.strip()]
