@@ -236,7 +236,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     # terminal percentile summary table
     percentiles_end = np.percentile(terminal_vals, [5, 10, 25, 50, 75, 90, 95])
     df = pd.DataFrame({
-        "Percentile": ["P5", "P10", "P25", "P50", "P75", "P90", "P95"],
+        "Percentile": ["P5","P95"],
         "Terminal Value ($)": [f"${v * start_cap:,.2f}" for v in percentiles_end]
     })
     st.subheader("Forecasted Terminal Portfolio Values (12-Month Horizon)")
