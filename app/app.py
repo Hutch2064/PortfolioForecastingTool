@@ -100,6 +100,19 @@ def portfolio_log_returns_daily(prices, weights):
     return port_rets.astype(np.float32)
 
 # ==========================================================
+# Kernel Bootstrap (New)
+# ==========================================================
+def kernel_bootstrap_residuals(residuals: np.ndarray, h: float, size: int, sims: int, rng=None):
+    if rng is None:
+        rng = np.random.default_rng()
+    T = len(residuals)
+    scaled_idx = np.linspace(0, 1, T)
+    weights = np.exp(-((scaled_idx - 1.0) ** 2) / (2 * h ** 2))
+    weights /= weights.sum()
+    sampled_idx = rng.choice(T, size=(sims, size), replace=True, p=weights)
+    return residuals[sampled_idx]
+
+# ==========================================================
 # Stationary Bootstrap (Vectorized)
 # ==========================================================
 def stationary_bootstrap_residuals(residuals, size, sims, block_length, rng=None):
@@ -119,11 +132,14 @@ def stationary_bootstrap_residuals(residuals, size, sims, block_length, rng=None
     return residuals[idx]
 
 # ==========================================================
-# Monte Carlo Simulation (on portfolio-level returns)
+# Monte Carlo Simulation (Portfolio Returns)
 # ==========================================================
-def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, block_length, total_days):
-    """Run simulation for total_days (e.g. 5 years). Returns shape (sims, total_days)."""
-    eps = stationary_bootstrap_residuals(residuals, total_days, sims_per_seed, block_length, rng=rng)
+def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, block_length, total_days, kernel_bandwidth=None):
+    """Run simulation for total_days (e.g. 5 years)."""
+    if kernel_bandwidth is not None:
+        eps = kernel_bootstrap_residuals(residuals, kernel_bandwidth, total_days, sims_per_seed, rng=rng)
+    else:
+        eps = stationary_bootstrap_residuals(residuals, total_days, sims_per_seed, block_length, rng=rng)
     log_paths = np.cumsum(base_mean + eps, axis=1, dtype=np.float32)
     return np.exp(log_paths - log_paths[:, [0]])
 
@@ -143,54 +159,47 @@ def compute_medoid_path(paths):
 
 # ==========================================================
 # OOS Evaluation (Directional Accuracy)
-# (unchanged)
 # ==========================================================
-def evaluate_block_length(port_rets, block_length):
+def evaluate_block_length(port_rets, block_length, kernel_bandwidth=None):
     years = port_rets.index.year.unique()
     if len(years) < 12:
         return -999, pd.DataFrame()
-
     results = []
     for i in range(10, len(years) - 1):
         train = port_rets[port_rets.index.year <= years[i - 1]]
         test = port_rets[port_rets.index.year == years[i]]
-
         mu = train.mean()
         sigma = train.std(ddof=0)
         base_mean = mu - 0.5 * sigma ** 2
         residuals = (train - mu).to_numpy(dtype=np.float32)
         residuals -= residuals.mean()
-
         all_paths = []
         for s in range(ENSEMBLE_SEEDS):
             rng = np.random.default_rng(GLOBAL_SEED + s)
             sims = run_monte_carlo_paths(
-                residuals, SIMS_PER_SEED, rng, base_mean, block_length, size := FORECAST_DAYS  # uses default days
+                residuals, SIMS_PER_SEED, rng, base_mean,
+                block_length, FORECAST_DAYS, kernel_bandwidth
             )
             all_paths.append(sims)
         paths = np.vstack(all_paths)
         medoid = compute_medoid_path(paths)
-
         steps = min(len(test), FORECAST_DAYS)
         forecast_series = pd.Series(medoid[:steps], index=test.index[:steps])
         forecast_rets = np.log(forecast_series / forecast_series.shift(1)).dropna()
         actual_rets = test.iloc[:len(forecast_rets)]
-
         f_month = forecast_rets.resample("M").sum()
         a_month = actual_rets.resample("M").sum()
-
         min_len = min(len(f_month), len(a_month))
         f_month = f_month.iloc[:min_len]
         a_month = a_month.iloc[:min_len]
         acc = np.mean(np.sign(f_month) == np.sign(a_month))
         results.append((years[i], acc))
-
     df = pd.DataFrame(results, columns=["Year", "Directional_Accuracy"])
     mean_acc = df["Directional_Accuracy"].mean(skipna=True)
     return mean_acc, df
 
 # ==========================================================
-# Stats + Plot
+# Stats + Plot (unchanged)
 # ==========================================================
 def compute_forecast_stats_from_path(path, start_cap, last_date):
     norm = path / path[0]
@@ -238,22 +247,11 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     st.table(df)
 
 # ==========================================================
-# Rebalancing (Portfolio-level “snap back to weights”) Logic
+# Rebalancing (unchanged)
 # ==========================================================
 def apply_rebalance_snapback(port_paths, rebalance_freq, weights):
-    """
-    port_paths: np.ndarray shape (n_sims, total_days)
-      Each path is relative wealth, starting at 1.
-    rebalance_freq: string among ["Daily","Weekly","Monthly","Quarterly","Semiannually","Annually"]
-    weights: target weights (not used in this pseudo approach, but included for extension)
-    Returns: adjusted paths with “rebalance snapback” effect
-    """
     n_sims, total_days = port_paths.shape
-    # create a daily time index
     dates = pd.date_range(start=0, periods=total_days, freq="B")
-    df_dummy = pd.Series(0, index=dates)  # dummy for resampling
-
-    # mapping freq to pandas offset for resample (we only need indices)
     freq_map = {
         "Daily": "B",
         "Weekly": "W-FRI",
@@ -263,23 +261,11 @@ def apply_rebalance_snapback(port_paths, rebalance_freq, weights):
         "Annually": "A"
     }
     rb = freq_map.get(rebalance_freq, "M")
-    # compute rebalance dates (the first trading day of each period)
     rebalance_dates = pd.Series(1, index=dates).resample(rb).first().dropna().index
-
-    # Create a mask array: for each day, whether rebalance occurs
-    rebalance_mask = np.isin(dates, rebalance_dates).astype(int)
-
-    # For each simulation path, apply snap‑back:
-    # At each rebalance date, adjust value such that drift from weights is reset
-    # Here, since we have only portfolio-level paths, we approximate that the rebalancing
-    # is neutral (does nothing) — so this is a no-op unless you wish to scale paths.
-    # For now: **no change** — you might choose to dampen drift over the interval.
-    # So we return paths unchanged.
     return port_paths
 
-
 # ==========================================================
-# Streamlit App
+# Streamlit App (with Two-Stage Tuning)
 # ==========================================================
 def main():
     st.title("Portfolio Forecasting Tool")
@@ -287,10 +273,8 @@ def main():
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1_000_000.0, 10_000.0, 1000.0)
     run_oos = st.selectbox("Out-Of-Sample Testing", ["Yes", "No"])
-
-    # New dropdowns
-    forecast_years = st.selectbox("Forecast Horizon (Years)", [1, 2, 3, 4, 5], index=0)
-    rebalance_freq = st.selectbox("Rebalancing Frequency", ["Daily", "Weekly", "Monthly", "Quarterly", "Semiannually", "Annually"])
+    forecast_years = st.selectbox("Forecast Horizon (Years)", [1,2,3,4,5], index=0)
+    rebalance_freq = st.selectbox("Rebalancing Frequency", ["Daily","Weekly","Monthly","Quarterly","Semiannually","Annually"])
 
     if st.button("Run"):
         try:
@@ -305,65 +289,74 @@ def main():
                 txt = st.empty()
                 total_trials = 25
 
-                def objective(trial):
-                    block_length = trial.suggest_int("block_length", 5, 63)
-                    mean_acc, _ = evaluate_block_length(port_rets, block_length)
+                # --- Stage 1: Tune Kernel Bandwidth ---
+                def tune_kernel(trial):
+                    h = trial.suggest_float("kernel_bandwidth", 0.05, 0.3, log=True)
+                    mean_acc, _ = evaluate_block_length(port_rets, DEFAULT_BLOCK, kernel_bandwidth=h)
                     progress = (trial.number + 1) / total_trials
                     bar.progress(progress)
-                    txt.text(f"Tuning... {int(progress * 100)}% / 100%")
+                    txt.text(f"Tuning (Kernel Bandwidth)... {int(progress * 100)}% / 100%")
                     return -mean_acc
 
-                study = optuna.create_study(
-                    direction="minimize",
-                    sampler=optuna.samplers.TPESampler(seed=GLOBAL_SEED)
-                )
-                study.optimize(objective, n_trials=total_trials, show_progress_bar=False)
-                bar.empty()
-                txt.empty()
+                study_h = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=GLOBAL_SEED))
+                study_h.optimize(tune_kernel, n_trials=total_trials, show_progress_bar=False)
+                best_h = study_h.best_params["kernel_bandwidth"]
+                st.success(f"Best kernel bandwidth (h): {best_h:.4f}")
+                bar.empty(); txt.empty()
+
+                # --- Stage 2: Tune Block Length Using Best h ---
+                bar = st.progress(0)
+                txt = st.empty()
+
+                def tune_block(trial):
+                    block_length = trial.suggest_int("block_length", 5, 63)
+                    mean_acc, _ = evaluate_block_length(port_rets, block_length, kernel_bandwidth=best_h)
+                    progress = (trial.number + 1) / total_trials
+                    bar.progress(progress)
+                    txt.text(f"Tuning (Block Length)... {int(progress * 100)}% / 100%")
+                    return -mean_acc
+
+                study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=GLOBAL_SEED))
+                study.optimize(tune_block, n_trials=total_trials, show_progress_bar=False)
+                bar.empty(); txt.empty()
 
                 best_block = study.best_params["block_length"]
-                best_mean_acc, df_acc = evaluate_block_length(port_rets, best_block)
+                best_mean_acc, df_acc = evaluate_block_length(port_rets, best_block, kernel_bandwidth=best_h)
                 st.success(
-                    f"Best block length: {best_block} days | "
+                    f"Best block length: {best_block} days | h={best_h:.4f} | "
                     f"Mean OOS Monthly Directional Accuracy = {best_mean_acc:.4f}"
                 )
                 st.dataframe(df_acc.set_index("Year").style.format("{:.4f}"))
+
             else:
                 st.info("Skipping OOS testing. Using default block length = 21 days.")
                 best_block = DEFAULT_BLOCK
+                best_h = None
 
-            # Forecast section
             mu = port_rets.mean()
             sigma = port_rets.std(ddof=0)
             base_mean = mu - 0.5 * sigma ** 2
             residuals = (port_rets - mu).to_numpy(dtype=np.float32)
             residuals -= residuals.mean()
 
-            # We generate fully for 5 years (max), then slice down
             total_days = 5 * 252
             all_paths = []
             bar2 = st.progress(0)
             txt2 = st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng = np.random.default_rng(GLOBAL_SEED + i)
-                sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean, best_block, total_days)
+                sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean, best_block, total_days, kernel_bandwidth=best_h)
                 all_paths.append(sims)
                 bar2.progress((i + 1) / ENSEMBLE_SEEDS)
                 txt2.text(f"Running forecasts... {int((i + 1) / ENSEMBLE_SEEDS * 100)}%")
             bar2.empty()
             txt2.empty()
 
-            paths_full = np.vstack(all_paths)  # shape (n_paths, total_days)
-
-            # Now slice to user horizon
+            paths_full = np.vstack(all_paths)
             forecast_days = forecast_years * 252
             paths = paths_full[:, :forecast_days]
-
-            # (Optionally) apply pseudo rebalancing snap‑back — but here it's a no-op
             paths = apply_rebalance_snapback(paths, rebalance_freq, weights)
-
             final = compute_medoid_path(paths)
-
             stats = compute_forecast_stats_from_path(final, start_cap, port_rets.index[-1])
             back = {
                 "CAGR": annualized_return_daily(port_rets),
@@ -380,9 +373,7 @@ def main():
                     for k, v in data.items():
                         st.metric(k, f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
 
-            st.metric(
-                "Forecasted Portfolio Value", f"${final[-1] * start_cap:,.2f}"
-            )
+            st.metric("Forecasted Portfolio Value", f"${final[-1] * start_cap:,.2f}")
             plot_forecasts(port_rets, start_cap, final, paths)
 
         except Exception as e:
