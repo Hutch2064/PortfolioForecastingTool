@@ -21,8 +21,8 @@ random.seed(GLOBAL_SEED)
 np.random.seed(GLOBAL_SEED)
 
 DEFAULT_START = "2000-01-01"
-ENSEMBLE_SEEDS = 10
-SIMS_PER_SEED = 5000
+ENSEMBLE_SEEDS = 25
+SIMS_PER_SEED = 4000
 FORECAST_DAYS = 252  # 1 trading year
 DEFAULT_BLOCK = 21   # fallback if tuning disabled
 
@@ -263,7 +263,7 @@ def main():
                 st.write("Tuning...")
                 bar = st.progress(0)
                 txt = st.empty()
-                total_trials = 100
+                total_trials = 25
 
                 def objective(trial):
                     block_length = trial.suggest_int("block_length", 5, 63)
