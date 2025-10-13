@@ -226,11 +226,14 @@ def main():
             txt2.empty()
 
             paths_full = np.vstack(all_paths)
+            # Compute medoid path ONCE using the full 5-year horizon
+            medoid_full = compute_medoid_path(paths_full)
+
+            # Slice forecast horizon without recomputing medoid
             forecast_days = forecast_years * 252
             paths = paths_full[:, :forecast_days]
             paths = apply_rebalance_snapback(paths, rebalance_freq, weights)
-
-            final = compute_medoid_path(paths)
+            final = medoid_full[:forecast_days]
 
             stats = compute_forecast_stats_from_path(final, start_cap, port_rets.index[-1])
             back = {
