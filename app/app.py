@@ -112,11 +112,12 @@ class DiffusionResidualGenerator:
     def __init__(self, residuals, seq_len=252*5, device="cpu"):
         self.device = device
         self.raw_residuals = torch.tensor(residuals, dtype=torch.float32).to(device)
-        # (1) normalize residuals (data-driven, not arbitrary)
+        # ensure sequence length is not longer than data
+        self.seq_len = min(seq_len, len(self.raw_residuals) - 1)
+        # (1) normalize residuals (data-driven)
         self.mean = self.raw_residuals.mean()
         self.std = self.raw_residuals.std()
         self.residuals = (self.raw_residuals - self.mean) / (self.std + 1e-8)
-        self.seq_len = seq_len
         torch.manual_seed(GLOBAL_SEED)
         self.model = self._build_model().to(device)
 
@@ -128,14 +129,17 @@ class DiffusionResidualGenerator:
         )
 
     def _sample_batch(self, batch_size):
-        idx = torch.randint(0, len(self.residuals) - self.seq_len, (batch_size,))
+        max_start = len(self.residuals) - self.seq_len
+        if max_start <= 0:
+            # fallback: use full sequence
+            return self.residuals.unsqueeze(0).repeat(batch_size, 1)
+        idx = torch.randint(0, max_start, (batch_size,))
         return torch.stack([self.residuals[i:i+self.seq_len] for i in idx])
 
     def train(self, epochs=500, lr=1e-3, batch_size=64):
         opt = torch.optim.Adam(self.model.parameters(), lr=lr)
         for _ in range(epochs):
             batch = self._sample_batch(batch_size)
-            # (2) controlled Gaussian perturbation (standard diffusion noise)
             noise = torch.randn_like(batch)
             noisy = batch + 0.1 * noise
             recon = self.model(noisy)
@@ -148,7 +152,6 @@ class DiffusionResidualGenerator:
         with torch.no_grad():
             noise = torch.randn((n_samples, self.seq_len)).to(self.device)
             out = self.model(noise)
-            # (3) re-scale to original empirical mean/variance (data-defined)
             out = out * (self.std + 1e-8) + self.mean
             out = out.cpu().numpy()
         return out
