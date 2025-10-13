@@ -107,6 +107,7 @@ try:
 except ImportError:
     raise ImportError("PyTorch must be installed to use diffusion residuals.")
 
+
 class DiffusionResidualGenerator:
     """Statistically normalized diffusion model for residuals."""
     def __init__(self, residuals, seq_len=252*5, device="cpu"):
@@ -137,29 +138,32 @@ class DiffusionResidualGenerator:
         return torch.stack([self.residuals[i:i+self.seq_len] for i in idx])
 
     def train(self, epochs=500, lr=1e-3, batch_size=64):
-    opt = torch.optim.Adam(self.model.parameters(), lr=lr)
-    for _ in range(epochs):
-        batch = self._sample_batch(batch_size)
-        # randomly select noise level
-        t = torch.rand(batch_size, 1, device=self.device)
-        noise = torch.randn_like(batch)
-        # diffuse with variable noise intensity
-        noisy = (1 - t) * batch + t * noise
-        recon = self.model(noisy)
-        # loss encourages the model to recover batch from noised versions
-        loss = F.mse_loss(recon, batch)
-        opt.zero_grad(); loss.backward(); opt.step()
+        """Train the diffusion model using stochastic denoising."""
+        opt = torch.optim.Adam(self.model.parameters(), lr=lr)
+        for _ in range(epochs):
+            batch = self._sample_batch(batch_size)
+            # randomly select noise level
+            t = torch.rand(batch_size, 1, device=self.device)
+            noise = torch.randn_like(batch)
+            # diffuse with variable noise intensity
+            noisy = (1 - t) * batch + t * noise
+            recon = self.model(noisy)
+            # loss encourages the model to recover batch from noised versions
+            loss = F.mse_loss(recon, batch)
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
 
-def sample(self, n_samples=1, n_steps=100):
-    """Variance-preserving stochastic denoising sampler."""
-    self.model.eval()
-    with torch.no_grad():
-        x = torch.randn((n_samples, self.seq_len), device=self.device)
-        for _ in range(n_steps):
-            noise = torch.randn_like(x)
-            x = self.model(x) + 0.05 * noise  # adds mild diffusion noise
-        out = x * (self.std + 1e-8) + self.mean
-        return out.cpu().numpy()
+    def sample(self, n_samples=1, n_steps=100):
+        """Variance-preserving stochastic denoising sampler."""
+        self.model.eval()
+        with torch.no_grad():
+            x = torch.randn((n_samples, self.seq_len), device=self.device)
+            for _ in range(n_steps):
+                noise = torch.randn_like(x)
+                x = self.model(x) + 0.05 * noise  # adds mild diffusion noise
+            out = x * (self.std + 1e-8) + self.mean
+            return out.cpu().numpy()
 
 # ==========================================================
 # Monte Carlo Simulation using Diffusion Residuals
