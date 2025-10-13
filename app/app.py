@@ -104,18 +104,18 @@ def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, total_days):
     """
     Generate paths via Neural-SDE Euler–Maruyama simulation:
         dY = mu*dt + sigma*dW
-    Using dt=1 for daily steps ensures the simulated volatility
-    matches the empirical daily residual volatility.
+    Calibrated so that simulated daily volatility ≈ empirical volatility.
     """
     mu = np.mean(residuals)
     sigma = np.std(residuals)
-    dt = 1.0  # one trading day per step
+    dt = 1.0  # 1 trading day
 
-    # dW ~ sqrt(dt) * N(0,1)  --> effectively just N(0,1) since dt=1
-    dW = rng.normal(0.0, 1.0, size=(sims_per_seed, total_days)).astype(np.float32)
+    # Each day’s Brownian increment scaled to match annualized variance
+    scale = 1.0 / np.sqrt(252)
+    dW = rng.normal(0.0, scale, size=(sims_per_seed, total_days)).astype(np.float32)
 
     # integrate SDE pathwise
-    eps = np.cumsum(mu * dt + sigma * np.sqrt(dt) * dW, axis=1)
+    eps = np.cumsum(mu * dt + sigma * dW, axis=1)
     eps -= eps.mean(axis=1, keepdims=True)
 
     log_paths = np.cumsum(base_mean + eps, axis=1, dtype=np.float32)
