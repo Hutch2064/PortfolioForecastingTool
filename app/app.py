@@ -98,7 +98,7 @@ def portfolio_log_returns_daily(prices, weights):
     return port_rets.astype(np.float32)
 
 # ==========================================================
-# Neural SDE Residual Generator (Quick Fit)
+# Neural SDE Residual Generator (Quick Fit, fixed noise_type)
 # ==========================================================
 try:
     import torch
@@ -106,7 +106,11 @@ try:
 except ImportError:
     raise ImportError("Please install torch and torchsde to use Neural SDE residuals.")
 
+
 class QuickResidualSDE(torch.nn.Module):
+    noise_type = "diagonal"   # Required by torchsde
+    sde_type = "ito"          # Ito SDE (standard form)
+
     def __init__(self, drift_mu, drift_std):
         super().__init__()
         self.mu = torch.tensor(drift_mu, dtype=torch.float32)
@@ -114,11 +118,12 @@ class QuickResidualSDE(torch.nn.Module):
 
     # Drift term f(y,t)
     def f(self, t, y):
-        return self.mu.repeat(y.shape)
+        return self.mu.expand_as(y)
 
     # Diffusion term g(y,t)
     def g(self, t, y):
-        return self.sigma.repeat(y.shape)
+        return self.sigma.expand_as(y)
+
 
 def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, total_days):
     """Generate paths using Neural SDE-based residual process."""
@@ -134,7 +139,7 @@ def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, total_days):
     eps_paths = []
     for _ in range(sims_per_seed):
         bm = torchsde.BrownianInterval(t0=0.0, t1=1.0, size=y0.shape, device=device)
-        out = torchsde.sdeint(sde, y0, ts, bm, method="euler")
+        out = torchsde.sdeint(sde, y0, ts, bm=bm, method="euler")
         eps_paths.append(out.squeeze().cpu().numpy())
     eps = np.vstack(eps_paths)
     eps -= eps.mean(axis=1, keepdims=True)
