@@ -98,84 +98,47 @@ def portfolio_log_returns_daily(prices, weights):
     return port_rets.astype(np.float32)
 
 # ==========================================================
-# Diffusion Residual Generator (Normalized & Recalibrated)
+# Neural SDE Residual Generator (Quick Fit)
 # ==========================================================
 try:
     import torch
-    import torch.nn as nn
-    import torch.nn.functional as F
+    import torchsde
 except ImportError:
-    raise ImportError("PyTorch must be installed to use diffusion residuals.")
+    raise ImportError("Please install torch and torchsde to use Neural SDE residuals.")
 
+class QuickResidualSDE(torch.nn.Module):
+    def __init__(self, drift_mu, drift_std):
+        super().__init__()
+        self.mu = torch.tensor(drift_mu, dtype=torch.float32)
+        self.sigma = torch.tensor(drift_std, dtype=torch.float32)
 
-class DiffusionResidualGenerator:
-    """Statistically normalized diffusion model for residuals."""
-    def __init__(self, residuals, seq_len=252*5, device="cpu"):
-        self.device = device
-        self.raw_residuals = torch.tensor(residuals, dtype=torch.float32).to(device)
-        # ensure sequence length is not longer than data
-        self.seq_len = min(seq_len, len(self.raw_residuals) - 1)
-        # (1) normalize residuals (data-driven)
-        self.mean = self.raw_residuals.mean()
-        self.std = self.raw_residuals.std()
-        self.residuals = (self.raw_residuals - self.mean) / (self.std + 1e-8)
-        torch.manual_seed(GLOBAL_SEED)
-        self.model = self._build_model().to(device)
+    # Drift term f(y,t)
+    def f(self, t, y):
+        return self.mu.repeat(y.shape)
 
-    def _build_model(self):
-        return nn.Sequential(
-            nn.Linear(self.seq_len, 512),
-            nn.ReLU(),
-            nn.Linear(512, self.seq_len)
-        )
+    # Diffusion term g(y,t)
+    def g(self, t, y):
+        return self.sigma.repeat(y.shape)
 
-    def _sample_batch(self, batch_size):
-        max_start = len(self.residuals) - self.seq_len
-        if max_start <= 0:
-            # fallback: use full sequence
-            return self.residuals.unsqueeze(0).repeat(batch_size, 1)
-        idx = torch.randint(0, max_start, (batch_size,))
-        return torch.stack([self.residuals[i:i+self.seq_len] for i in idx])
-
-    def train(self, epochs=500, lr=1e-3, batch_size=64):
-        """Train the diffusion model using stochastic denoising."""
-        opt = torch.optim.Adam(self.model.parameters(), lr=lr)
-        for _ in range(epochs):
-            batch = self._sample_batch(batch_size)
-            # randomly select noise level
-            t = torch.rand(batch_size, 1, device=self.device)
-            noise = torch.randn_like(batch)
-            # diffuse with variable noise intensity
-            noisy = (1 - t) * batch + t * noise
-            recon = self.model(noisy)
-            # loss encourages the model to recover batch from noised versions
-            loss = F.mse_loss(recon, batch)
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-
-    def sample(self, n_samples=1, n_steps=100):
-        """Variance-preserving stochastic denoising sampler."""
-        self.model.eval()
-        with torch.no_grad():
-            x = torch.randn((n_samples, self.seq_len), device=self.device)
-            for _ in range(n_steps):
-                noise = torch.randn_like(x)
-                x = self.model(x) + 0.05 * noise  # adds mild diffusion noise
-            out = x * (self.std + 1e-8) + self.mean
-            return out.cpu().numpy()
-
-# ==========================================================
-# Monte Carlo Simulation using Diffusion Residuals
-# ==========================================================
 def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, total_days):
-    """Generate paths using diffusion-based synthetic residuals."""
+    """Generate paths using Neural SDE-based residual process."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    diffusion_gen = DiffusionResidualGenerator(residuals, seq_len=total_days, device=device)
-    diffusion_gen.train(epochs=300)
-    eps = diffusion_gen.sample(n_samples=sims_per_seed)
-    # mean-center residuals for unbiased accumulation
-    eps = eps - eps.mean(axis=1, keepdims=True)
+    res = torch.tensor(residuals, dtype=torch.float32, device=device)
+    drift_mu = res.mean().item()
+    drift_std = res.std().item()
+
+    sde = QuickResidualSDE(drift_mu, drift_std).to(device)
+    y0 = torch.tensor([[0.0]], device=device)
+    ts = torch.linspace(0, 1, total_days, device=device)
+
+    eps_paths = []
+    for _ in range(sims_per_seed):
+        bm = torchsde.BrownianInterval(t0=0.0, t1=1.0, size=y0.shape, device=device)
+        out = torchsde.sdeint(sde, y0, ts, bm, method="euler")
+        eps_paths.append(out.squeeze().cpu().numpy())
+    eps = np.vstack(eps_paths)
+    eps -= eps.mean(axis=1, keepdims=True)
+
     log_paths = np.cumsum(base_mean + eps, axis=1, dtype=np.float32)
     return np.exp(log_paths - log_paths[:, [0]])
 
@@ -208,7 +171,6 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
         "Max Drawdown": max_drawdown_from_rets(rets),
     }
 
-
 def plot_forecasts(port_rets, start_cap, central, paths):
     port_cum = np.exp(port_rets.cumsum()) * start_cap
     last = port_cum.index[-1]
@@ -228,7 +190,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     ax.plot(dates, port_cum.iloc[-1] * central / central[0],
             color="red", lw=2, label="Forecast (Medoid Path)")
 
-    ax.set_title("Monte Carlo Forecast (Diffusion Residuals, Medoid Path + 5–95% Fan Lines)")
+    ax.set_title("Monte Carlo Forecast (Neural SDE Residuals, Medoid Path + 5–95% Fan Lines)")
     ax.set_ylabel("Portfolio Value ($)")
     ax.legend()
     st.pyplot(fig)
@@ -247,6 +209,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
 def apply_rebalance_snapback(port_paths, rebalance_freq, weights):
     n_sims, total_days = port_paths.shape
     dates = pd.date_range(start=0, periods=total_days, freq="B")
+    df_dummy = pd.Series(0, index=dates)
     freq_map = {
         "Daily": "B",
         "Weekly": "W-FRI",
@@ -264,7 +227,7 @@ def apply_rebalance_snapback(port_paths, rebalance_freq, weights):
 # Streamlit App
 # ==========================================================
 def main():
-    st.title("Portfolio Forecasting Tool (Diffusion-Based Residuals)")
+    st.title("Portfolio Forecasting Tool (Neural SDE Residuals)")
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1_000_000.0, 10_000.0, 1000.0)
