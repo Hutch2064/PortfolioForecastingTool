@@ -98,26 +98,11 @@ def portfolio_log_returns_daily(prices, weights):
     return port_rets.astype(np.float32)
 
 # ==========================================================
-# Neural-SDE Residual Generator (Vectorized Euler–Maruyama)
+# Monte Carlo Simulation (Uniform Sampling of Residuals)
 # ==========================================================
 def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, total_days):
-    """
-    Generate paths via Neural-SDE Euler–Maruyama simulation:
-        dY = mu*dt + sigma*dW
-    Calibrated so that simulated daily volatility ≈ empirical volatility.
-    """
-    mu = np.mean(residuals)
-    sigma = np.std(residuals)
-    dt = 1.0  # 1 trading day
-
-    # Each day’s Brownian increment scaled to match annualized variance
-    scale = 1.0 / np.sqrt(252)
-    dW = rng.normal(0.0, scale, size=(sims_per_seed, total_days)).astype(np.float32)
-
-    # integrate SDE pathwise
-    eps = np.cumsum(mu * dt + sigma * dW, axis=1)
-    eps -= eps.mean(axis=1, keepdims=True)
-
+    """Random draw of residuals (uniform) for each step independently."""
+    eps = rng.choice(residuals, size=(sims_per_seed, total_days), replace=True)
     log_paths = np.cumsum(base_mean + eps, axis=1, dtype=np.float32)
     return np.exp(log_paths - log_paths[:, [0]])
 
@@ -170,14 +155,14 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     ax.plot(dates, port_cum.iloc[-1] * central / central[0],
             color="red", lw=2, label="Forecast (Medoid Path)")
 
-    ax.set_title("Monte Carlo Forecast (Neural-SDE Residuals, Medoid Path + 5–95% Fan Lines)")
+    ax.set_title("Monte Carlo Forecast (Medoid Path + 5–95% Fan Lines)")
     ax.set_ylabel("Portfolio Value ($)")
     ax.legend()
     st.pyplot(fig)
 
-    percentiles_end = np.percentile(terminal_vals, [5, 95])
+    percentiles_end = np.percentile(terminal_vals, [5,95])
     df = pd.DataFrame({
-        "Percentile": ["P5", "P95"],
+        "Percentile": ["P5","P95"],
         "Terminal Value ($)": [f"${v * start_cap:,.2f}" for v in percentiles_end]
     })
     st.subheader("Forecasted Terminal Portfolio Values")
@@ -207,7 +192,7 @@ def apply_rebalance_snapback(port_paths, rebalance_freq, weights):
 # Streamlit App
 # ==========================================================
 def main():
-    st.title("Portfolio Forecasting Tool (Neural-SDE Residuals)")
+    st.title("Portfolio Forecasting Tool")
     tickers = st.text_input("Tickers", "VTI,AGG")
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1_000_000.0, 10_000.0, 1000.0)
@@ -241,8 +226,10 @@ def main():
             txt2.empty()
 
             paths_full = np.vstack(all_paths)
+            # Compute medoid path ONCE using the full 5-year horizon
             medoid_full = compute_medoid_path(paths_full)
 
+            # Slice forecast horizon without recomputing medoid
             forecast_days = forecast_years * 252
             paths = paths_full[:, :forecast_days]
             paths = apply_rebalance_snapback(paths, rebalance_freq, weights)
@@ -270,5 +257,5 @@ def main():
         except Exception as e:
             st.error(f"Error: {e}")
 
-if __name__ == "__main__":
+if _a_name__ == "__main__":
     main()
