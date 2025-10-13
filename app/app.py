@@ -175,10 +175,10 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     ax.legend()
     st.pyplot(fig)
 
-    percentiles_end = np.percentile(terminal_vals, [5,95])
+    percentiles_end = np.percentile(terminal_vals, [5, 95])
     df = pd.DataFrame({
-        "Percentile": ["P5","P95"],
-        "Terminal Value ($)": [f\"${v * start_cap:,.2f}\" for v in percentiles_end]
+        "Percentile": ["P5", "P95"],
+        "Terminal Value ($)": [f"${v * start_cap:,.2f}" for v in percentiles_end]
     })
     st.subheader("Forecasted Terminal Portfolio Values")
     st.table(df)
