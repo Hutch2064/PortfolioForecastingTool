@@ -98,7 +98,7 @@ def portfolio_log_returns_daily(prices, weights):
     return port_rets.astype(np.float32)
 
 # ==========================================================
-# Diffusion Residual Generator
+# Diffusion Residual Generator (Normalized & Recalibrated)
 # ==========================================================
 try:
     import torch
@@ -108,10 +108,14 @@ except ImportError:
     raise ImportError("PyTorch must be installed to use diffusion residuals.")
 
 class DiffusionResidualGenerator:
-    """Lightweight 1D diffusion model trained on historical residuals."""
+    """Statistically normalized diffusion model for residuals."""
     def __init__(self, residuals, seq_len=252*5, device="cpu"):
         self.device = device
-        self.residuals = torch.tensor(residuals, dtype=torch.float32).to(device)
+        self.raw_residuals = torch.tensor(residuals, dtype=torch.float32).to(device)
+        # (1) normalize residuals (data-driven, not arbitrary)
+        self.mean = self.raw_residuals.mean()
+        self.std = self.raw_residuals.std()
+        self.residuals = (self.raw_residuals - self.mean) / (self.std + 1e-8)
         self.seq_len = seq_len
         torch.manual_seed(GLOBAL_SEED)
         self.model = self._build_model().to(device)
@@ -131,6 +135,7 @@ class DiffusionResidualGenerator:
         opt = torch.optim.Adam(self.model.parameters(), lr=lr)
         for _ in range(epochs):
             batch = self._sample_batch(batch_size)
+            # (2) controlled Gaussian perturbation (standard diffusion noise)
             noise = torch.randn_like(batch)
             noisy = batch + 0.1 * noise
             recon = self.model(noisy)
@@ -138,12 +143,15 @@ class DiffusionResidualGenerator:
             opt.zero_grad(); loss.backward(); opt.step()
 
     def sample(self, n_samples=1):
-        """Generate new residual sequences using denoising process."""
+        """Generate new residual sequences, re-scaled to empirical σ."""
         self.model.eval()
         with torch.no_grad():
             noise = torch.randn((n_samples, self.seq_len)).to(self.device)
             out = self.model(noise)
-            return out.cpu().numpy()
+            # (3) re-scale to original empirical mean/variance (data-defined)
+            out = out * (self.std + 1e-8) + self.mean
+            out = out.cpu().numpy()
+        return out
 
 # ==========================================================
 # Monte Carlo Simulation using Diffusion Residuals
@@ -154,7 +162,8 @@ def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, total_days):
     diffusion_gen = DiffusionResidualGenerator(residuals, seq_len=total_days, device=device)
     diffusion_gen.train(epochs=300)
     eps = diffusion_gen.sample(n_samples=sims_per_seed)
-
+    # mean-center residuals for unbiased accumulation
+    eps = eps - eps.mean(axis=1, keepdims=True)
     log_paths = np.cumsum(base_mean + eps, axis=1, dtype=np.float32)
     return np.exp(log_paths - log_paths[:, [0]])
 
