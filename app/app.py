@@ -21,7 +21,7 @@ np.random.seed(GLOBAL_SEED)
 
 DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 10
-SIMS_PER_SEED = 10000
+SIMS_PER_SEED = 5000
 FORECAST_DAYS = 252
 
 # ==========================================================
@@ -206,26 +206,6 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     st.pyplot(fig2)
 
 # ==========================================================
-# Rebalancing Logic (no-op, unchanged)
-# ==========================================================
-def apply_rebalance_snapback(port_paths, rebalance_freq, weights):
-    n_sims, total_days = port_paths.shape
-    dates = pd.date_range(start=0, periods=total_days, freq="B")
-    df_dummy = pd.Series(0, index=dates)
-    freq_map = {
-        "Daily": "B",
-        "Weekly": "W-FRI",
-        "Monthly": "M",
-        "Quarterly": "Q",
-        "Semiannually": "2Q",
-        "Annually": "A"
-    }
-    rb = freq_map.get(rebalance_freq, "M")
-    rebalance_dates = pd.Series(1, index=dates).resample(rb).first().dropna().index
-    rebalance_mask = np.isin(dates, rebalance_dates).astype(int)
-    return port_paths
-
-# ==========================================================
 # Streamlit App
 # ==========================================================
 def main():
@@ -234,13 +214,13 @@ def main():
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1_000_000.0, 10_000.0, 1000.0)
     forecast_years = st.selectbox("Forecast Horizon (Years)", [1, 2, 3, 4, 5], index=0)
-    rebalance_freq = st.selectbox("Rebalancing Frequency", ["Daily", "Weekly", "Monthly", "Quarterly", "Semiannually", "Annually"])
+    backtest_start = st.selectbox("Backtest Start Date", ["2000-01-01", "2005-01-01", "2010-01-01", "2015-01-01", "2020-01-01"], index=0)
 
     if st.button("Run"):
         try:
             weights = to_weights([float(x) for x in weights_str.split(",")])
             tickers = [t.strip() for t in tickers.split(",") if t.strip()]
-            prices = fetch_prices_daily(tickers, DEFAULT_START)
+            prices = fetch_prices_daily(tickers, backtest_start)
             port_rets = portfolio_log_returns_daily(prices, weights)
 
             mu = port_rets.mean()
@@ -249,9 +229,7 @@ def main():
             residuals = (port_rets - mu).to_numpy(dtype=np.float32)
             residuals -= residuals.mean()
 
-            # Estimate optimal block length based on volatility clustering
             b_opt = estimate_optimal_block_length(residuals)
-            st.write(f"Optimal block length (days): {b_opt}")
 
             total_days = 5 * 252
             all_paths = []
@@ -267,13 +245,10 @@ def main():
             txt2.empty()
 
             paths_full = np.vstack(all_paths)
-            # Compute mean-like path ONCE using the full 5-year horizon
             medoid_full = compute_medoid_path(paths_full)
 
-            # Slice forecast horizon without recomputing medoid
             forecast_days = forecast_years * 252
             paths = paths_full[:, :forecast_days]
-            paths = apply_rebalance_snapback(paths, rebalance_freq, weights)
             final = medoid_full[:forecast_days]
 
             stats = compute_forecast_stats_from_path(final, start_cap, port_rets.index[-1])
