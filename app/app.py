@@ -165,6 +165,16 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     filtered_paths = paths[mask]
 
     # ----------------------------
+    # Percentile Metrics (moved above)
+    # ----------------------------
+    percentiles_end = np.percentile(terminal_vals, [5, 95])
+    p5_val, p95_val = percentiles_end * start_cap
+
+    c1, c2 = st.columns(2)
+    c1.metric("P5 (5th Percentile)", f"${p5_val:,.2f}")
+    c2.metric("P95 (95th Percentile)", f"${p95_val:,.2f}")
+
+    # ----------------------------
     # Full Historical + Forecast Plot
     # ----------------------------
     fig, ax = plt.subplots(figsize=(12, 6))
@@ -174,7 +184,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
         ax.plot(dates, port_cum.iloc[-1] * sim / sim[0], color="gray", alpha=0.05)
 
     ax.plot(dates, port_cum.iloc[-1] * central / central[0],
-            color="red", lw=2, label="Forecast (Mean-Like Path)")
+            color="red", lw=2, label="Forecast")
 
     ax.set_title("Forecast")
     ax.set_ylabel("Portfolio Value ($)")
@@ -188,23 +198,12 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     for sim in filtered_paths[:100]:
         ax2.plot(dates, port_cum.iloc[-1] * sim / sim[0], color="gray", alpha=0.05)
     ax2.plot(dates, port_cum.iloc[-1] * central / central[0],
-             color="red", lw=2, label="Forecast (Mean-Like Path Only)")
+             color="red", lw=2, label="Forecast")
 
-    ax2.set_title("Forecast (Zoomed to Selected Horizon)")
+    ax2.set_title("Forecast (Horizon View)")
     ax2.set_ylabel("Portfolio Value ($)")
     ax2.legend()
     st.pyplot(fig2)
-
-    # ----------------------------
-    # Percentile Metrics
-    # ----------------------------
-    percentiles_end = np.percentile(terminal_vals, [5, 95])
-    p5_val, p95_val = percentiles_end * start_cap
-
-    st.subheader("Forecasted Terminal Portfolio Values")
-    c1, c2 = st.columns(2)
-    c1.metric("P5 (5th Percentile)", f"${p5_val:,.2f}")
-    c2.metric("P95 (95th Percentile)", f"${p95_val:,.2f}")
 
 # ==========================================================
 # Rebalancing Logic (no-op, unchanged)
