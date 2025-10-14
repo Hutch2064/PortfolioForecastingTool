@@ -107,18 +107,15 @@ def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, total_days):
     return np.exp(log_paths - log_paths[:, [0]])
 
 # ==========================================================
-# Medoid Path
+# Mean-Like Path (Closest to Ensemble Mean in Log Space)
 # ==========================================================
 def compute_medoid_path(paths):
+    """Select the simulated path closest to the ensemble mean trajectory (vectorized)."""
     log_paths = np.log(paths)
-    diffs = np.diff(log_paths, axis=1)
-    normed = diffs - diffs.mean(axis=1, keepdims=True)
-    mean_traj = normed.mean(axis=0)
-    dots = np.sum(normed * mean_traj, axis=1)
-    norms = np.linalg.norm(normed, axis=1) * np.linalg.norm(mean_traj)
-    sims = dots / (norms + 1e-9)
-    medoid_idx = np.argmax(sims)
-    return paths[medoid_idx]
+    mean_path = np.mean(log_paths, axis=0, dtype=np.float32)
+    distances = np.linalg.norm(log_paths - mean_path, axis=1)
+    idx = np.argmin(distances)
+    return paths[idx]
 
 # ==========================================================
 # Stats + Plot
@@ -153,9 +150,9 @@ def plot_forecasts(port_rets, start_cap, central, paths):
         ax.plot(dates, port_cum.iloc[-1] * sim / sim[0], color="gray", alpha=0.05)
 
     ax.plot(dates, port_cum.iloc[-1] * central / central[0],
-            color="red", lw=2, label="Forecast (Medoid Path)")
+            color="red", lw=2, label="Forecast (Mean-Like Path)")
 
-    ax.set_title("Monte Carlo Forecast (Medoid Path + 5–95% Fan Lines)")
+    ax.set_title("Monte Carlo Forecast (Mean-Like Path + 5–95% Fan Lines)")
     ax.set_ylabel("Portfolio Value ($)")
     ax.legend()
     st.pyplot(fig)
@@ -226,7 +223,7 @@ def main():
             txt2.empty()
 
             paths_full = np.vstack(all_paths)
-            # Compute medoid path ONCE using the full 5-year horizon
+            # Compute mean-like path ONCE using the full 5-year horizon
             medoid_full = compute_medoid_path(paths_full)
 
             # Slice forecast horizon without recomputing medoid
