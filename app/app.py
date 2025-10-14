@@ -218,7 +218,7 @@ def main():
     
     # Free-form backtest start date (user can pick any date)
     backtest_start = st.date_input(
-        "Backtest Start Date",
+        "Start Date",
         value=datetime.date(2000, 1, 1),
         min_value=datetime.date(1980, 1, 1),
         max_value=datetime.date.today()
