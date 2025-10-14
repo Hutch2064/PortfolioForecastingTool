@@ -152,7 +152,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     ax.plot(dates, port_cum.iloc[-1] * central / central[0],
             color="red", lw=2, label="Forecast (Mean-Like Path)")
 
-    ax.set_title("Monte Carlo Forecast (Mean-Like Path + 5–95% Fan Lines)")
+    ax.set_title("Forecast")
     ax.set_ylabel("Portfolio Value ($)")
     ax.legend()
     st.pyplot(fig)
