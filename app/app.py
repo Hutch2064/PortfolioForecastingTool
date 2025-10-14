@@ -164,6 +164,9 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     mask = (terminal_vals >= low_cut) & (terminal_vals <= high_cut)
     filtered_paths = paths[mask]
 
+    # ----------------------------
+    # Full Historical + Forecast Plot
+    # ----------------------------
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(port_cum.index, port_cum.values, color="black", lw=2, label="Portfolio Backtest")
 
@@ -178,6 +181,23 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     ax.legend()
     st.pyplot(fig)
 
+    # ----------------------------
+    # Forecast-Only (Zoomed) Plot
+    # ----------------------------
+    fig2, ax2 = plt.subplots(figsize=(12, 6))
+    for sim in filtered_paths[:100]:
+        ax2.plot(dates, port_cum.iloc[-1] * sim / sim[0], color="gray", alpha=0.05)
+    ax2.plot(dates, port_cum.iloc[-1] * central / central[0],
+             color="red", lw=2, label="Forecast (Mean-Like Path Only)")
+
+    ax2.set_title("Forecast (Zoomed to Selected Horizon)")
+    ax2.set_ylabel("Portfolio Value ($)")
+    ax2.legend()
+    st.pyplot(fig2)
+
+    # ----------------------------
+    # Percentile Metrics
+    # ----------------------------
     percentiles_end = np.percentile(terminal_vals, [5, 95])
     p5_val, p95_val = percentiles_end * start_cap
 
