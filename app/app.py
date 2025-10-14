@@ -98,11 +98,32 @@ def portfolio_log_returns_daily(prices, weights):
     return port_rets.astype(np.float32)
 
 # ==========================================================
-# Monte Carlo Simulation (Uniform Sampling of Residuals)
+# Optimal Block Length Estimation (Volatility Clustering)
 # ==========================================================
-def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, total_days):
-    """Random draw of residuals (uniform) for each step independently."""
-    eps = rng.choice(residuals, size=(sims_per_seed, total_days), replace=True)
+def estimate_optimal_block_length(residuals):
+    """Estimate optimal block length from volatility autocorrelation."""
+    res2 = residuals ** 2
+    if len(res2) < 2:
+        return 5
+    rho1 = np.corrcoef(res2[:-1], res2[1:])[0, 1]
+    T = len(res2)
+    b_opt = 1.5 * ((T / (1 - rho1**2 + 1e-9)) ** (1/3))
+    return int(np.clip(b_opt, 5, 100))
+
+# ==========================================================
+# Monte Carlo Simulation (Block Bootstrap Sampling)
+# ==========================================================
+def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, total_days, block_length):
+    """Fixed-length block bootstrap preserving volatility clustering (vectorized)."""
+    n_res = len(residuals)
+    n_blocks = int(np.ceil(total_days / block_length))
+
+    starts = rng.integers(0, n_res - block_length, size=(sims_per_seed, n_blocks))
+    offsets = np.arange(block_length)
+    idx = (starts[..., None] + offsets).reshape(sims_per_seed, -1)
+    idx = np.mod(idx, n_res)[:, :total_days]
+
+    eps = residuals[idx]
     log_paths = np.cumsum(base_mean + eps, axis=1, dtype=np.float32)
     return np.exp(log_paths - log_paths[:, [0]])
 
@@ -209,13 +230,17 @@ def main():
             residuals = (port_rets - mu).to_numpy(dtype=np.float32)
             residuals -= residuals.mean()
 
+            # Estimate optimal block length based on volatility clustering
+            b_opt = estimate_optimal_block_length(residuals)
+            st.write(f"Optimal block length (days): {b_opt}")
+
             total_days = 5 * 252
             all_paths = []
             bar2 = st.progress(0)
             txt2 = st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng = np.random.default_rng(GLOBAL_SEED + i)
-                sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean, total_days)
+                sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean, total_days, block_length=b_opt)
                 all_paths.append(sims)
                 bar2.progress((i + 1) / ENSEMBLE_SEEDS)
                 txt2.text(f"Running forecasts... {int((i + 1) / ENSEMBLE_SEEDS * 100)}%")
