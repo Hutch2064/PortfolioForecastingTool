@@ -157,13 +157,13 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     ax.legend()
     st.pyplot(fig)
 
-    percentiles_end = np.percentile(terminal_vals, [5,95])
-    df = pd.DataFrame({
-        "Percentile": ["P5","P95"],
-        "Terminal Value ($)": [f"${v * start_cap:,.2f}" for v in percentiles_end]
-    })
+    percentiles_end = np.percentile(terminal_vals, [5, 95])
+    p5_val, p95_val = percentiles_end * start_cap
+
     st.subheader("Forecasted Terminal Portfolio Values")
-    st.table(df)
+    c1, c2 = st.columns(2)
+    c1.metric("P5 (5th Percentile)", f"${p5_val:,.2f}")
+    c2.metric("P95 (95th Percentile)", f"${p95_val:,.2f}")
 
 # ==========================================================
 # Rebalancing Logic (no-op, unchanged)
