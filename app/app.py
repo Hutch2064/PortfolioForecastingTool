@@ -8,6 +8,7 @@ import yfinance as yf
 import matplotlib.pyplot as plt
 import streamlit as st
 from typing import List
+import datetime
 
 warnings.filterwarnings("ignore")
 
@@ -21,7 +22,7 @@ np.random.seed(GLOBAL_SEED)
 
 DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 10
-SIMS_PER_SEED = 5000
+SIMS_PER_SEED = 10000
 FORECAST_DAYS = 252
 
 # ==========================================================
@@ -165,7 +166,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     filtered_paths = paths[mask]
 
     # ----------------------------
-    # Percentile Metrics (moved above)
+    # Percentile Metrics
     # ----------------------------
     percentiles_end = np.percentile(terminal_vals, [5, 95])
     p5_val, p95_val = percentiles_end * start_cap
@@ -214,13 +215,20 @@ def main():
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1_000_000.0, 10_000.0, 1000.0)
     forecast_years = st.selectbox("Forecast Horizon (Years)", [1, 2, 3, 4, 5], index=0)
-    backtest_start = st.selectbox("Backtest Start Date", ["2000-01-01", "2005-01-01", "2010-01-01", "2015-01-01", "2020-01-01"], index=0)
+    
+    # Free-form backtest start date (user can pick any date)
+    backtest_start = st.date_input(
+        "Backtest Start Date",
+        value=datetime.date(2000, 1, 1),
+        min_value=datetime.date(1980, 1, 1),
+        max_value=datetime.date.today()
+    )
 
     if st.button("Run"):
         try:
             weights = to_weights([float(x) for x in weights_str.split(",")])
             tickers = [t.strip() for t in tickers.split(",") if t.strip()]
-            prices = fetch_prices_daily(tickers, backtest_start)
+            prices = fetch_prices_daily(tickers, backtest_start.strftime("%Y-%m-%d"))
             port_rets = portfolio_log_returns_daily(prices, weights)
 
             mu = port_rets.mean()
