@@ -139,7 +139,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     dates = pd.date_range(start=last, periods=len(central), freq="B")
 
     terminal_vals = paths[:, -1]
-    low_cut, high_cut = np.percentile(terminal_vals, [40, 60])
+    low_cut, high_cut = np.percentile(terminal_vals, [16, 84])
     mask = (terminal_vals >= low_cut) & (terminal_vals <= high_cut)
     filtered_paths = paths[mask]
 
