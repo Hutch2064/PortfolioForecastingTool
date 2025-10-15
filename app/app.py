@@ -251,13 +251,10 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     # Compute skewness and kurtosis
     mean_val = np.mean(terminal_vals)
     std_val = np.std(terminal_vals)
-    skew = np.mean(((terminal_vals - mean_val) / (std_val + 1e-12)) ** 3)
-    kurt = np.mean(((terminal_vals - mean_val) / (std_val + 1e-12)) ** 4) - 3
 
     # Display results
     st.subheader("Forecast Distribution Summary (Percentiles)")
     st.markdown(table_md, unsafe_allow_html=True)
-    st.markdown(f"**Skewness:** {skew:.2f}  **Kurtosis:** {kurt:.2f}")
 
 # ==========================================================
 # Streamlit App
