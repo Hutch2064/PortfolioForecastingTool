@@ -242,13 +242,33 @@ def main():
         max_value=datetime.date.today()
     )
 
-    col_run, col_val = st.columns([3, 1])
+    # ========================
+    # Run button + inline forecast display
+    # ========================
+    col_run, col_val = st.columns([1, 3])
     with col_run:
         run_pressed = st.button("Run")
-    with col_val:
-        forecast_val = st.session_state.get("forecast_val", None)
-        if forecast_val:
-            st.metric("Forecasted Portfolio Value", f"${forecast_val:,.2f}")
+
+    # Clear forecast when user starts typing new tickers or weights
+    if st.session_state.get("last_tickers") != st.session_state.get("curr_tickers", ""):
+        st.session_state.pop("forecast_val", None)
+    if st.session_state.get("last_weights") != st.session_state.get("curr_weights", ""):
+        st.session_state.pop("forecast_val", None)
+
+    # Track current ticker and weights input
+    st.session_state["curr_tickers"] = tickers
+    st.session_state["curr_weights"] = weights_str
+    st.session_state["last_tickers"] = tickers
+    st.session_state["last_weights"] = weights_str
+
+    # Inline forecast display (only after run)
+    if "forecast_val" in st.session_state and not run_pressed:
+        with col_val:
+            st.markdown(
+                f"<span style='font-size:16px; color:#FFD700; font-weight:600;'>"
+                f"Forecasted Portfolio Value ${st.session_state['forecast_val']:,.2f}</span>",
+                unsafe_allow_html=True
+            )
 
     if run_pressed:
         try:
