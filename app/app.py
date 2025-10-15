@@ -233,20 +233,6 @@ def plot_forecasts(port_rets, start_cap, central, paths):
         line-height: 1.05 !important;
         text-align: left !important;
     }
-    table.custom tr {
-        border: none !important;
-        border-bottom: none !important;
-        box-shadow: none !important;
-        outline: none !important;
-        background: transparent !important;
-    }
-    table.custom thead, table.custom tbody {
-        border: none !important;
-        border-bottom: none !important;
-        box-shadow: none !important;
-        outline: none !important;
-        background: transparent !important;
-    }
     </style>
     <table class="custom">
         <tr><th>Percentile</th><th>Terminal Value ($)</th><th>Return (%)</th></tr>
@@ -254,12 +240,6 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     for row in rows:
         html += f"<tr><td>{row[0]}</td><td>{row[1]}</td><td>{row[2]}</td></tr>"
     html += "</table>"
-
-    # Skewness & Kurtosis
-    mean_val = np.mean(terminal_vals)
-    std_val = np.std(terminal_vals)
-    skew = np.mean(((terminal_vals - mean_val) / (std_val + 1e-12)) ** 3)
-    kurt = np.mean(((terminal_vals - mean_val) / (std_val + 1e-12)) ** 4) - 3
 
     st.subheader("Forecast Distribution Summary (Percentiles)")
     st.markdown(html, unsafe_allow_html=True)
@@ -281,7 +261,14 @@ def main():
         max_value=datetime.date.today()
     )
 
-    if st.button("Run"):
+    col_run, col_val = st.columns([3, 1])
+    with col_run:
+        run_pressed = st.button("Run")
+    with col_val:
+        if 'forecast_val' in st.session_state:
+            st.metric("Forecasted Portfolio Value", f"${st.session_state['forecast_val']:,.2f}")
+
+    if run_pressed:
         try:
             weights = to_weights([float(x) for x in weights_str.split(",")])
             tickers = [t.strip() for t in tickers.split(",") if t.strip()]
@@ -324,15 +311,51 @@ def main():
                 "Max Drawdown": max_drawdown_from_rets(port_rets),
             }
 
-            st.subheader("Results")
-            c1, c2 = st.columns(2)
-            for (col, data, label) in [(c1, back, "Backtest"), (c2, stats, "Forecast")]:
-                with col:
-                    st.markdown(f"**{label}**")
-                    for k, v in data.items():
-                        st.metric(k, f"{v:.2%}" if "Sharpe" not in k else f"{v:.2f}")
+            st.session_state['forecast_val'] = final[-1] * start_cap
 
-            st.metric("Forecasted Portfolio Value", f"${final[-1] * start_cap:,.2f}")
+            # ----------------------------
+            # Results Table (Formatted like Distribution Table)
+            # ----------------------------
+            results_rows = [
+                ("CAGR", f"{back['CAGR']:.2%}", f"{stats['CAGR']:.2%}"),
+                ("Volatility", f"{back['Volatility']:.2%}", f"{stats['Volatility']:.2%}"),
+                ("Sharpe", f"{back['Sharpe']:.2f}", f"{stats['Sharpe']:.2f}"),
+                ("Max Drawdown", f"{back['Max Drawdown']:.2%}", f"{stats['Max Drawdown']:.2%}")
+            ]
+
+            html_results = """
+            <style>
+            table.results {
+                border-collapse: collapse !important;
+                border-spacing: 0 !important;
+                margin-left: 0 !important;
+                margin-right: 0 !important;
+                width: auto !important;
+                border: none !important;
+                background: transparent !important;
+            }
+            table.results th, table.results td {
+                border: none !important;
+                box-shadow: none !important;
+                outline: none !important;
+                background: transparent !important;
+                color: white !important;
+                font-size: 15px !important;
+                padding: 2px 8px !important;
+                text-align: left !important;
+                line-height: 1.05 !important;
+            }
+            </style>
+            <table class="results">
+                <tr><th>Metric</th><th>Backtest</th><th>Forecast</th></tr>
+            """
+            for row in results_rows:
+                html_results += f"<tr><td>{row[0]}</td><td>{row[1]}</td><td>{row[2]}</td></tr>"
+            html_results += "</table>"
+
+            st.subheader("Performance Comparison")
+            st.markdown(html_results, unsafe_allow_html=True)
+
             plot_forecasts(port_rets, start_cap, final, paths)
 
         except Exception as e:
