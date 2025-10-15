@@ -390,7 +390,7 @@ def main():
                 </h3>
                 <table class='results'>
                     <tr><th>OOS Metric</th><th>Value</th></tr>
-                    <tr><td>Directional Accuracy</td><td>{dir_acc:.2%}</td></tr>
+                    <tr><td>Directional Accuracy (Monthly)</td><td>{dir_acc:.2%}</td></tr>
                 </table>
                 """
                 st.markdown(oos_html, unsafe_allow_html=True)
