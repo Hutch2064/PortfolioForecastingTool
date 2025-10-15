@@ -191,7 +191,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     st.pyplot(fig2)
 
     # ----------------------------
-    # Histogram of Terminal Portfolio Values (Clean & Tight Layout)
+    # Histogram of Terminal Portfolio Values (Final — P5 Left, P75 Right)
     # ----------------------------
     fig3, ax3 = plt.subplots(figsize=(10, 5))
     terminal_vals = paths[:, -1] * start_cap
@@ -204,9 +204,9 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     mean_val = np.mean(terminal_vals)
     std_val = np.std(terminal_vals)
     skew = np.mean(((terminal_vals - mean_val) / (std_val + 1e-12)) ** 3)
-    Kurtosis = np.mean(((terminal_vals - mean_val) / (std_val + 1e-12)) ** 4) - 3
+    kurt = np.mean(((terminal_vals - mean_val) / (std_val + 1e-12)) ** 4) - 3
 
-    # Histogram + bin info
+    # Histogram
     counts, bins, patches = ax3.hist(
         terminal_vals, bins=60, color="lightgray", edgecolor="black", alpha=0.6
     )
@@ -214,36 +214,47 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     ax3.set_xlabel("Final Portfolio Value ($)", fontsize=11)
     ax3.set_ylabel("Frequency", fontsize=11)
 
-    # Add some headroom for percentile labels
     max_y = counts.max() if len(counts) else 1.0
     ax3.set_ylim(0, max_y * 1.25)
 
     # Colors
     colors = {5: "red", 25: "orange", 50: "blue", 75: "green", 95: "darkgreen"}
 
-    # Plot ticks and place labels directly outside histogram near each tick
+    # Axis range for spacing
     x_min, x_max = ax3.get_xlim()
     x_range = x_max - x_min
 
     for i, (p, v) in enumerate(zip(percentiles, p_values)):
-        # Find which bin contains v
         bin_idx = np.searchsorted(bins, v) - 1
         bin_idx = np.clip(bin_idx, 0, len(counts) - 1)
         y_val = counts[bin_idx]
 
-        # Draw a small tick on top of the histogram bar
+        # Tick mark
         ax3.plot([v, v], [y_val - 0.02 * max_y, y_val + 0.02 * max_y],
                  color=colors[p], lw=3, solid_capstyle="round")
 
-        # Alternate placement to left/right of tick to prevent overlap
-        side_offset = 0.015 * x_range * (1 if i % 2 == 0 else -1)
-        ha_pos = "left" if i % 2 == 0 else "right"
+        # Default offsets
+        side_offset = 0.02 * x_range
+        y_offset = 0.04 * max_y
+        ha_pos = "left"
 
-        # Label just outside the bar, tight to the tick
-        ax3.text(v + side_offset, y_val + 0.04 * max_y,
+        # Custom placement for P5 and P75
+        if p == 5:
+            side_offset = -0.035 * x_range  # shift left
+            ha_pos = "right"
+        elif p == 75:
+            side_offset = 0.035 * x_range   # shift right
+            ha_pos = "left"
+        elif p in [25, 95]:
+            side_offset *= (1 if i % 2 == 0 else -1)
+            ha_pos = "left" if side_offset > 0 else "right"
+
+        ax3.text(v + side_offset, y_val + y_offset,
                  f"P{p}  ${v:,.0f}",
                  ha=ha_pos, va="bottom",
-                 color=colors[p], fontsize=10, fontweight="bold")
+                 color=colors[p], fontsize=10, fontweight="bold",
+                 bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.9),
+                 clip_on=False)
 
     # Legend (top-right corner)
     handles = [plt.Line2D([0], [0], color=colors[p], lw=3, label=f"P{p}") for p in percentiles]
@@ -251,10 +262,10 @@ def plot_forecasts(port_rets, start_cap, central, paths):
                loc="upper right", bbox_to_anchor=(1.0, 1.0),
                frameon=True, facecolor="white", framealpha=0.9)
 
-    # Skew/Kurt box anchored all the way in bottom-right corner
+    # Skew/Kurt box (fully bottom-right corner)
     ax3.text(
         0.985, 0.02,
-        f"Skew: {skew:.2f}\nKurtosis: {Kurtosis:.2f}",
+        f"Skew: {skew:.2f}\nKurt: {kurt:.2f}",
         transform=ax3.transAxes,
         ha="right", va="bottom",
         fontsize=10,
