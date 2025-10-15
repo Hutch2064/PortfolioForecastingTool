@@ -191,7 +191,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     p_returns = (p_values / start_cap) - 1
 
     rows = [
-        ("CVaR (5%)", f"${cvar:,.0f}", f"{(cvar / start_cap - 1) * 100:.2f}%")
+        ("CVaR", f"${cvar:,.0f}", f"{(cvar / start_cap - 1) * 100:.2f}%")
     ] + [
         (f"P{p}", f"${v:,.0f}", f"{r * 100:.2f}%")
         for p, v, r in zip(percentiles, p_values, p_returns)
