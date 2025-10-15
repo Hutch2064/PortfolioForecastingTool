@@ -191,83 +191,82 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     st.pyplot(fig2)
 
     # ----------------------------
-    # Histogram of Terminal Portfolio Values (Polished Academic Version)
+    # Histogram of Terminal Portfolio Values (Clean, non-overlapping)
     # ----------------------------
     fig3, ax3 = plt.subplots(figsize=(10, 5))
     terminal_vals = paths[:, -1] * start_cap
 
-    # Define key percentiles
+    # Key percentiles
     percentiles = [5, 25, 50, 75, 95]
     p_values = np.percentile(terminal_vals, percentiles)
 
-    # Compute skewness and kurtosis
+    # Skew & kurtosis
     mean_val = np.mean(terminal_vals)
-    skew = (np.mean((terminal_vals - mean_val) ** 3) /
-            np.std(terminal_vals) ** 3)
-    kurt = (np.mean((terminal_vals - mean_val) ** 4) /
-            np.std(terminal_vals) ** 4) - 3
+    std_val = np.std(terminal_vals)
+    skew = np.mean(((terminal_vals - mean_val) / (std_val + 1e-12)) ** 3)
+    kurt = np.mean(((terminal_vals - mean_val) / (std_val + 1e-12)) ** 4) - 3
 
-    # Plot histogram
+    # Histogram + bin info
     counts, bins, patches = ax3.hist(
         terminal_vals, bins=60, color="lightgray", edgecolor="black", alpha=0.6
     )
-
     ax3.set_title("Distribution of Terminal Portfolio Values", fontsize=13)
     ax3.set_xlabel("Final Portfolio Value ($)", fontsize=11)
     ax3.set_ylabel("Frequency", fontsize=11)
 
-    # Define colors for percentiles
+    # Make room above bars for outside labels
+    max_y = counts.max() if len(counts) else 1.0
+    ax3.set_ylim(0, max_y * 1.28)  # extra headroom for labels
+
+    # Colors
     colors = {5: "red", 25: "orange", 50: "blue", 75: "green", 95: "darkgreen"}
 
-    # Add tick marks connected to bar tops and labels outside histogram
-    max_y = max(counts)
+    # Helper: x-range for sensible label offsets
     x_min, x_max = ax3.get_xlim()
-    range_x = x_max - x_min
+    x_rng = x_max - x_min
 
+    # Place ticks at bar tops; labels outside bars with leader lines
     for i, (p, v) in enumerate(zip(percentiles, p_values)):
-        # Find bin for percentile
+        # which bin contains v?
         bin_idx = np.searchsorted(bins, v) - 1
-        if 0 <= bin_idx < len(counts):
-            y_val = counts[bin_idx]
-        else:
-            y_val = 0
+        bin_idx = np.clip(bin_idx, 0, len(counts) - 1)
+        y_top = counts[bin_idx]
 
-        # Draw short tick at top of bar
-        ax3.plot([v, v], [y_val - 0.015 * max_y, y_val + 0.015 * max_y],
+        # short tick at bar top
+        ax3.plot([v, v], [y_top - 0.015 * max_y, y_top + 0.015 * max_y],
                  color=colors[p], lw=3, solid_capstyle="round")
 
-        # Determine side placement (alternate left/right)
-        if i % 2 == 0:
-            x_text = v + 0.015 * range_x
-            ha_text = "left"
-        else:
-            x_text = v - 0.015 * range_x
-            ha_text = "right"
+        # choose side & label target position OUTSIDE the bars
+        side = 1 if i % 2 == 0 else -1  # alternate left/right
+        x_text = v + side * 0.05 * x_rng   # push outside bars
+        # stagger vertically to avoid label-on-label collisions
+        y_text = max_y * (1.12 + 0.05 * (i % 3))
 
-        # Place text slightly above bar height, outside the histogram
-        ax3.text(x_text, y_val + 0.04 * max_y,
-                 f"P{p}  ${v:,.0f}",
-                 ha=ha_text, va="bottom", color=colors[p],
-                 fontsize=10, fontweight="bold")
+        # leader line + label (boxed for readability)
+        ax3.annotate(
+            f"P{p}  ${v:,.0f}",
+            xy=(v, y_top + 0.02 * max_y), xycoords="data",
+            xytext=(x_text, y_text), textcoords="data",
+            ha="center", va="bottom", color=colors[p], fontsize=10, fontweight="bold",
+            arrowprops=dict(arrowstyle='-', lw=1.2, color=colors[p]),
+            bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.9),
+            clip_on=False
+        )
 
-    # Legend: top right, slightly lowered to avoid overlap
-    handles = [
-        plt.Line2D([0], [0], color=colors[p], lw=3, label=f"P{p}")
-        for p in percentiles
-    ]
-    legend = ax3.legend(
+    # Legend (top-right) – percentiles only
+    handles = [plt.Line2D([0], [0], color=colors[p], lw=3, label=f"P{p}") for p in percentiles]
+    ax3.legend(
         handles=handles, title="Percentiles",
-        loc="upper right", bbox_to_anchor=(1.0, 0.98),
+        loc="upper right", bbox_to_anchor=(1.0, 1.0),
         frameon=True, facecolor="white", framealpha=0.9
     )
 
-    # Skewness & kurtosis box under legend (aligned right)
-    textstr = f"Skewness: {skew:.2f}\nKurtosis: {kurt:.2f}"
-    ax3.text(0.975, 0.73, textstr,
-             transform=ax3.transAxes,
-             fontsize=10, verticalalignment="top",
-             horizontalalignment="right",
-             bbox=dict(boxstyle="round", facecolor="white", alpha=0.8))
+    # Skew/Kurt box – bottom-right so it never collides with legend
+    ax3.text(
+        0.98, 0.02, f"Skew: {skew:.2f}\nKurt: {kurt:.2f}",
+        transform=ax3.transAxes, ha="right", va="bottom",
+        fontsize=10, bbox=dict(boxstyle="round", facecolor="white", alpha=0.9)
+    )
 
     plt.tight_layout()
     st.pyplot(fig3)
