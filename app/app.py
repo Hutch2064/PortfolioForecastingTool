@@ -206,6 +206,16 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     ax.legend(); ax.set_title("Forecast"); ax.set_ylabel("Portfolio Value ($)")
     st.pyplot(fig)
 
+    # === Added second graph: Forecast (Horizon View) ===
+    fig2, ax2 = plt.subplots(figsize=(12, 6))
+    for sim in filtered[:100]:
+        ax2.plot(dates, start_cap * sim / sim[0], color="gray", alpha=0.05)
+    ax2.plot(dates, start_cap * central / central[0], color="red", lw=2, label="Forecast")
+    ax2.set_title("Forecast (Horizon View)")
+    ax2.set_ylabel("Portfolio Value ($)")
+    ax2.legend()
+    st.pyplot(fig2)
+
     terminal_vals = paths[:, -1] * start_cap
     percentiles = [5,25,50,75,95]
     p_vals = np.percentile(terminal_vals, percentiles)
