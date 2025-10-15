@@ -234,6 +234,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
             font-size: 15px !important;
             padding: 2px 6px !important;
             line-height: 1.1 !important;
+            letter-spacing: -0.3px !important;  /* <-- optional, pulls columns closer */
         }
         thead, tbody, tr {
             border: none !important;
