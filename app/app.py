@@ -118,12 +118,10 @@ def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, total_days, 
     """Fixed-length block bootstrap preserving volatility clustering (vectorized)."""
     n_res = len(residuals)
     n_blocks = int(np.ceil(total_days / block_length))
-
     starts = rng.integers(0, n_res - block_length, size=(sims_per_seed, n_blocks))
     offsets = np.arange(block_length)
     idx = (starts[..., None] + offsets).reshape(sims_per_seed, -1)
     idx = np.mod(idx, n_res)[:, :total_days]
-
     eps = residuals[idx]
     log_paths = np.cumsum(base_mean + eps, axis=1, dtype=np.float32)
     return np.exp(log_paths - log_paths[:, [0]])
@@ -166,45 +164,59 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     filtered_paths = paths[mask]
 
     # ----------------------------
-    # Percentile Metrics
-    # ----------------------------
-    percentiles_end = np.percentile(terminal_vals, [5, 95])
-    p5_val, p95_val = percentiles_end * start_cap
-
-    c1, c2 = st.columns(2)
-    c1.metric("P5 (5th Percentile)", f"${p5_val:,.2f}")
-    c2.metric("P95 (95th Percentile)", f"${p95_val:,.2f}")
-
-    # ----------------------------
     # Full Historical + Forecast Plot
     # ----------------------------
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(port_cum.index, port_cum.values, color="black", lw=2, label="Portfolio Backtest")
-
     for sim in filtered_paths[:100]:
         ax.plot(dates, port_cum.iloc[-1] * sim / sim[0], color="gray", alpha=0.05)
-
     ax.plot(dates, port_cum.iloc[-1] * central / central[0],
             color="red", lw=2, label="Forecast")
-
     ax.set_title("Forecast")
     ax.set_ylabel("Portfolio Value ($)")
     ax.legend()
     st.pyplot(fig)
 
     # ----------------------------
-    # Forecast-Only (Zoomed) Plot — RESET BASELINE
+    # Forecast-Only (Zoomed, Reset to Starting Capital)
     # ----------------------------
     fig2, ax2 = plt.subplots(figsize=(12, 6))
     for sim in filtered_paths[:100]:
         ax2.plot(dates, start_cap * sim / sim[0], color="gray", alpha=0.05)
     ax2.plot(dates, start_cap * central / central[0],
              color="red", lw=2, label="Forecast")
-
     ax2.set_title("Forecast (Horizon View, Reset to Starting Capital)")
     ax2.set_ylabel("Portfolio Value ($)")
     ax2.legend()
     st.pyplot(fig2)
+
+    # ----------------------------
+    # Histogram of Terminal Portfolio Values
+    # ----------------------------
+    fig3, ax3 = plt.subplots(figsize=(10, 5))
+    terminal_vals = paths[:, -1] * start_cap
+    percentiles = [1, 5, 25, 50, 75, 95, 99]
+    p_values = np.percentile(terminal_vals, percentiles)
+    ax3.hist(terminal_vals, bins=60, color="lightgray", edgecolor="black", alpha=0.8)
+    ax3.set_title("Distribution of Terminal Portfolio Values", fontsize=13)
+    ax3.set_xlabel("Final Portfolio Value ($)", fontsize=11)
+    ax3.set_ylabel("Frequency", fontsize=11)
+
+    colors = {
+        1: "darkred", 5: "red", 25: "orange",
+        50: "blue", 75: "green", 95: "darkgreen", 99: "purple"
+    }
+    for p, v in zip(percentiles, p_values):
+        ax3.axvline(v, color=colors[p], linestyle="--", lw=1.5)
+        ax3.text(v, ax3.get_ylim()[1]*0.9, f"P{p}\n${v:,.0f}",
+                 rotation=90, color=colors[p],
+                 ha="right" if p < 50 else "left", fontsize=9)
+    handles = [
+        plt.Line2D([0], [0], color=colors[p], linestyle="--", lw=1.5, label=f"P{p}")
+        for p in percentiles
+    ]
+    ax3.legend(handles=handles, title="Percentiles", loc="upper right", frameon=True)
+    st.pyplot(fig3)
 
 # ==========================================================
 # Streamlit App
@@ -215,7 +227,7 @@ def main():
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1_000_000.0, 10_000.0, 1000.0)
     forecast_years = st.selectbox("Forecast Horizon (Years)", [1, 2, 3, 4, 5], index=0)
-    
+
     backtest_start = st.date_input(
         "Backtest Start Date",
         value=datetime.date(2000, 1, 1),
@@ -235,7 +247,6 @@ def main():
             base_mean = mu - 0.5 * sigma ** 2
             residuals = (port_rets - mu).to_numpy(dtype=np.float32)
             residuals -= residuals.mean()
-
             b_opt = estimate_optimal_block_length(residuals)
 
             total_days = 5 * 252
@@ -244,7 +255,9 @@ def main():
             txt2 = st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng = np.random.default_rng(GLOBAL_SEED + i)
-                sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean, total_days, block_length=b_opt)
+                sims = run_monte_carlo_paths(
+                    residuals, SIMS_PER_SEED, rng, base_mean, total_days, block_length=b_opt
+                )
                 all_paths.append(sims)
                 bar2.progress((i + 1) / ENSEMBLE_SEEDS)
                 txt2.text(f"Running forecasts... {int((i + 1) / ENSEMBLE_SEEDS * 100)}%")
@@ -253,7 +266,6 @@ def main():
 
             paths_full = np.vstack(all_paths)
             medoid_full = compute_medoid_path(paths_full)
-
             forecast_days = forecast_years * 252
             paths = paths_full[:, :forecast_days]
             final = medoid_full[:forecast_days]
