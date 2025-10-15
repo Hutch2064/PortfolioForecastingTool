@@ -21,8 +21,8 @@ random.seed(GLOBAL_SEED)
 np.random.seed(GLOBAL_SEED)
 
 DEFAULT_START = "2000-01-01"
-ENSEMBLE_SEEDS = 20     # Reduced for runtime efficiency in walk-forward
-SIMS_PER_SEED = 5000
+ENSEMBLE_SEEDS = 10     # Reduced for runtime efficiency in walk-forward
+SIMS_PER_SEED = 2000
 FORECAST_DAYS = 21      # 1 month ahead (approx. 21 trading days)
 
 # ==========================================================
