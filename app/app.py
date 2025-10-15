@@ -141,7 +141,7 @@ def compute_medoid_path(paths):
 def compute_oos_metrics(port_rets):
     """
     Expanding-window OOS test using full forecast methodology (Monte Carlo + medoid).
-    At each month, use all data up to that point to forecast the next month, then compare.
+    Computes directional accuracy and R² on z-scored monthly returns.
     """
     monthly = port_rets.resample("M").sum()
     if len(monthly) < 120:
@@ -174,18 +174,16 @@ def compute_oos_metrics(port_rets):
 
     dir_acc = np.mean(np.sign(preds) == np.sign(actuals))
 
-    # cumulative path-fit R² on z-scored cumulative returns
-    cum_pred = np.cumsum(preds)
-    cum_act = np.cumsum(actuals)
-    if np.std(cum_pred) > 0 and np.std(cum_act) > 0:
-        z_pred = (cum_pred - np.mean(cum_pred)) / np.std(cum_pred)
-        z_act = (cum_act - np.mean(cum_act)) / np.std(cum_act)
-        r2_cum = r2_score(z_act, z_pred)
+    # R² on z-scored monthly returns (pattern correlation)
+    if np.std(preds) > 0 and np.std(actuals) > 0:
+        z_pred = (preds - np.mean(preds)) / np.std(preds)
+        z_act = (actuals - np.mean(actuals)) / np.std(actuals)
+        r2_monthly = r2_score(z_act, z_pred)
     else:
-        r2_cum = np.nan
+        r2_monthly = np.nan
 
     monthly_vol = monthly.std(ddof=0)
-    return dir_acc, monthly_vol, r2_cum
+    return dir_acc, monthly_vol, r2_monthly
 
 # ==========================================================
 # Stats + Plot
@@ -395,7 +393,7 @@ def main():
             plot_forecasts(port_rets, start_cap, final, paths)
 
             if enable_oos == "Yes":
-                dir_acc, monthly_vol, r2_cum = compute_oos_metrics(port_rets)
+                dir_acc, monthly_vol, r2_monthly = compute_oos_metrics(port_rets)
                 oos_html = f"""
                 <h3 style='color:white; font-size:22px; font-weight:700; margin-top:25px;'>
                     Out-Of-Sample Testing Results
@@ -403,7 +401,7 @@ def main():
                 <table class='results'>
                     <tr><th>OOS Metric</th><th>Value</th></tr>
                     <tr><td>Directional Accuracy (Monthly)</td><td>{dir_acc:.2%}</td></tr>
-                    <tr><td>Cumulative R² (Path Fit)</td><td>{r2_cum:.3f}</td></tr>
+                    <tr><td>R² (Z-Scored Monthly Returns)</td><td>{r2_monthly:.3f}</td></tr>
                     <tr><td>Monthly Volatility</td><td>{monthly_vol:.4f}</td></tr>
                 </table>
                 """
