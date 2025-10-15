@@ -315,7 +315,6 @@ def main():
             plot_forecasts(port_rets,start_cap,final,paths)
 
             if enable_oos=="Yes":
-                d_acc,d_n=compute_oos_directional_accuracy_walkforward(prices,weights,"B",1)
                 w_acc,w_n=compute_oos_directional_accuracy_walkforward(prices,weights,"W",5)
                 m_acc,m_n=compute_oos_directional_accuracy_walkforward(prices,weights,"M",21)
                 q_acc,q_n=compute_oos_directional_accuracy_walkforward(prices,weights,"Q",63)
@@ -328,7 +327,6 @@ def main():
                 </h3>
                 <table class='results'>
                     <tr><th>OOS Horizon</th><th>Directional Accuracy</th><th>Sample Size</th></tr>
-                    <tr><td>Daily</td><td>{d_acc:.2%}</td><td>{d_n}</td></tr>
                     <tr><td>Weekly</td><td>{w_acc:.2%}</td><td>{w_n}</td></tr>
                     <tr><td>Monthly</td><td>{m_acc:.2%}</td><td>{m_n}</td></tr>
                     <tr><td>Quarterly</td><td>{q_acc:.2%}</td><td>{q_n}</td></tr>
