@@ -191,7 +191,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     st.pyplot(fig2)
 
     # ----------------------------
-    # Percentile Table (Tight HTML Version)
+    # Percentile Table (Left-Aligned, No Borders)
     # ----------------------------
     terminal_vals = paths[:, -1] * start_cap
     percentiles = [5, 25, 50, 75, 95]
@@ -207,24 +207,24 @@ def plot_forecasts(port_rets, start_cap, central, paths):
         for p, v, r in zip(percentiles, p_values, p_returns)
     ]
 
-    # Build HTML table manually so CSS actually applies
     html = """
     <style>
     table.custom {
         border-collapse: collapse;
         width: auto;
-        margin-left: auto;
-        margin-right: auto;
-        border: none;
+        margin-left: 0 !important;       /* left-align table */
+        margin-right: 0 !important;      /* prevent centering */
+        border: none !important;
     }
     table.custom th, table.custom td {
-        border: none !important;
-        padding: 2px 8px !important;   /* ← this actually changes horizontal spacing */
+        border: none !important;          /* remove all borders */
+        border-bottom: none !important;   /* remove faint horizontal lines */
+        padding: 2px 8px !important;
         line-height: 1.05 !important;
         color: white !important;
         background: transparent !important;
         font-size: 15px !important;
-        text-align: center !important;
+        text-align: left !important;      /* left-align columns */
     }
     table.custom th {
         font-weight: 600 !important;
@@ -243,13 +243,14 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     skew = np.mean(((terminal_vals - mean_val) / (std_val + 1e-12)) ** 3)
     kurt = np.mean(((terminal_vals - mean_val) / (std_val + 1e-12)) ** 4) - 3
 
-    # Display
     st.subheader("Forecast Distribution Summary (Percentiles)")
     st.markdown(html, unsafe_allow_html=True)
-    st.markdown(f"<div style='text-align:right;'>"
-                f"<b>Skewness:</b> {skew:.2f} &nbsp;&nbsp;&nbsp; "
-                f"<b>Kurtosis:</b> {kurt:.2f}</div>",
-                unsafe_allow_html=True)
+    st.markdown(
+        f"<div style='text-align:left; margin-top:6px;'>"
+        f"<b>Skewness:</b> {skew:.2f} &nbsp;&nbsp;&nbsp; "
+        f"<b>Kurtosis:</b> {kurt:.2f}</div>",
+        unsafe_allow_html=True
+    )
 
 # ==========================================================
 # Streamlit App
