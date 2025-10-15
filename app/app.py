@@ -312,6 +312,9 @@ def main():
                 "Max Drawdown": max_drawdown_from_rets(port_rets),
             }
 
+            # Display forecasted portfolio value (classic style above comparison)
+            st.metric("Forecasted Portfolio Value", f"${final[-1] * start_cap:,.2f}")
+
             rows = [
                 ("CAGR", f"{back['CAGR']:.2%}", f"{stats['CAGR']:.2%}"),
                 ("Volatility", f"{back['Volatility']:.2%}", f"{stats['Volatility']:.2%}"),
