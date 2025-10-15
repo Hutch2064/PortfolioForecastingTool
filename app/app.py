@@ -191,20 +191,20 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     st.pyplot(fig2)
 
     # ----------------------------
-    # Percentile Table (No Index + Fixed Return Math)
+    # Percentile Table (Transparent + No Index)
     # ----------------------------
     terminal_vals = paths[:, -1] * start_cap
     percentiles = [5, 25, 50, 75, 95]
     p_values = np.percentile(terminal_vals, percentiles)
 
-    # CVaR (Expected Shortfall beyond 5th percentile)
+    # Compute CVaR (Expected Shortfall beyond 5th percentile)
     cvar_cutoff = np.percentile(terminal_vals, 5)
     cvar = terminal_vals[terminal_vals <= cvar_cutoff].mean()
 
-    # Correct return calculation relative to starting capital
+    # Correct return math (based on actual start_cap)
     p_returns = (p_values / start_cap) - 1
 
-    # Combine into rows (CVaR first)
+    # Build rows (CVaR first)
     rows = [
         ("CVaR (5%)", f"${cvar:,.0f}", f"{(cvar / start_cap - 1) * 100:.2f}%")
     ] + [
@@ -212,22 +212,45 @@ def plot_forecasts(port_rets, start_cap, central, paths):
         for p, v, r in zip(percentiles, p_values, p_returns)
     ]
 
-    # Convert to Markdown table manually (no index, no borders)
+    # Convert to Markdown table
     table_md = "| Percentile | Terminal Value ($) | Return (%) |\n"
     table_md += "|:------------|:------------------:|:-----------:|\n"
     for row in rows:
         table_md += f"| {row[0]} | {row[1]} | {row[2]} |\n"
 
-    # Compute skewness and kurtosis
+    # Hide all borders with CSS
+    st.markdown(
+        """
+        <style>
+        table {
+            border-collapse: collapse;
+            width: 100%;
+        }
+        th, td {
+            border: none !important;
+            background-color: transparent !important;
+            color: white !important;
+            font-size: 15px !important;
+            padding: 4px 12px !important;
+        }
+        thead tr th {
+            border-bottom: 0px solid transparent !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # Compute skew and kurtosis
     mean_val = np.mean(terminal_vals)
     std_val = np.std(terminal_vals)
     skew = np.mean(((terminal_vals - mean_val) / (std_val + 1e-12)) ** 3)
     kurt = np.mean(((terminal_vals - mean_val) / (std_val + 1e-12)) ** 4) - 3
 
-    # Display table and metrics
+    # Display
     st.subheader("Forecast Distribution Summary (Percentiles)")
-    st.markdown(table_md)
-    st.markdown(f"**Skewness:** {skew:.2f} | **Kurtosis:** {kurt:.2f}")
+    st.markdown(table_md, unsafe_allow_html=True)
+    st.markdown(f"**Skewness:** {skew:.2f}  **Kurtosis:** {kurt:.2f}")
 
 # ==========================================================
 # Streamlit App
