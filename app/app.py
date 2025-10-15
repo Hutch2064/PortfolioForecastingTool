@@ -311,7 +311,7 @@ def main():
             }
 
             st.markdown(
-                f"<p style='color:white; font-size:15px; font-weight:bold;'>Forecasted Portfolio Value <span style='font-weight:400;'>${final[-1] * start_cap:,.2f}</span></p>",
+                f"<p style='color:white; font-size:20px; font-weight:bold;'>Forecasted Portfolio Value <span style='font-weight:400;'>${final[-1] * start_cap:,.2f}</span></p>",
                 unsafe_allow_html=True
             )
 
