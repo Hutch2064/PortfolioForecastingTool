@@ -191,20 +191,15 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     st.pyplot(fig2)
 
     # ----------------------------
-    # Percentile Table (Final Clean Version)
+    # Percentile Table (Tight HTML Version)
     # ----------------------------
     terminal_vals = paths[:, -1] * start_cap
     percentiles = [5, 25, 50, 75, 95]
     p_values = np.percentile(terminal_vals, percentiles)
-
-    # Compute CVaR (Expected Shortfall beyond 5th percentile)
     cvar_cutoff = np.percentile(terminal_vals, 5)
     cvar = terminal_vals[terminal_vals <= cvar_cutoff].mean()
-
-    # Correct return math (relative to actual starting capital)
     p_returns = (p_values / start_cap) - 1
 
-    # Build table rows (CVaR first)
     rows = [
         ("CVaR (5%)", f"${cvar:,.0f}", f"{(cvar / start_cap - 1) * 100:.2f}%")
     ] + [
@@ -212,50 +207,49 @@ def plot_forecasts(port_rets, start_cap, central, paths):
         for p, v, r in zip(percentiles, p_values, p_returns)
     ]
 
-    # Build Markdown table
-    table_md = "| Percentile | Terminal Value ($) | Return (%) |\n"
-    table_md += "|:------------|:------------------:|:-----------:|\n"
+    # Build HTML table manually so CSS actually applies
+    html = """
+    <style>
+    table.custom {
+        border-collapse: collapse;
+        width: auto;
+        margin-left: auto;
+        margin-right: auto;
+        border: none;
+    }
+    table.custom th, table.custom td {
+        border: none !important;
+        padding: 2px 8px !important;   /* ← this actually changes horizontal spacing */
+        line-height: 1.05 !important;
+        color: white !important;
+        background: transparent !important;
+        font-size: 15px !important;
+        text-align: center !important;
+    }
+    table.custom th {
+        font-weight: 600 !important;
+    }
+    </style>
+    <table class="custom">
+        <tr><th>Percentile</th><th>Terminal Value ($)</th><th>Return (%)</th></tr>
+    """
     for row in rows:
-        table_md += f"| {row[0]} | {row[1]} | {row[2]} |\n"
+        html += f"<tr><td>{row[0]}</td><td>{row[1]}</td><td>{row[2]}</td></tr>"
+    html += "</table>"
 
-    # Inject CSS to remove all borders + tighten spacing
-    st.markdown(
-        """
-        <style>
-        table {
-            border-collapse: collapse !important;
-            width: 100% !important;
-        }
-        th, td {
-            border: none !important;
-            border-bottom: none !important;
-            background-color: transparent !important;
-            color: white !important;
-            font-size: 15px !important;
-            padding: 1px 4px !important;
-            line-height: 1.1 !important;
-            letter-spacing: -0.3px !important;  /* <-- optional, pulls columns closer */
-        }
-        thead, tbody, tr {
-            border: none !important;
-            border-bottom: none !important;
-            background: transparent !important;
-        }
-        thead tr th {
-            border-bottom: none !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True
-    )
-
-    # Compute skewness and kurtosis
+    # Skewness & Kurtosis
     mean_val = np.mean(terminal_vals)
     std_val = np.std(terminal_vals)
+    skew = np.mean(((terminal_vals - mean_val) / (std_val + 1e-12)) ** 3)
+    kurt = np.mean(((terminal_vals - mean_val) / (std_val + 1e-12)) ** 4) - 3
 
-    # Display results
-    st.subheader("Forecast Distribution")
-    st.markdown(table_md, unsafe_allow_html=True)
+    # Display
+    st.subheader("Forecast Distribution Summary (Percentiles)")
+    st.markdown(html, unsafe_allow_html=True)
+    st.markdown(f"<div style='text-align:right;'>"
+                f"<b>Skewness:</b> {skew:.2f} &nbsp;&nbsp;&nbsp; "
+                f"<b>Kurtosis:</b> {kurt:.2f}</div>",
+                unsafe_allow_html=True)
 
 # ==========================================================
 # Streamlit App
