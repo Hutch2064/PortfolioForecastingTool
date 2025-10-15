@@ -263,12 +263,6 @@ def plot_forecasts(port_rets, start_cap, central, paths):
 
     st.subheader("Forecast Distribution Summary (Percentiles)")
     st.markdown(html, unsafe_allow_html=True)
-    st.markdown(
-        f"<div style='text-align:left; margin-top:6px;'>"
-        f"<b>Skewness:</b> {skew:.2f} &nbsp;&nbsp;&nbsp; "
-        f"<b>Kurtosis:</b> {kurt:.2f}</div>",
-        unsafe_allow_html=True
-    )
 
 # ==========================================================
 # Streamlit App
