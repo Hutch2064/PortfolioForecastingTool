@@ -231,7 +231,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
         html += f"<tr><td>{row[0]}</td><td>{row[1]}</td><td>{row[2]}</td></tr>"
     html += "</table>"
 
-    st.subheader("Forecast Distribution Summary (Percentiles)")
+    st.subheader("Forecast Distribution")
     st.markdown(html, unsafe_allow_html=True)
 
 # ==========================================================
@@ -311,7 +311,7 @@ def main():
             }
 
             st.markdown(
-                f"<p style='color:white; font-size:20px; font-weight:bold;'>Forecasted Portfolio Value <span style='font-weight:400;'>${final[-1] * start_cap:,.2f}</span></p>",
+                f"<p style='color:white; font-size:25px; font-weight:bold;'>Forecasted Portfolio Value <span style='font-weight:400;'>${final[-1] * start_cap:,.2f}</span></p>",
                 unsafe_allow_html=True
             )
 
