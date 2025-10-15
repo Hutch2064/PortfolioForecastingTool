@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import streamlit as st
 from typing import List
 import datetime
-from sklearn.metrics import r2_score
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 warnings.filterwarnings("ignore")
 
@@ -142,18 +142,16 @@ def compute_medoid_path(paths):
 # OOS Testing
 # ==========================================================
 def rolling_oos_test(port_rets):
-    """Compute rolling monthly directional accuracy and quarterly R²."""
+    """Compute rolling monthly directional accuracy, MAE, and RMSE."""
     monthly = port_rets.resample("M").sum()
-    quarterly = port_rets.resample("Q").sum()
     if len(monthly) < 24:
-        return np.nan, np.nan
+        return np.nan, np.nan, np.nan
     preds = monthly.shift(1).dropna()
     actual = monthly.loc[preds.index]
     dir_acc = (np.sign(preds) == np.sign(actual)).mean()
-    q_preds = quarterly.shift(1).dropna()
-    q_actual = quarterly.loc[q_preds.index]
-    r2 = r2_score(q_actual, q_preds)
-    return dir_acc, r2
+    mae = mean_absolute_error(actual, preds)
+    rmse = np.sqrt(mean_squared_error(actual, preds))
+    return dir_acc, mae, rmse
 
 # ==========================================================
 # Stats + Plot
@@ -307,12 +305,13 @@ def main():
             st.markdown(html, unsafe_allow_html=True)
 
             if enable_oos == "Yes":
-                dir_acc, r2 = rolling_oos_test(port_rets)
+                dir_acc, mae, rmse = rolling_oos_test(port_rets)
                 oos_html = f"""
                 <table class='results'>
                     <tr><th>OOS Metric</th><th>Value</th></tr>
                     <tr><td>Directional Accuracy (Monthly)</td><td>{dir_acc:.2%}</td></tr>
-                    <tr><td>R² (Quarterly)</td><td>{r2:.3f}</td></tr>
+                    <tr><td>Mean Absolute Error (MAE)</td><td>{mae:.6f}</td></tr>
+                    <tr><td>Root Mean Squared Error (RMSE)</td><td>{rmse:.6f}</td></tr>
                 </table>
                 """
                 st.markdown(oos_html, unsafe_allow_html=True)
