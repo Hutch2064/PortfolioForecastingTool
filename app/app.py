@@ -139,10 +139,10 @@ def compute_medoid_path(paths):
     return paths[idx]
 
 # ==========================================================
-# OOS Testing
+# OOS Metrics
 # ==========================================================
-def rolling_oos_test(port_rets):
-    """Compute rolling monthly directional accuracy, MAE, and RMSE."""
+def compute_oos_metrics(port_rets):
+    """Compute monthly directional accuracy, MAE, and RMSE."""
     monthly = port_rets.resample("M").sum()
     if len(monthly) < 24:
         return np.nan, np.nan, np.nan
@@ -188,6 +188,61 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     ax.set_ylabel("Portfolio Value ($)")
     ax.legend()
     st.pyplot(fig)
+
+    fig2, ax2 = plt.subplots(figsize=(12, 6))
+    for sim in filtered_paths[:100]:
+        ax2.plot(dates, start_cap * sim / sim[0], color="gray", alpha=0.05)
+    ax2.plot(dates, start_cap * central / central[0],
+             color="red", lw=2, label="Forecast")
+    ax2.set_title("Forecast (Horizon View)")
+    ax2.set_ylabel("Portfolio Value ($)")
+    ax2.legend()
+    st.pyplot(fig2)
+
+    terminal_vals = paths[:, -1] * start_cap
+    percentiles = [5, 25, 50, 75, 95]
+    p_values = np.percentile(terminal_vals, percentiles)
+    cvar_cutoff = np.percentile(terminal_vals, 5)
+    cvar = terminal_vals[terminal_vals <= cvar_cutoff].mean()
+    p_returns = (p_values / start_cap) - 1
+
+    rows = [
+        ("CVaR", f"${cvar:,.0f}", f"{(cvar / start_cap - 1) * 100:.2f}%")
+    ] + [
+        (f"P{p}", f"${v:,.0f}", f"{r * 100:.2f}%")
+        for p, v, r in zip(percentiles, p_values, p_returns)
+    ]
+
+    html = """
+    <style>
+    table.custom, table.custom tr, table.custom th, table.custom td {
+        border: none !important;
+        border-collapse: collapse !important;
+        border-spacing: 0 !important;
+        background: transparent !important;
+        box-shadow: none !important;
+        outline: none !important;
+    }
+    table.custom th, table.custom td {
+        color: white !important;
+        font-family: 'Helvetica Neue', sans-serif !important;
+        font-size: 15px !important;
+        padding: 3px 10px !important;
+        text-align: left !important;
+    }
+    table.custom th { font-weight: 700 !important; }
+    table.custom td { font-weight: 400 !important; }
+    tr, td, th { border: none !important; border-bottom: none !important; }
+    </style>
+    <table class="custom">
+        <tr><th>Percentile</th><th>Terminal Value ($)</th><th>Return (%)</th></tr>
+    """
+    for row in rows:
+        html += f"<tr><td>{row[0]}</td><td>{row[1]}</td><td>{row[2]}</td></tr>"
+    html += "</table>"
+
+    st.subheader("Forecast Distribution")
+    st.markdown(html, unsafe_allow_html=True)
 
 # ==========================================================
 # Streamlit App
@@ -303,10 +358,13 @@ def main():
 
             st.subheader("Performance Comparison")
             st.markdown(html, unsafe_allow_html=True)
+            plot_forecasts(port_rets, start_cap, final, paths)
 
+            # Add OOS table below all if enabled
             if enable_oos == "Yes":
-                dir_acc, mae, rmse = rolling_oos_test(port_rets)
+                dir_acc, mae, rmse = compute_oos_metrics(port_rets)
                 oos_html = f"""
+                <br><br>
                 <table class='results'>
                     <tr><th>OOS Metric</th><th>Value</th></tr>
                     <tr><td>Directional Accuracy (Monthly)</td><td>{dir_acc:.2%}</td></tr>
@@ -316,7 +374,6 @@ def main():
                 """
                 st.markdown(oos_html, unsafe_allow_html=True)
 
-            plot_forecasts(port_rets, start_cap, final, paths)
         except Exception as e:
             st.error(f"Error: {e}")
 
