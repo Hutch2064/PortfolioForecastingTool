@@ -386,12 +386,11 @@ def main():
                 dir_acc, n_obs = compute_oos_directional_accuracy_walkforward(prices, weights)
                 oos_html = f"""
                 <h3 style='color:white; font-size:22px; font-weight:700; margin-top:25px;'>
-                    Out-Of-Sample Testing Results (Forecast-Based, Monthly)
+                    Out-Of-Sample Testing Results
                 </h3>
                 <table class='results'>
                     <tr><th>OOS Metric</th><th>Value</th></tr>
-                    <tr><td>Directional Accuracy (Forecast-Based)</td><td>{dir_acc:.2%}</td></tr>
-                    <tr><td>Sample Size (Months)</td><td>{n_obs}</td></tr>
+                    <tr><td>Directional Accuracy</td><td>{dir_acc:.2%}</td></tr>
                 </table>
                 """
                 st.markdown(oos_html, unsafe_allow_html=True)
