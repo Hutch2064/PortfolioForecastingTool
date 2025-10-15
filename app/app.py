@@ -140,7 +140,7 @@ def compute_medoid_path(paths):
 # ==========================================================
 def compute_oos_metrics(port_rets):
     """
-    Expanding-window OOS test using the full forecast methodology (Monte Carlo + medoid).
+    Expanding-window OOS test using full forecast methodology (Monte Carlo + medoid).
     At each month, use all data up to that point to forecast the next month, then compare.
     """
     monthly = port_rets.resample("M").sum()
@@ -174,10 +174,15 @@ def compute_oos_metrics(port_rets):
 
     dir_acc = np.mean(np.sign(preds) == np.sign(actuals))
 
-    # cumulative path-fit R²
+    # cumulative path-fit R² on z-scored cumulative returns
     cum_pred = np.cumsum(preds)
     cum_act = np.cumsum(actuals)
-    r2_cum = r2_score(cum_act, cum_pred)
+    if np.std(cum_pred) > 0 and np.std(cum_act) > 0:
+        z_pred = (cum_pred - np.mean(cum_pred)) / np.std(cum_pred)
+        z_act = (cum_act - np.mean(cum_act)) / np.std(cum_act)
+        r2_cum = r2_score(z_act, z_pred)
+    else:
+        r2_cum = np.nan
 
     monthly_vol = monthly.std(ddof=0)
     return dir_acc, monthly_vol, r2_cum
