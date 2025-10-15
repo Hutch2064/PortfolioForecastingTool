@@ -191,7 +191,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     st.pyplot(fig2)
 
     # ----------------------------
-    # Percentile Table (Transparent + No Index)
+    # Percentile Table (Final Clean Version)
     # ----------------------------
     terminal_vals = paths[:, -1] * start_cap
     percentiles = [5, 25, 50, 75, 95]
@@ -201,10 +201,10 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     cvar_cutoff = np.percentile(terminal_vals, 5)
     cvar = terminal_vals[terminal_vals <= cvar_cutoff].mean()
 
-    # Correct return math (based on actual start_cap)
+    # Correct return math (relative to actual starting capital)
     p_returns = (p_values / start_cap) - 1
 
-    # Build rows (CVaR first)
+    # Build table rows (CVaR first)
     rows = [
         ("CVaR (5%)", f"${cvar:,.0f}", f"{(cvar / start_cap - 1) * 100:.2f}%")
     ] + [
@@ -212,42 +212,49 @@ def plot_forecasts(port_rets, start_cap, central, paths):
         for p, v, r in zip(percentiles, p_values, p_returns)
     ]
 
-    # Convert to Markdown table
+    # Build Markdown table
     table_md = "| Percentile | Terminal Value ($) | Return (%) |\n"
     table_md += "|:------------|:------------------:|:-----------:|\n"
     for row in rows:
         table_md += f"| {row[0]} | {row[1]} | {row[2]} |\n"
 
-    # Hide all borders with CSS
+    # Inject CSS to remove all borders + tighten spacing
     st.markdown(
         """
         <style>
         table {
-            border-collapse: collapse;
-            width: 100%;
+            border-collapse: collapse !important;
+            width: 100% !important;
         }
         th, td {
             border: none !important;
+            border-bottom: none !important;
             background-color: transparent !important;
             color: white !important;
             font-size: 15px !important;
-            padding: 4px 12px !important;
+            padding: 2px 10px !important;
+            line-height: 1.1 !important;
+        }
+        thead, tbody, tr {
+            border: none !important;
+            border-bottom: none !important;
+            background: transparent !important;
         }
         thead tr th {
-            border-bottom: 0px solid transparent !important;
+            border-bottom: none !important;
         }
         </style>
         """,
         unsafe_allow_html=True
     )
 
-    # Compute skew and kurtosis
+    # Compute skewness and kurtosis
     mean_val = np.mean(terminal_vals)
     std_val = np.std(terminal_vals)
     skew = np.mean(((terminal_vals - mean_val) / (std_val + 1e-12)) ** 3)
     kurt = np.mean(((terminal_vals - mean_val) / (std_val + 1e-12)) ** 4) - 3
 
-    # Display
+    # Display results
     st.subheader("Forecast Distribution Summary (Percentiles)")
     st.markdown(table_md, unsafe_allow_html=True)
     st.markdown(f"**Skewness:** {skew:.2f}  **Kurtosis:** {kurt:.2f}")
