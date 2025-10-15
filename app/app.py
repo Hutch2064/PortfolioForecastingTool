@@ -227,7 +227,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     # Display table and metrics
     st.subheader("Forecast Distribution Summary (Percentiles)")
     st.markdown(table_md)
-    st.markdown(f"**Skewness:** {skew:.2f}**Kurtosis:** {kurt:.2f}")
+    st.markdown(f"**Skewness:** {skew:.2f} | **Kurtosis:** {kurt:.2f}")
 
 # ==========================================================
 # Streamlit App
