@@ -272,7 +272,7 @@ def main():
     if "forecast_val" in st.session_state and not run_pressed:
         with col_val:
             st.markdown(
-                f"<span style='font-size:18px; color:#FFD700; font-weight:600;'>"
+                f"<span style='font-size:50px; color:#FFD700; font-weight:600;'>"
                 f"Forecasted Portfolio Value ${st.session_state['forecast_val']:,.2f}</span>",
                 unsafe_allow_html=True
             )
