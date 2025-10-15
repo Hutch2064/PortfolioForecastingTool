@@ -21,9 +21,9 @@ random.seed(GLOBAL_SEED)
 np.random.seed(GLOBAL_SEED)
 
 DEFAULT_START = "2000-01-01"
-ENSEMBLE_SEEDS = 10     # Reduced for runtime efficiency in walk-forward
+ENSEMBLE_SEEDS = 10
 SIMS_PER_SEED = 2000
-FORECAST_DAYS = 21      # 1 month ahead (approx. 21 trading days)
+FORECAST_DAYS = 21  # 1-month horizon base
 
 # ==========================================================
 # Basic Helpers
@@ -135,18 +135,17 @@ def compute_medoid_path(paths):
     return paths[idx]
 
 # ==========================================================
-# Forecast-Based Walk-Forward OOS Directional Accuracy
+# Forecast-Based Walk-Forward Directional Accuracy (Generalized)
 # ==========================================================
-def compute_oos_directional_accuracy_walkforward(prices, weights):
-    """Walk-forward monthly forecast testing using model's own forecast logic."""
+def compute_oos_directional_accuracy_walkforward(prices, weights, resample_rule, horizon_days):
+    """Generalized forecast-based walk-forward testing."""
     port_rets = portfolio_log_returns_daily(prices, weights)
-    monthly_returns = port_rets.resample("M").sum()
+    agg_returns = port_rets.resample(resample_rule).sum()
+    dates = agg_returns.index
+    preds, acts = [], []
 
-    predictions, actuals = [], []
-    months = monthly_returns.index
-
-    for i in range(12, len(months) - 1):  # start after 1 year of data
-        sub_prices = prices.loc[:months[i]]
+    for i in range(4, len(dates) - 1):  # 4 periods buffer for initial training
+        sub_prices = prices.loc[:dates[i]]
         sub_rets = portfolio_log_returns_daily(sub_prices, weights)
 
         mu = sub_rets.mean()
@@ -160,17 +159,16 @@ def compute_oos_directional_accuracy_walkforward(prices, weights):
         for seed in range(ENSEMBLE_SEEDS):
             rng = np.random.default_rng(GLOBAL_SEED + seed)
             sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean,
-                                         FORECAST_DAYS, block_length=b_opt)
+                                         horizon_days, block_length=b_opt)
             all_paths.append(sims)
         paths = np.vstack(all_paths)
-        medoid_path = compute_medoid_path(paths)
+        medoid = compute_medoid_path(paths)
 
-        forecast_return = np.log(medoid_path[-1] / medoid_path[0])
-        predictions.append(forecast_return)
-        actuals.append(monthly_returns.iloc[i + 1])
+        forecast_ret = np.log(medoid[-1] / medoid[0])
+        preds.append(forecast_ret)
+        acts.append(agg_returns.iloc[i + 1])
 
-    preds = np.array(predictions)
-    acts = np.array(actuals)
+    preds, acts = np.array(preds), np.array(acts)
     dir_acc = np.mean(np.sign(preds) == np.sign(acts))
     return dir_acc, len(preds)
 
@@ -198,71 +196,38 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     terminal_vals = paths[:, -1]
     low_cut, high_cut = np.percentile(terminal_vals, [16, 84])
     mask = (terminal_vals >= low_cut) & (terminal_vals <= high_cut)
-    filtered_paths = paths[mask]
+    filtered = paths[mask]
 
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(port_cum.index, port_cum.values, color="black", lw=2, label="Portfolio Backtest")
-    for sim in filtered_paths[:100]:
+    for sim in filtered[:100]:
         ax.plot(dates, port_cum.iloc[-1] * sim / sim[0], color="gray", alpha=0.05)
-    ax.plot(dates, port_cum.iloc[-1] * central / central[0],
-            color="red", lw=2, label="Forecast")
-    ax.set_title("Forecast")
-    ax.set_ylabel("Portfolio Value ($)")
-    ax.legend()
+    ax.plot(dates, port_cum.iloc[-1] * central / central[0], color="red", lw=2, label="Forecast")
+    ax.legend(); ax.set_title("Forecast"); ax.set_ylabel("Portfolio Value ($)")
     st.pyplot(fig)
 
-    fig2, ax2 = plt.subplots(figsize=(12, 6))
-    for sim in filtered_paths[:100]:
-        ax2.plot(dates, start_cap * sim / sim[0], color="gray", alpha=0.05)
-    ax2.plot(dates, start_cap * central / central[0],
-             color="red", lw=2, label="Forecast")
-    ax2.set_title("Forecast (Horizon View)")
-    ax2.set_ylabel("Portfolio Value ($)")
-    ax2.legend()
-    st.pyplot(fig2)
-
     terminal_vals = paths[:, -1] * start_cap
-    percentiles = [5, 25, 50, 75, 95]
-    p_values = np.percentile(terminal_vals, percentiles)
-    cvar_cutoff = np.percentile(terminal_vals, 5)
-    cvar = terminal_vals[terminal_vals <= cvar_cutoff].mean()
-    p_returns = (p_values / start_cap) - 1
-
-    rows = [
-        ("CVaR", f"${cvar:,.0f}", f"{(cvar / start_cap - 1) * 100:.2f}%")
-    ] + [
-        (f"P{p}", f"${v:,.0f}", f"{r * 100:.2f}%")
-        for p, v, r in zip(percentiles, p_values, p_returns)
+    percentiles = [5,25,50,75,95]
+    p_vals = np.percentile(terminal_vals, percentiles)
+    cvar_cutoff = np.percentile(terminal_vals,5)
+    cvar = terminal_vals[terminal_vals<=cvar_cutoff].mean()
+    p_rets = (p_vals / start_cap) - 1
+    rows = [("CVaR",f"${cvar:,.0f}",f"{(cvar/start_cap-1)*100:.2f}%")]+[
+        (f"P{p}",f"${v:,.0f}",f"{r*100:.2f}%") for p,v,r in zip(percentiles,p_vals,p_rets)
     ]
-
     html = """
     <style>
     table.custom, table.custom tr, table.custom th, table.custom td {
-        border: none !important;
-        border-collapse: collapse !important;
-        border-spacing: 0 !important;
-        background: transparent !important;
-        box-shadow: none !important;
-        outline: none !important;
+        border:none!important;border-collapse:collapse!important;
+        background:transparent!important;box-shadow:none!important;
     }
-    table.custom th, table.custom td {
-        color: white !important;
-        font-family: 'Helvetica Neue', sans-serif !important;
-        font-size: 15px !important;
-        padding: 3px 10px !important;
-        text-align: left !important;
+    table.custom th,table.custom td {
+        color:white!important;font-family:'Helvetica Neue',sans-serif!important;
+        font-size:15px!important;padding:3px 10px!important;text-align:left!important;
     }
-    table.custom th { font-weight: 700 !important; }
-    table.custom td { font-weight: 400 !important; }
-    tr, td, th { border: none !important; border-bottom: none !important; }
     </style>
-    <table class="custom">
-        <tr><th>Percentile</th><th>Terminal Value ($)</th><th>Return (%)</th></tr>
-    """
-    for row in rows:
-        html += f"<tr><td>{row[0]}</td><td>{row[1]}</td><td>{row[2]}</td></tr>"
-    html += "</table>"
-
+    <table class="custom"><tr><th>Percentile</th><th>Terminal Value ($)</th><th>Return (%)</th></tr>
+    """ + "".join([f"<tr><td>{a}</td><td>{b}</td><td>{c}</td></tr>" for a,b,c in rows]) + "</table>"
     st.subheader("Forecast Distribution")
     st.markdown(html, unsafe_allow_html=True)
 
@@ -271,29 +236,28 @@ def plot_forecasts(port_rets, start_cap, central, paths):
 # ==========================================================
 def main():
     st.title("Portfolio Forecasting Tool")
-    tickers = st.text_input("Tickers", "VTI,AGG")
-    weights_str = st.text_input("Weights", "0.6,0.4")
-    start_cap = st.number_input("Starting Value ($)", 1000.0, 1_000_000.0, 10_000.0, 1000.0)
-    forecast_years = st.selectbox("Forecast Horizon (Years)", [1, 2, 3, 4, 5], index=0)
-    enable_oos = st.selectbox("Out-Of-Sample Testing", ["No", "Yes"], index=0)
+    tickers = st.text_input("Tickers","VTI,AGG")
+    weights_str = st.text_input("Weights","0.6,0.4")
+    start_cap = st.number_input("Starting Value ($)",1000.0,1_000_000.0,10_000.0,1000.0)
+    forecast_years = st.selectbox("Forecast Horizon (Years)",[1,2,3,4,5],index=0)
+    enable_oos = st.selectbox("Out-Of-Sample Testing",["No","Yes"],index=0)
     backtest_start = st.date_input("Backtest Start Date",
-                                   value=datetime.date(2000, 1, 1),
-                                   min_value=datetime.date(1980, 1, 1),
-                                   max_value=datetime.date.today())
+        value=datetime.date(2000,1,1),
+        min_value=datetime.date(1980,1,1),
+        max_value=datetime.date.today()
+    )
 
-    col_run, col_val = st.columns([1, 3])
-    with col_run:
-        run_pressed = st.button("Run")
+    col_run, col_val = st.columns([1,3])
+    with col_run: run_pressed = st.button("Run")
 
-    if st.session_state.get("last_tickers") != st.session_state.get("curr_tickers", ""):
-        st.session_state.pop("forecast_val", None)
-    if st.session_state.get("last_weights") != st.session_state.get("curr_weights", ""):
-        st.session_state.pop("forecast_val", None)
-
-    st.session_state["curr_tickers"] = tickers
-    st.session_state["curr_weights"] = weights_str
-    st.session_state["last_tickers"] = tickers
-    st.session_state["last_weights"] = weights_str
+    if st.session_state.get("last_tickers")!=st.session_state.get("curr_tickers",""):
+        st.session_state.pop("forecast_val",None)
+    if st.session_state.get("last_weights")!=st.session_state.get("curr_weights",""):
+        st.session_state.pop("forecast_val",None)
+    st.session_state["curr_tickers"]=tickers
+    st.session_state["curr_weights"]=weights_str
+    st.session_state["last_tickers"]=tickers
+    st.session_state["last_weights"]=weights_str
 
     if run_pressed:
         try:
@@ -302,95 +266,70 @@ def main():
             prices = fetch_prices_daily(tickers, backtest_start.strftime("%Y-%m-%d"))
             port_rets = portfolio_log_returns_daily(prices, weights)
 
-            mu = port_rets.mean()
-            sigma = port_rets.std(ddof=0)
-            base_mean = mu - 0.5 * sigma ** 2
-            residuals = (port_rets - mu).to_numpy(dtype=np.float32)
-            residuals -= residuals.mean()
+            mu, sigma = port_rets.mean(), port_rets.std(ddof=0)
+            base_mean = mu - 0.5*sigma**2
+            residuals = (port_rets-mu).to_numpy(dtype=np.float32); residuals -= residuals.mean()
             b_opt = estimate_optimal_block_length(residuals)
 
-            total_days = 5 * 252
-            all_paths = []
-            bar2 = st.progress(0)
-            txt2 = st.empty()
+            total_days = 5*252
+            all_paths=[]; bar2=st.progress(0); txt2=st.empty()
             for i in range(ENSEMBLE_SEEDS):
-                rng = np.random.default_rng(GLOBAL_SEED + i)
-                sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean,
-                                             total_days, block_length=b_opt)
-                all_paths.append(sims)
-                bar2.progress((i + 1) / ENSEMBLE_SEEDS)
-                txt2.text(f"Running forecasts... {int((i + 1)/ENSEMBLE_SEEDS*100)}%")
-            bar2.empty()
-            txt2.empty()
+                rng=np.random.default_rng(GLOBAL_SEED+i)
+                sims=run_monte_carlo_paths(residuals,SIMS_PER_SEED,rng,base_mean,total_days,b_opt)
+                all_paths.append(sims); bar2.progress((i+1)/ENSEMBLE_SEEDS)
+                txt2.text(f"Running forecasts... {int((i+1)/ENSEMBLE_SEEDS*100)}%")
+            bar2.empty(); txt2.empty()
 
-            paths_full = np.vstack(all_paths)
-            medoid_full = compute_medoid_path(paths_full)
-            forecast_days = forecast_years * 252
-            paths = paths_full[:, :forecast_days]
-            final = medoid_full[:forecast_days]
-            st.session_state["forecast_val"] = final[-1] * start_cap
+            paths_full=np.vstack(all_paths)
+            medoid_full=compute_medoid_path(paths_full)
+            forecast_days=forecast_years*252
+            paths=paths_full[:,:forecast_days]; final=medoid_full[:forecast_days]
+            st.session_state["forecast_val"]=final[-1]*start_cap
 
-            stats = compute_forecast_stats_from_path(final, start_cap, port_rets.index[-1])
-            back = {
-                "CAGR": annualized_return_daily(port_rets),
-                "Volatility": annualized_vol_daily(port_rets),
-                "Sharpe": annualized_sharpe_daily(port_rets),
-                "Max Drawdown": max_drawdown_from_rets(port_rets),
+            stats=compute_forecast_stats_from_path(final,start_cap,port_rets.index[-1])
+            back={
+                "CAGR":annualized_return_daily(port_rets),
+                "Volatility":annualized_vol_daily(port_rets),
+                "Sharpe":annualized_sharpe_daily(port_rets),
+                "Max Drawdown":max_drawdown_from_rets(port_rets),
             }
 
             st.markdown(
-                f"<p style='color:white; font-size:27px; font-weight:bold; margin-top:17px;'>"
-                f"Forecasted Portfolio Value ~ <span style='font-weight:300;'>${final[-1] * start_cap:,.2f}</span></p>",
+                f"<p style='color:white;font-size:27px;font-weight:bold;margin-top:17px;'>"
+                f"Forecasted Portfolio Value ~ <span style='font-weight:300;'>${final[-1]*start_cap:,.2f}</span></p>",
                 unsafe_allow_html=True)
 
-            rows = [
-                ("CAGR", f"{back['CAGR']:.2%}", f"{stats['CAGR']:.2%}"),
-                ("Volatility", f"{back['Volatility']:.2%}", f"{stats['Volatility']:.2%}"),
-                ("Sharpe", f"{back['Sharpe']:.2f}", f"{stats['Sharpe']:.2f}"),
-                ("Max Drawdown", f"{back['Max Drawdown']:.2%}", f"{stats['Max Drawdown']:.2%}")
-            ]
-
-            html = """
-            <style>
-            table.results, table.results tr, table.results th, table.results td {
-                border: none !important;
-                border-collapse: collapse !important;
-                border-spacing: 0 !important;
-                background: transparent !important;
-                box-shadow: none !important;
-                outline: none !important;
-            }
-            table.results th, table.results td {
-                color: white !important;
-                font-family: 'Helvetica Neue', sans-serif !important;
-                font-size: 15px !important;
-                padding: 3px 10px !important;
-                text-align: left !important;
-            }
-            table.results th { font-weight: 700 !important; }
-            table.results td { font-weight: 400 !important; }
-            tr, td, th { border: none !important; border-bottom: none !important; }
-            </style>
-            <table class="results">
-                <tr><th>Metric</th><th>Backtest</th><th>Forecast</th></tr>
-            """
-            for row in rows:
-                html += f"<tr><td>{row[0]}</td><td>{row[1]}</td><td>{row[2]}</td></tr>"
-            html += "</table>"
+            rows=[("CAGR",f"{back['CAGR']:.2%}",f"{stats['CAGR']:.2%}"),
+                  ("Volatility",f"{back['Volatility']:.2%}",f"{stats['Volatility']:.2%}"),
+                  ("Sharpe",f"{back['Sharpe']:.2f}",f"{stats['Sharpe']:.2f}"),
+                  ("Max Drawdown",f"{back['Max Drawdown']:.2%}",f"{stats['Max Drawdown']:.2%}")]
+            html=("""
+            <style>table.results,table.results tr,table.results th,table.results td{
+            border:none!important;border-collapse:collapse!important;background:transparent!important;}
+            table.results th,table.results td{color:white!important;font-family:'Helvetica Neue',sans-serif!important;
+            font-size:15px!important;padding:3px 10px!important;text-align:left!important;}
+            </style><table class='results'><tr><th>Metric</th><th>Backtest</th><th>Forecast</th></tr>"""+
+            "".join([f"<tr><td>{a}</td><td>{b}</td><td>{c}</td></tr>" for a,b,c in rows])+"</table>")
             st.subheader("Performance Comparison")
             st.markdown(html, unsafe_allow_html=True)
+            plot_forecasts(port_rets,start_cap,final,paths)
 
-            plot_forecasts(port_rets, start_cap, final, paths)
+            if enable_oos=="Yes":
+                m_acc,m_n=compute_oos_directional_accuracy_walkforward(prices,weights,"M",21)
+                q_acc,q_n=compute_oos_directional_accuracy_walkforward(prices,weights,"Q",63)
+                s_acc,s_n=compute_oos_directional_accuracy_walkforward(prices,weights,"2Q",126)
+                a_acc,a_n=compute_oos_directional_accuracy_walkforward(prices,weights,"Y",252)
 
-            if enable_oos == "Yes":
-                dir_acc, n_obs = compute_oos_directional_accuracy_walkforward(prices, weights)
-                oos_html = f"""
-                <h3 style='color:white; font-size:22px; font-weight:700; margin-top:25px;'>
+                oos_html=f"""
+                <h3 style='color:white;font-size:22px;font-weight:700;margin-top:25px;'>
                     Out-Of-Sample Testing Results
                 </h3>
                 <table class='results'>
-                    <tr><th>OOS Metric</th><th>Value</th></tr>
-                    <tr><td>Directional Accuracy (Monthly)</td><td>{dir_acc:.2%}</td></tr>
+                    <tr><th>OOS Horizon</th><th>Directional Accuracy</th><th>Sample Size</th></tr>
+                    <tr><td>Monthly</td><td>{m_acc:.2%}</td><td>{m_n}</td></tr>
+                    <tr><td>Quarterly</td><td>{q_acc:.2%}</td><td>{q_n}</td></tr>
+                    <tr><td>Semiannual</td><td>{s_acc:.2%}</td><td>{s_n}</td></tr>
+                    <tr><td>Annual</td><td>{a_acc:.2%}</td><td>{a_n}</td></tr>
                 </table>
                 """
                 st.markdown(oos_html, unsafe_allow_html=True)
@@ -398,5 +337,5 @@ def main():
         except Exception as e:
             st.error(f"Error: {e}")
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
