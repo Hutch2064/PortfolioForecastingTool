@@ -264,7 +264,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
 
     # Skew/Kurt box (fully bottom-right corner)
     ax3.text(
-        0.985, 0.02,
+        0.99, 0.02,
         f"Skew: {skew:.2f}\nKurt: {kurt:.2f}",
         transform=ax3.transAxes,
         ha="right", va="bottom",
