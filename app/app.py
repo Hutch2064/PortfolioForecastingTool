@@ -223,6 +223,9 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     table.custom td {
         font-weight: 400 !important;
     }
+    tr, td, th {
+        border-bottom: none !important;
+    }
     </style>
     <table class="custom">
         <tr><th>Percentile</th><th>Terminal Value ($)</th><th>Return (%)</th></tr>
@@ -249,20 +252,15 @@ def main():
         max_value=datetime.date.today()
     )
 
-    # ========================
-    # Run button + inline forecast display
-    # ========================
     col_run, col_val = st.columns([1, 3])
     with col_run:
         run_pressed = st.button("Run")
 
-    # Clear forecast when user starts typing new tickers or weights
     if st.session_state.get("last_tickers") != st.session_state.get("curr_tickers", ""):
         st.session_state.pop("forecast_val", None)
     if st.session_state.get("last_weights") != st.session_state.get("curr_weights", ""):
         st.session_state.pop("forecast_val", None)
 
-    # Track current ticker and weights input
     st.session_state["curr_tickers"] = tickers
     st.session_state["curr_weights"] = weights_str
     st.session_state["last_tickers"] = tickers
@@ -347,6 +345,9 @@ def main():
             }
             table.results td {
                 font-weight: 400 !important;
+            }
+            tr, td, th {
+                border-bottom: none !important;
             }
             </style>
             <table class="results">
