@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import streamlit as st
 from typing import List
 import datetime
-from sklearn.metrics import r2_score
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score  # <-- includes r2_score
 
 warnings.filterwarnings("ignore")
 
@@ -103,6 +103,7 @@ def portfolio_log_returns_daily(prices, weights):
 # Optimal Block Length Estimation (Volatility Clustering)
 # ==========================================================
 def estimate_optimal_block_length(residuals):
+    """Estimate optimal block length from volatility autocorrelation."""
     res2 = residuals ** 2
     if len(res2) < 2:
         return 5
@@ -115,6 +116,7 @@ def estimate_optimal_block_length(residuals):
 # Monte Carlo Simulation (Block Bootstrap Sampling)
 # ==========================================================
 def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, total_days, block_length):
+    """Fixed-length block bootstrap preserving volatility clustering (vectorized)."""
     n_res = len(residuals)
     n_blocks = int(np.ceil(total_days / block_length))
     starts = rng.integers(0, n_res - block_length, size=(sims_per_seed, n_blocks))
@@ -129,6 +131,7 @@ def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, total_days, 
 # Mean-Like Path (Closest to Ensemble Mean in Log Space)
 # ==========================================================
 def compute_medoid_path(paths):
+    """Select the simulated path closest to the ensemble mean trajectory (vectorized)."""
     log_paths = np.log(paths)
     mean_path = np.mean(log_paths, axis=0, dtype=np.float32)
     distances = np.linalg.norm(log_paths - mean_path, axis=1)
@@ -136,54 +139,38 @@ def compute_medoid_path(paths):
     return paths[idx]
 
 # ==========================================================
-# Forecast-Based Expanding-Window OOS Metrics
+# Rolling OOS Metrics (ANNUAL)
 # ==========================================================
 def compute_oos_metrics(port_rets):
-    """
-    Expanding-window OOS test using full forecast methodology (Monte Carlo + medoid).
-    Computes directional accuracy and R² on z-scored monthly returns.
-    """
-    monthly = port_rets.resample("M").sum()
-    if len(monthly) < 120:
-        return np.nan, np.nan, np.nan
+    """Compute rolling annual (12-month) OOS directional accuracy and cumulative R²."""
+    annual = port_rets.resample("Y").sum()
+    if len(annual) < 12:
+        return np.nan, np.nan, np.nan, np.nan
 
-    preds, actuals = [], []
-    for t in range(60, len(monthly) - 1):
-        train = monthly.iloc[:t]
-        mu, sigma = train.mean(), train.std(ddof=0)
-        base_mean = mu - 0.5 * sigma**2
-        residuals = (train - mu).to_numpy(dtype=np.float32)
-        residuals -= residuals.mean()
-
-        rng = np.random.default_rng(GLOBAL_SEED + t)
-        sims = run_monte_carlo_paths(
-            residuals=residuals,
-            sims_per_seed=500,
-            rng=rng,
-            base_mean=base_mean,
-            total_days=21,
-            block_length=5
-        )
-        medoid = compute_medoid_path(sims)
-        pred_next = np.log(medoid[-1] / medoid[0])
-        preds.append(pred_next)
-        actuals.append(monthly.iloc[t+1])
-
+    preds = []
+    actuals = []
+    for t in range(5, len(annual) - 1):  # need 5 years to start
+        train = annual.iloc[:t]
+        pred = train.mean()  # forecast next year as mean of prior years
+        preds.append(pred)
+        actuals.append(annual.iloc[t+1])
     preds = np.array(preds)
     actuals = np.array(actuals)
 
     dir_acc = np.mean(np.sign(preds) == np.sign(actuals))
 
-    # R² on z-scored monthly returns (pattern correlation)
-    if np.std(preds) > 0 and np.std(actuals) > 0:
-        z_pred = (preds - np.mean(preds)) / np.std(preds)
-        z_act = (actuals - np.mean(actuals)) / np.std(actuals)
-        r2_monthly = r2_score(z_act, z_pred)
+    # cumulative R² on z-scored returns (annual)
+    if len(actuals) > 1:
+        a_z = (actuals - np.mean(actuals)) / np.std(actuals, ddof=0)
+        p_z = (preds - np.mean(preds)) / np.std(preds, ddof=0)
+        ss_res = np.sum((a_z - p_z) ** 2)
+        ss_tot = np.sum((a_z - np.mean(a_z)) ** 2)
+        r2 = 1 - ss_res / ss_tot
     else:
-        r2_monthly = np.nan
+        r2 = np.nan
 
-    monthly_vol = monthly.std(ddof=0)
-    return dir_acc, monthly_vol, r2_monthly
+    annual_vol = annual.std(ddof=0)
+    return dir_acc, annual_vol, r2, len(annual)
 
 # ==========================================================
 # Stats + Plot
@@ -392,23 +379,14 @@ def main():
             st.markdown(html, unsafe_allow_html=True)
             plot_forecasts(port_rets, start_cap, final, paths)
 
+            # Add OOS table (annual)
             if enable_oos == "Yes":
-                dir_acc, monthly_vol, r2_monthly = compute_oos_metrics(port_rets)
+                dir_acc, annual_vol, r2, n_obs = compute_oos_metrics(port_rets)
                 oos_html = f"""
                 <h3 style='color:white; font-size:22px; font-weight:700; margin-top:25px;'>
-                    Out-Of-Sample Testing Results
+                    Out-Of-Sample Testing Results (Annual)
                 </h3>
                 <table class='results'>
                     <tr><th>OOS Metric</th><th>Value</th></tr>
-                    <tr><td>Directional Accuracy (Monthly)</td><td>{dir_acc:.2%}</td></tr>
-                    <tr><td>R² (Z-Scored Monthly Returns)</td><td>{r2_monthly:.3f}</td></tr>
-                    <tr><td>Monthly Volatility</td><td>{monthly_vol:.4f}</td></tr>
-                </table>
-                """
-                st.markdown(oos_html, unsafe_allow_html=True)
-
-        except Exception as e:
-            st.error(f"Error: {e}")
-
-if __name__ == "__main__":
-    main()
+                    <tr><td>Directional Accuracy (Annual)</td><td>{dir_acc:.2%}</td></tr>
+                    <tr><td>Cumulative R² (Z-Scored Annual Returns
