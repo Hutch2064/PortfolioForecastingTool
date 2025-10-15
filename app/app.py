@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import streamlit as st
 from typing import List
 import datetime
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.metrics import r2_score
 
 warnings.filterwarnings("ignore")
 
@@ -145,12 +145,11 @@ def compute_oos_metrics(port_rets):
     """
     monthly = port_rets.resample("M").sum()
     if len(monthly) < 120:
-        return np.nan, np.nan, np.nan, np.nan, np.nan
+        return np.nan, np.nan, np.nan
 
     preds, actuals = [], []
     for t in range(60, len(monthly) - 1):
         train = monthly.iloc[:t]
-
         mu, sigma = train.mean(), train.std(ddof=0)
         base_mean = mu - 0.5 * sigma**2
         residuals = (train - mu).to_numpy(dtype=np.float32)
@@ -174,13 +173,14 @@ def compute_oos_metrics(port_rets):
     actuals = np.array(actuals)
 
     dir_acc = np.mean(np.sign(preds) == np.sign(actuals))
-    mae = mean_absolute_error(actuals, preds)
-    rmse = np.sqrt(mean_squared_error(actuals, preds))
-    r2 = r2_score(actuals, preds)
+
+    # cumulative path-fit R²
+    cum_pred = np.cumsum(preds)
+    cum_act = np.cumsum(actuals)
+    r2_cum = r2_score(cum_act, cum_pred)
+
     monthly_vol = monthly.std(ddof=0)
-    norm_mae = mae / monthly_vol if monthly_vol > 0 else np.nan
-    norm_rmse = rmse / monthly_vol if monthly_vol > 0 else np.nan
-    return dir_acc, norm_mae, norm_rmse, monthly_vol, r2
+    return dir_acc, monthly_vol, r2_cum
 
 # ==========================================================
 # Stats + Plot
@@ -390,7 +390,7 @@ def main():
             plot_forecasts(port_rets, start_cap, final, paths)
 
             if enable_oos == "Yes":
-                dir_acc, norm_mae, norm_rmse, monthly_vol, r2 = compute_oos_metrics(port_rets)
+                dir_acc, monthly_vol, r2_cum = compute_oos_metrics(port_rets)
                 oos_html = f"""
                 <h3 style='color:white; font-size:22px; font-weight:700; margin-top:25px;'>
                     Out-Of-Sample Testing Results
@@ -398,9 +398,7 @@ def main():
                 <table class='results'>
                     <tr><th>OOS Metric</th><th>Value</th></tr>
                     <tr><td>Directional Accuracy (Monthly)</td><td>{dir_acc:.2%}</td></tr>
-                    <tr><td>Normalized MAE (MAE / Monthly Vol)</td><td>{norm_mae:.3f}</td></tr>
-                    <tr><td>Normalized RMSE (RMSE / Monthly Vol)</td><td>{norm_rmse:.3f}</td></tr>
-                    <tr><td>R² (Goodness of Fit)</td><td>{r2:.3f}</td></tr>
+                    <tr><td>Cumulative R² (Path Fit)</td><td>{r2_cum:.3f}</td></tr>
                     <tr><td>Monthly Volatility</td><td>{monthly_vol:.4f}</td></tr>
                 </table>
                 """
