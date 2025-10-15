@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import streamlit as st
 from typing import List
 import datetime
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score  # <-- includes r2_score
+from sklearn.metrics import r2_score
 
 warnings.filterwarnings("ignore")
 
@@ -100,23 +100,21 @@ def portfolio_log_returns_daily(prices, weights):
     return port_rets.astype(np.float32)
 
 # ==========================================================
-# Optimal Block Length Estimation (Volatility Clustering)
+# Optimal Block Length Estimation
 # ==========================================================
 def estimate_optimal_block_length(residuals):
-    """Estimate optimal block length from volatility autocorrelation."""
     res2 = residuals ** 2
     if len(res2) < 2:
         return 5
     rho1 = np.corrcoef(res2[:-1], res2[1:])[0, 1]
     T = len(res2)
-    b_opt = 1.5 * ((T / (1 - rho1**2 + 1e-9)) ** (1/3))
+    b_opt = 1.5 * ((T / (1 - rho1**2 + 1e-9)) ** (1 / 3))
     return int(np.clip(b_opt, 5, 100))
 
 # ==========================================================
-# Monte Carlo Simulation (Block Bootstrap Sampling)
+# Monte Carlo Simulation
 # ==========================================================
 def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, total_days, block_length):
-    """Fixed-length block bootstrap preserving volatility clustering (vectorized)."""
     n_res = len(residuals)
     n_blocks = int(np.ceil(total_days / block_length))
     starts = rng.integers(0, n_res - block_length, size=(sims_per_seed, n_blocks))
@@ -128,10 +126,9 @@ def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, total_days, 
     return np.exp(log_paths - log_paths[:, [0]])
 
 # ==========================================================
-# Mean-Like Path (Closest to Ensemble Mean in Log Space)
+# Mean-Like Path
 # ==========================================================
 def compute_medoid_path(paths):
-    """Select the simulated path closest to the ensemble mean trajectory (vectorized)."""
     log_paths = np.log(paths)
     mean_path = np.mean(log_paths, axis=0, dtype=np.float32)
     distances = np.linalg.norm(log_paths - mean_path, axis=1)
@@ -139,27 +136,26 @@ def compute_medoid_path(paths):
     return paths[idx]
 
 # ==========================================================
-# Rolling OOS Metrics (ANNUAL)
+# OOS Metrics (Annual)
 # ==========================================================
 def compute_oos_metrics(port_rets):
-    """Compute rolling annual (12-month) OOS directional accuracy and cumulative R²."""
+    """Compute annual OOS directional accuracy and cumulative R² on z-scored returns."""
     annual = port_rets.resample("Y").sum()
     if len(annual) < 12:
         return np.nan, np.nan, np.nan, np.nan
 
     preds = []
     actuals = []
-    for t in range(5, len(annual) - 1):  # need 5 years to start
+    for t in range(5, len(annual) - 1):
         train = annual.iloc[:t]
-        pred = train.mean()  # forecast next year as mean of prior years
+        pred = train.mean()
         preds.append(pred)
-        actuals.append(annual.iloc[t+1])
+        actuals.append(annual.iloc[t + 1])
     preds = np.array(preds)
     actuals = np.array(actuals)
 
     dir_acc = np.mean(np.sign(preds) == np.sign(actuals))
 
-    # cumulative R² on z-scored returns (annual)
     if len(actuals) > 1:
         a_z = (actuals - np.mean(actuals)) / np.std(actuals, ddof=0)
         p_z = (preds - np.mean(preds)) / np.std(preds, ddof=0)
@@ -186,6 +182,7 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
         "Sharpe": annualized_sharpe_daily(rets),
         "Max Drawdown": max_drawdown_from_rets(rets),
     }
+
 
 def plot_forecasts(port_rets, start_cap, central, paths):
     port_cum = np.exp(port_rets.cumsum()) * start_cap
@@ -274,10 +271,9 @@ def main():
     forecast_years = st.selectbox("Forecast Horizon (Years)", [1, 2, 3, 4, 5], index=0)
     enable_oos = st.selectbox("Out-Of-Sample Testing", ["No", "Yes"], index=0)
     backtest_start = st.date_input("Backtest Start Date",
-        value=datetime.date(2000, 1, 1),
-        min_value=datetime.date(1980, 1, 1),
-        max_value=datetime.date.today()
-    )
+                                   value=datetime.date(2000, 1, 1),
+                                   min_value=datetime.date(1980, 1, 1),
+                                   max_value=datetime.date.today())
 
     col_run, col_val = st.columns([1, 3])
     with col_run:
@@ -313,7 +309,8 @@ def main():
             txt2 = st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng = np.random.default_rng(GLOBAL_SEED + i)
-                sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean, total_days, block_length=b_opt)
+                sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean,
+                                             total_days, block_length=b_opt)
                 all_paths.append(sims)
                 bar2.progress((i + 1) / ENSEMBLE_SEEDS)
                 txt2.text(f"Running forecasts... {int((i + 1)/ENSEMBLE_SEEDS*100)}%")
@@ -336,9 +333,9 @@ def main():
             }
 
             st.markdown(
-                f"<p style='color:white; font-size:27px; font-weight:bold; margin-top:17px;'>Forecasted Portfolio Value ~ <span style='font-weight:300;'>${final[-1] * start_cap:,.2f}</span></p>",
-                unsafe_allow_html=True
-            )
+                f"<p style='color:white; font-size:27px; font-weight:bold; margin-top:17px;'>"
+                f"Forecasted Portfolio Value ~ <span style='font-weight:300;'>${final[-1] * start_cap:,.2f}</span></p>",
+                unsafe_allow_html=True)
 
             rows = [
                 ("CAGR", f"{back['CAGR']:.2%}", f"{stats['CAGR']:.2%}"),
@@ -374,12 +371,11 @@ def main():
             for row in rows:
                 html += f"<tr><td>{row[0]}</td><td>{row[1]}</td><td>{row[2]}</td></tr>"
             html += "</table>"
-
             st.subheader("Performance Comparison")
             st.markdown(html, unsafe_allow_html=True)
+
             plot_forecasts(port_rets, start_cap, final, paths)
 
-            # Add OOS table (annual)
             if enable_oos == "Yes":
                 dir_acc, annual_vol, r2, n_obs = compute_oos_metrics(port_rets)
                 oos_html = f"""
@@ -389,4 +385,15 @@ def main():
                 <table class='results'>
                     <tr><th>OOS Metric</th><th>Value</th></tr>
                     <tr><td>Directional Accuracy (Annual)</td><td>{dir_acc:.2%}</td></tr>
-                    <tr><td>Cumulative R² (Z-Scored Annual Returns
+                    <tr><td>Cumulative R² (Z-Scored Annual Returns)</td><td>{r2:.3f}</td></tr>
+                    <tr><td>Annual Volatility</td><td>{annual_vol:.4f}</td></tr>
+                    <tr><td>Sample Size (Years)</td><td>{n_obs}</td></tr>
+                </table>
+                """
+                st.markdown(oos_html, unsafe_allow_html=True)
+
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+if __name__ == "__main__":
+    main()
