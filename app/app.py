@@ -207,9 +207,11 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     cvar_cutoff = np.percentile(terminal_vals, 5)
     cvar = terminal_vals[terminal_vals <= cvar_cutoff].mean()
 
-    # Daily return horizon in years
-    years = forecast_years
-    p_returns = (p_values / start_cap) ** (1 / years) - 1
+    # Infer forecast horizon (years)
+    forecast_years = len(central) / 252
+
+    # Compute annualized returns for each percentile
+    p_returns = (p_values / start_cap) ** (1 / forecast_years) - 1
 
     # Build dataframe
     df_percentiles = pd.DataFrame({
