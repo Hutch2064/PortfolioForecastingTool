@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import streamlit as st
 from typing import List
 import datetime
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score  # <-- Added r2_score
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 warnings.filterwarnings("ignore")
 
@@ -103,7 +103,6 @@ def portfolio_log_returns_daily(prices, weights):
 # Optimal Block Length Estimation (Volatility Clustering)
 # ==========================================================
 def estimate_optimal_block_length(residuals):
-    """Estimate optimal block length from volatility autocorrelation."""
     res2 = residuals ** 2
     if len(res2) < 2:
         return 5
@@ -116,7 +115,6 @@ def estimate_optimal_block_length(residuals):
 # Monte Carlo Simulation (Block Bootstrap Sampling)
 # ==========================================================
 def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, total_days, block_length):
-    """Fixed-length block bootstrap preserving volatility clustering (vectorized)."""
     n_res = len(residuals)
     n_blocks = int(np.ceil(total_days / block_length))
     starts = rng.integers(0, n_res - block_length, size=(sims_per_seed, n_blocks))
@@ -131,7 +129,6 @@ def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, total_days, 
 # Mean-Like Path (Closest to Ensemble Mean in Log Space)
 # ==========================================================
 def compute_medoid_path(paths):
-    """Select the simulated path closest to the ensemble mean trajectory (vectorized)."""
     log_paths = np.log(paths)
     mean_path = np.mean(log_paths, axis=0, dtype=np.float32)
     distances = np.linalg.norm(log_paths - mean_path, axis=1)
@@ -139,28 +136,47 @@ def compute_medoid_path(paths):
     return paths[idx]
 
 # ==========================================================
-# Rolling OOS Metrics
+# Forecast-Based Expanding-Window OOS Metrics
 # ==========================================================
 def compute_oos_metrics(port_rets):
-    """Compute rolling 5-year (60-month) OOS directional accuracy and normalized errors."""
+    """
+    Expanding-window OOS test using the full forecast methodology (Monte Carlo + medoid).
+    At each month, use all data up to that point to forecast the next month, then compare.
+    """
     monthly = port_rets.resample("M").sum()
-    if len(monthly) < 120:  # need at least 10 years (5 train + 5 test)
+    if len(monthly) < 120:
         return np.nan, np.nan, np.nan, np.nan, np.nan
 
-    preds = []
-    actuals = []
-    for t in range(60, len(monthly) - 1):  # start after 5 years
-        train = monthly.iloc[t-60:t]
-        pred = train.mean()  # forecast next month as mean of prior 5 years
-        preds.append(pred)
+    preds, actuals = [], []
+    for t in range(60, len(monthly) - 1):
+        train = monthly.iloc[:t]
+
+        mu, sigma = train.mean(), train.std(ddof=0)
+        base_mean = mu - 0.5 * sigma**2
+        residuals = (train - mu).to_numpy(dtype=np.float32)
+        residuals -= residuals.mean()
+
+        rng = np.random.default_rng(GLOBAL_SEED + t)
+        sims = run_monte_carlo_paths(
+            residuals=residuals,
+            sims_per_seed=500,
+            rng=rng,
+            base_mean=base_mean,
+            total_days=21,
+            block_length=5
+        )
+        medoid = compute_medoid_path(sims)
+        pred_next = np.log(medoid[-1] / medoid[0])
+        preds.append(pred_next)
         actuals.append(monthly.iloc[t+1])
+
     preds = np.array(preds)
     actuals = np.array(actuals)
 
     dir_acc = np.mean(np.sign(preds) == np.sign(actuals))
     mae = mean_absolute_error(actuals, preds)
     rmse = np.sqrt(mean_squared_error(actuals, preds))
-    r2 = r2_score(actuals, preds)  # <-- Added R² calculation
+    r2 = r2_score(actuals, preds)
     monthly_vol = monthly.std(ddof=0)
     norm_mae = mae / monthly_vol if monthly_vol > 0 else np.nan
     norm_rmse = rmse / monthly_vol if monthly_vol > 0 else np.nan
@@ -373,7 +389,6 @@ def main():
             st.markdown(html, unsafe_allow_html=True)
             plot_forecasts(port_rets, start_cap, final, paths)
 
-            # Add OOS table with header if enabled
             if enable_oos == "Yes":
                 dir_acc, norm_mae, norm_rmse, monthly_vol, r2 = compute_oos_metrics(port_rets)
                 oos_html = f"""
