@@ -21,8 +21,8 @@ random.seed(GLOBAL_SEED)
 np.random.seed(GLOBAL_SEED)
 
 DEFAULT_START = "2000-01-01"
-ENSEMBLE_SEEDS = 10
-SIMS_PER_SEED = 10000
+ENSEMBLE_SEEDS = 20
+SIMS_PER_SEED = 5000
 FORECAST_DAYS = 252
 
 # ==========================================================
@@ -232,7 +232,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
             background-color: transparent !important;
             color: white !important;
             font-size: 15px !important;
-            padding: 2px 6px !important;
+            padding: 1px 4px !important;
             line-height: 1.1 !important;
             letter-spacing: -0.3px !important;  /* <-- optional, pulls columns closer */
         }
