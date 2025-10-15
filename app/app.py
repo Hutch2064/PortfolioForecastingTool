@@ -191,7 +191,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     st.pyplot(fig2)
 
     # ----------------------------
-    # Histogram of Terminal Portfolio Values (Clean, non-overlapping)
+    # Histogram of Terminal Portfolio Values (Clean & Tight Layout)
     # ----------------------------
     fig3, ax3 = plt.subplots(figsize=(10, 5))
     terminal_vals = paths[:, -1] * start_cap
@@ -214,58 +214,51 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     ax3.set_xlabel("Final Portfolio Value ($)", fontsize=11)
     ax3.set_ylabel("Frequency", fontsize=11)
 
-    # Make room above bars for outside labels
+    # Add some headroom for percentile labels
     max_y = counts.max() if len(counts) else 1.0
-    ax3.set_ylim(0, max_y * 1.28)  # extra headroom for labels
+    ax3.set_ylim(0, max_y * 1.25)
 
     # Colors
     colors = {5: "red", 25: "orange", 50: "blue", 75: "green", 95: "darkgreen"}
 
-    # Helper: x-range for sensible label offsets
+    # Plot ticks and place labels directly outside histogram near each tick
     x_min, x_max = ax3.get_xlim()
-    x_rng = x_max - x_min
+    x_range = x_max - x_min
 
-    # Place ticks at bar tops; labels outside bars with leader lines
     for i, (p, v) in enumerate(zip(percentiles, p_values)):
-        # which bin contains v?
+        # Find which bin contains v
         bin_idx = np.searchsorted(bins, v) - 1
         bin_idx = np.clip(bin_idx, 0, len(counts) - 1)
-        y_top = counts[bin_idx]
+        y_val = counts[bin_idx]
 
-        # short tick at bar top
-        ax3.plot([v, v], [y_top - 0.015 * max_y, y_top + 0.015 * max_y],
+        # Draw a small tick on top of the histogram bar
+        ax3.plot([v, v], [y_val - 0.02 * max_y, y_val + 0.02 * max_y],
                  color=colors[p], lw=3, solid_capstyle="round")
 
-        # choose side & label target position OUTSIDE the bars
-        side = 1 if i % 2 == 0 else -1  # alternate left/right
-        x_text = v + side * 0.05 * x_rng   # push outside bars
-        # stagger vertically to avoid label-on-label collisions
-        y_text = max_y * (1.12 + 0.05 * (i % 3))
+        # Alternate placement to left/right of tick to prevent overlap
+        side_offset = 0.015 * x_range * (1 if i % 2 == 0 else -1)
+        ha_pos = "left" if i % 2 == 0 else "right"
 
-        # leader line + label (boxed for readability)
-        ax3.annotate(
-            f"P{p}  ${v:,.0f}",
-            xy=(v, y_top + 0.02 * max_y), xycoords="data",
-            xytext=(x_text, y_text), textcoords="data",
-            ha="center", va="bottom", color=colors[p], fontsize=10, fontweight="bold",
-            arrowprops=dict(arrowstyle='-', lw=1.2, color=colors[p]),
-            bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.9),
-            clip_on=False
-        )
+        # Label just outside the bar, tight to the tick
+        ax3.text(v + side_offset, y_val + 0.04 * max_y,
+                 f"P{p}  ${v:,.0f}",
+                 ha=ha_pos, va="bottom",
+                 color=colors[p], fontsize=10, fontweight="bold")
 
-    # Legend (top-right) – percentiles only
+    # Legend (top-right corner)
     handles = [plt.Line2D([0], [0], color=colors[p], lw=3, label=f"P{p}") for p in percentiles]
-    ax3.legend(
-        handles=handles, title="Percentiles",
-        loc="upper right", bbox_to_anchor=(1.0, 1.0),
-        frameon=True, facecolor="white", framealpha=0.9
-    )
+    ax3.legend(handles=handles, title="Percentiles",
+               loc="upper right", bbox_to_anchor=(1.0, 1.0),
+               frameon=True, facecolor="white", framealpha=0.9)
 
-    # Skew/Kurt box – bottom-right so it never collides with legend
+    # Skew/Kurt box anchored all the way in bottom-right corner
     ax3.text(
-        0.98, 0.02, f"Skew: {skew:.2f}\nKurt: {kurt:.2f}",
-        transform=ax3.transAxes, ha="right", va="bottom",
-        fontsize=10, bbox=dict(boxstyle="round", facecolor="white", alpha=0.9)
+        0.985, 0.02,
+        f"Skew: {skew:.2f}\nKurt: {kurt:.2f}",
+        transform=ax3.transAxes,
+        ha="right", va="bottom",
+        fontsize=10,
+        bbox=dict(boxstyle="round,pad=0.25", facecolor="white", alpha=0.9)
     )
 
     plt.tight_layout()
