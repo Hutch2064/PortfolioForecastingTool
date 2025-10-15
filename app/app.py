@@ -152,7 +152,6 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
         "Max Drawdown": max_drawdown_from_rets(rets),
     }
 
-
 def plot_forecasts(port_rets, start_cap, central, paths):
     port_cum = np.exp(port_rets.cumsum()) * start_cap
     last = port_cum.index[-1]
@@ -163,9 +162,6 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     mask = (terminal_vals >= low_cut) & (terminal_vals <= high_cut)
     filtered_paths = paths[mask]
 
-    # ----------------------------
-    # Full Historical + Forecast Plot
-    # ----------------------------
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(port_cum.index, port_cum.values, color="black", lw=2, label="Portfolio Backtest")
     for sim in filtered_paths[:100]:
@@ -177,9 +173,6 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     ax.legend()
     st.pyplot(fig)
 
-    # ----------------------------
-    # Forecast-Only (Zoomed, Reset to Starting Capital)
-    # ----------------------------
     fig2, ax2 = plt.subplots(figsize=(12, 6))
     for sim in filtered_paths[:100]:
         ax2.plot(dates, start_cap * sim / sim[0], color="gray", alpha=0.05)
@@ -190,9 +183,6 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     ax2.legend()
     st.pyplot(fig2)
 
-    # ----------------------------
-    # Percentile Table (Final Clean Version)
-    # ----------------------------
     terminal_vals = paths[:, -1] * start_cap
     percentiles = [5, 25, 50, 75, 95]
     p_values = np.percentile(terminal_vals, percentiles)
@@ -211,26 +201,19 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     <style>
     table.custom {
         border-collapse: collapse !important;
+        border: none !important;
         border-spacing: 0 !important;
         width: auto !important;
-        margin-left: 0 !important;
-        margin-right: 0 !important;
-        border: none !important;
         background: transparent !important;
     }
-    table.custom th, table.custom td {
+    table.custom th, table.custom td, table.custom tr {
         border: none !important;
-        border-top: none !important;
-        border-bottom: none !important;
-        border-left: none !important;
-        border-right: none !important;
+        background: transparent !important;
         box-shadow: none !important;
         outline: none !important;
-        background: transparent !important;
         color: white !important;
         font-size: 15px !important;
         padding: 2px 8px !important;
-        line-height: 1.05 !important;
         text-align: left !important;
     }
     </style>
@@ -253,9 +236,7 @@ def main():
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1_000_000.0, 10_000.0, 1000.0)
     forecast_years = st.selectbox("Forecast Horizon (Years)", [1, 2, 3, 4, 5], index=0)
-
-    backtest_start = st.date_input(
-        "Backtest Start Date",
+    backtest_start = st.date_input("Backtest Start Date",
         value=datetime.date(2000, 1, 1),
         min_value=datetime.date(1980, 1, 1),
         max_value=datetime.date.today()
@@ -265,8 +246,9 @@ def main():
     with col_run:
         run_pressed = st.button("Run")
     with col_val:
-        if 'forecast_val' in st.session_state:
-            st.metric("Forecasted Portfolio Value", f"${st.session_state['forecast_val']:,.2f}")
+        forecast_val = st.session_state.get("forecast_val", None)
+        if forecast_val:
+            st.metric("Forecasted Portfolio Value", f"${forecast_val:,.2f}")
 
     if run_pressed:
         try:
@@ -288,12 +270,10 @@ def main():
             txt2 = st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng = np.random.default_rng(GLOBAL_SEED + i)
-                sims = run_monte_carlo_paths(
-                    residuals, SIMS_PER_SEED, rng, base_mean, total_days, block_length=b_opt
-                )
+                sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean, total_days, block_length=b_opt)
                 all_paths.append(sims)
                 bar2.progress((i + 1) / ENSEMBLE_SEEDS)
-                txt2.text(f"Running forecasts... {int((i + 1) / ENSEMBLE_SEEDS * 100)}%")
+                txt2.text(f"Running forecasts... {int((i + 1)/ENSEMBLE_SEEDS*100)}%")
             bar2.empty()
             txt2.empty()
 
@@ -302,6 +282,7 @@ def main():
             forecast_days = forecast_years * 252
             paths = paths_full[:, :forecast_days]
             final = medoid_full[:forecast_days]
+            st.session_state["forecast_val"] = final[-1] * start_cap
 
             stats = compute_forecast_stats_from_path(final, start_cap, port_rets.index[-1])
             back = {
@@ -311,53 +292,43 @@ def main():
                 "Max Drawdown": max_drawdown_from_rets(port_rets),
             }
 
-            st.session_state['forecast_val'] = final[-1] * start_cap
-
-            # ----------------------------
-            # Results Table (Formatted like Distribution Table)
-            # ----------------------------
-            results_rows = [
+            rows = [
                 ("CAGR", f"{back['CAGR']:.2%}", f"{stats['CAGR']:.2%}"),
                 ("Volatility", f"{back['Volatility']:.2%}", f"{stats['Volatility']:.2%}"),
                 ("Sharpe", f"{back['Sharpe']:.2f}", f"{stats['Sharpe']:.2f}"),
                 ("Max Drawdown", f"{back['Max Drawdown']:.2%}", f"{stats['Max Drawdown']:.2%}")
             ]
 
-            html_results = """
+            html = """
             <style>
             table.results {
                 border-collapse: collapse !important;
-                border-spacing: 0 !important;
-                margin-left: 0 !important;
-                margin-right: 0 !important;
-                width: auto !important;
                 border: none !important;
+                border-spacing: 0 !important;
+                width: auto !important;
                 background: transparent !important;
             }
-            table.results th, table.results td {
+            table.results th, table.results td, table.results tr {
                 border: none !important;
+                background: transparent !important;
                 box-shadow: none !important;
                 outline: none !important;
-                background: transparent !important;
                 color: white !important;
                 font-size: 15px !important;
                 padding: 2px 8px !important;
                 text-align: left !important;
-                line-height: 1.05 !important;
             }
             </style>
             <table class="results">
                 <tr><th>Metric</th><th>Backtest</th><th>Forecast</th></tr>
             """
-            for row in results_rows:
-                html_results += f"<tr><td>{row[0]}</td><td>{row[1]}</td><td>{row[2]}</td></tr>"
-            html_results += "</table>"
+            for row in rows:
+                html += f"<tr><td>{row[0]}</td><td>{row[1]}</td><td>{row[2]}</td></tr>"
+            html += "</table>"
 
             st.subheader("Performance Comparison")
-            st.markdown(html_results, unsafe_allow_html=True)
-
+            st.markdown(html, unsafe_allow_html=True)
             plot_forecasts(port_rets, start_cap, final, paths)
-
         except Exception as e:
             st.error(f"Error: {e}")
 
