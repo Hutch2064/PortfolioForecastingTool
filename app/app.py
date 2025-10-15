@@ -9,7 +9,6 @@ import matplotlib.pyplot as plt
 import streamlit as st
 from typing import List
 import datetime
-from sklearn.metrics import r2_score
 
 warnings.filterwarnings("ignore")
 
@@ -22,9 +21,9 @@ random.seed(GLOBAL_SEED)
 np.random.seed(GLOBAL_SEED)
 
 DEFAULT_START = "2000-01-01"
-ENSEMBLE_SEEDS = 20
-SIMS_PER_SEED = 3000
-FORECAST_DAYS = 252
+ENSEMBLE_SEEDS = 10     # Reduced for runtime efficiency in walk-forward
+SIMS_PER_SEED = 1000
+FORECAST_DAYS = 21      # 1 month ahead (approx. 21 trading days)
 
 # ==========================================================
 # Basic Helpers
@@ -136,37 +135,44 @@ def compute_medoid_path(paths):
     return paths[idx]
 
 # ==========================================================
-# OOS Metrics (Annual)
+# Forecast-Based Walk-Forward OOS Directional Accuracy
 # ==========================================================
-def compute_oos_metrics(port_rets):
-    """Compute annual OOS directional accuracy and cumulative R² on z-scored returns."""
-    annual = port_rets.resample("Y").sum()
-    if len(annual) < 12:
-        return np.nan, np.nan, np.nan, np.nan
+def compute_oos_directional_accuracy_walkforward(prices, weights):
+    """Walk-forward monthly forecast testing using model's own forecast logic."""
+    port_rets = portfolio_log_returns_daily(prices, weights)
+    monthly_returns = port_rets.resample("M").sum()
 
-    preds = []
-    actuals = []
-    for t in range(5, len(annual) - 1):
-        train = annual.iloc[:t]
-        pred = train.mean()
-        preds.append(pred)
-        actuals.append(annual.iloc[t + 1])
-    preds = np.array(preds)
-    actuals = np.array(actuals)
+    predictions, actuals = [], []
+    months = monthly_returns.index
 
-    dir_acc = np.mean(np.sign(preds) == np.sign(actuals))
+    for i in range(12, len(months) - 1):  # start after 1 year of data
+        sub_prices = prices.loc[:months[i]]
+        sub_rets = portfolio_log_returns_daily(sub_prices, weights)
 
-    if len(actuals) > 1:
-        a_z = (actuals - np.mean(actuals)) / np.std(actuals, ddof=0)
-        p_z = (preds - np.mean(preds)) / np.std(preds, ddof=0)
-        ss_res = np.sum((a_z - p_z) ** 2)
-        ss_tot = np.sum((a_z - np.mean(a_z)) ** 2)
-        r2 = 1 - ss_res / ss_tot
-    else:
-        r2 = np.nan
+        mu = sub_rets.mean()
+        sigma = sub_rets.std(ddof=0)
+        base_mean = mu - 0.5 * sigma ** 2
+        residuals = (sub_rets - mu).to_numpy(dtype=np.float32)
+        residuals -= residuals.mean()
+        b_opt = estimate_optimal_block_length(residuals)
 
-    annual_vol = annual.std(ddof=0)
-    return dir_acc, annual_vol, r2, len(annual)
+        all_paths = []
+        for seed in range(ENSEMBLE_SEEDS):
+            rng = np.random.default_rng(GLOBAL_SEED + seed)
+            sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean,
+                                         FORECAST_DAYS, block_length=b_opt)
+            all_paths.append(sims)
+        paths = np.vstack(all_paths)
+        medoid_path = compute_medoid_path(paths)
+
+        forecast_return = np.log(medoid_path[-1] / medoid_path[0])
+        predictions.append(forecast_return)
+        actuals.append(monthly_returns.iloc[i + 1])
+
+    preds = np.array(predictions)
+    acts = np.array(actuals)
+    dir_acc = np.mean(np.sign(preds) == np.sign(acts))
+    return dir_acc, len(preds)
 
 # ==========================================================
 # Stats + Plot
@@ -377,17 +383,15 @@ def main():
             plot_forecasts(port_rets, start_cap, final, paths)
 
             if enable_oos == "Yes":
-                dir_acc, annual_vol, r2, n_obs = compute_oos_metrics(port_rets)
+                dir_acc, n_obs = compute_oos_directional_accuracy_walkforward(prices, weights)
                 oos_html = f"""
                 <h3 style='color:white; font-size:22px; font-weight:700; margin-top:25px;'>
-                    Out-Of-Sample Testing Results (Annual)
+                    Out-Of-Sample Testing Results (Forecast-Based, Monthly)
                 </h3>
                 <table class='results'>
                     <tr><th>OOS Metric</th><th>Value</th></tr>
-                    <tr><td>Directional Accuracy (Annual)</td><td>{dir_acc:.2%}</td></tr>
-                    <tr><td>Cumulative R² (Z-Scored Annual Returns)</td><td>{r2:.3f}</td></tr>
-                    <tr><td>Annual Volatility</td><td>{annual_vol:.4f}</td></tr>
-                    <tr><td>Sample Size (Years)</td><td>{n_obs}</td></tr>
+                    <tr><td>Directional Accuracy (Forecast-Based)</td><td>{dir_acc:.2%}</td></tr>
+                    <tr><td>Sample Size (Months)</td><td>{n_obs}</td></tr>
                 </table>
                 """
                 st.markdown(oos_html, unsafe_allow_html=True)
