@@ -191,7 +191,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     st.pyplot(fig2)
 
     # ----------------------------
-    # Histogram of Terminal Portfolio Values (Refined Academic Version)
+    # Histogram of Terminal Portfolio Values (Polished Academic Version)
     # ----------------------------
     fig3, ax3 = plt.subplots(figsize=(10, 5))
     terminal_vals = paths[:, -1] * start_cap
@@ -207,7 +207,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     kurt = (np.mean((terminal_vals - mean_val) ** 4) /
             np.std(terminal_vals) ** 4) - 3
 
-    # Plot histogram and capture bin data
+    # Plot histogram
     counts, bins, patches = ax3.hist(
         terminal_vals, bins=60, color="lightgray", edgecolor="black", alpha=0.6
     )
@@ -219,42 +219,51 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     # Define colors for percentiles
     colors = {5: "red", 25: "orange", 50: "blue", 75: "green", 95: "darkgreen"}
 
-    # Add tick marks at top of respective bars and place labels neatly
+    # Add tick marks connected to bar tops and labels outside histogram
+    max_y = max(counts)
+    x_min, x_max = ax3.get_xlim()
+    range_x = x_max - x_min
+
     for i, (p, v) in enumerate(zip(percentiles, p_values)):
-        # Find bin where percentile value falls
+        # Find bin for percentile
         bin_idx = np.searchsorted(bins, v) - 1
         if 0 <= bin_idx < len(counts):
             y_val = counts[bin_idx]
         else:
             y_val = 0
 
-        # Draw tick mark connected to top of bar
-        ax3.plot([v, v], [y_val - 0.02 * max(counts), y_val], color=colors[p], lw=3)
+        # Draw short tick at top of bar
+        ax3.plot([v, v], [y_val - 0.015 * max_y, y_val + 0.015 * max_y],
+                 color=colors[p], lw=3, solid_capstyle="round")
 
-        # Smart horizontal positioning (alternate sides)
-        align = "left" if i % 2 == 0 else "right"
-        x_offset = 0.01 * (bins[-1] - bins[0]) * (1 if align == "left" else -1)
+        # Determine side placement (alternate left/right)
+        if i % 2 == 0:
+            x_text = v + 0.015 * range_x
+            ha_text = "left"
+        else:
+            x_text = v - 0.015 * range_x
+            ha_text = "right"
 
-        # Label placement: slightly above tick
-        ax3.text(v + x_offset, y_val + 0.03 * max(counts),
+        # Place text slightly above bar height, outside the histogram
+        ax3.text(x_text, y_val + 0.04 * max_y,
                  f"P{p}  ${v:,.0f}",
-                 ha=align, va="bottom", color=colors[p],
+                 ha=ha_text, va="bottom", color=colors[p],
                  fontsize=10, fontweight="bold")
 
-    # Add legend (top right) and skew/kurtosis box below it
+    # Legend: top right, slightly lowered to avoid overlap
     handles = [
         plt.Line2D([0], [0], color=colors[p], lw=3, label=f"P{p}")
         for p in percentiles
     ]
     legend = ax3.legend(
         handles=handles, title="Percentiles",
-        loc="upper right", frameon=True,
-        facecolor="white", framealpha=0.9
+        loc="upper right", bbox_to_anchor=(1.0, 0.98),
+        frameon=True, facecolor="white", framealpha=0.9
     )
 
-    # Add skewness & kurtosis box below legend
+    # Skewness & kurtosis box under legend (aligned right)
     textstr = f"Skewness: {skew:.2f}\nKurtosis: {kurt:.2f}"
-    ax3.text(0.98, 0.78, textstr,
+    ax3.text(0.975, 0.73, textstr,
              transform=ax3.transAxes,
              fontsize=10, verticalalignment="top",
              horizontalalignment="right",
