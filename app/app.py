@@ -191,45 +191,46 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     st.pyplot(fig2)
 
     # ----------------------------
-    # Percentile Table (Replaces Histogram)
+    # Percentile Table (Fixed Return Calculation + Clean Styling)
     # ----------------------------
     terminal_vals = paths[:, -1] * start_cap
     percentiles = [5, 25, 50, 75, 95]
     p_values = np.percentile(terminal_vals, percentiles)
 
-    # Compute summary stats
+    # Compute CVaR (Expected Shortfall beyond 5th percentile)
+    cvar_cutoff = np.percentile(terminal_vals, 5)
+    cvar = terminal_vals[terminal_vals <= cvar_cutoff].mean()
+
+    # Correct return calculation relative to starting capital
+    p_returns = (p_values / start_cap) - 1
+
+    # Build dataframe (insert CVaR as first row)
+    df_percentiles = pd.DataFrame({
+        "Percentile": ["CVaR (5%)"] + [f"P{p}" for p in percentiles],
+        "Terminal Value ($)": [f"${cvar:,.0f}"] + [f"${v:,.0f}" for v in p_values],
+        "Return (%)": [f"{(cvar / start_cap - 1) * 100:.2f}%"] + [f"{r * 100:.2f}%" for r in p_returns],
+    })
+
+    # Compute skew and kurtosis for display below the table
     mean_val = np.mean(terminal_vals)
     std_val = np.std(terminal_vals)
     skew = np.mean(((terminal_vals - mean_val) / (std_val + 1e-12)) ** 3)
     kurt = np.mean(((terminal_vals - mean_val) / (std_val + 1e-12)) ** 4) - 3
 
-    # Compute CVaR (Expected Shortfall beyond 5th percentile)
-    cvar_cutoff = np.percentile(terminal_vals, 5)
-    cvar = terminal_vals[terminal_vals <= cvar_cutoff].mean()
+    # Display clean borderless table
+    st.subheader("Forecast Distribution Summary (Percentiles)")
+    st.dataframe(df_percentiles.style.hide(axis="index").set_properties(**{
+        'border': '0px solid transparent',
+        'background-color': 'rgba(0,0,0,0)',
+        'color': 'white',
+        'font-size': '15px'
+    }), use_container_width=True)
 
-    # Infer forecast horizon (years)
-    forecast_years = len(central) / 252
-
-    # Compute annualized returns for each percentile
-    p_returns = (p_values / start_cap) ** (1 / forecast_years) - 1
-
-    # Build dataframe
-    df_percentiles = pd.DataFrame({
-        "Percentile": [f"P{p}" for p in percentiles],
-        "Terminal Value ($)": [f"${v:,.0f}" for v in p_values],
-        "Return (%)": [f"{r * 100:.2f}%" for r in p_returns],
-    })
-
-    # Display summary metrics above table
+    # Display skewness and kurtosis below table
     st.markdown(f"""
     **Skewness:** {skew:.2f}  
-    **Kurtosis:** {kurt:.2f}  
-    **CVaR (5%):** ${cvar:,.0f}
+    **Kurtosis:** {kurt:.2f}
     """)
-
-    # Display table
-    st.subheader("Forecast Distribution Summary (Percentiles)")
-    st.table(df_percentiles)
 
 # ==========================================================
 # Streamlit App
