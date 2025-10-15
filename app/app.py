@@ -191,46 +191,43 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     st.pyplot(fig2)
 
     # ----------------------------
-    # Percentile Table (Fixed Return Calculation + Clean Styling)
+    # Percentile Table (No Index + Fixed Return Math)
     # ----------------------------
     terminal_vals = paths[:, -1] * start_cap
     percentiles = [5, 25, 50, 75, 95]
     p_values = np.percentile(terminal_vals, percentiles)
 
-    # Compute CVaR (Expected Shortfall beyond 5th percentile)
+    # CVaR (Expected Shortfall beyond 5th percentile)
     cvar_cutoff = np.percentile(terminal_vals, 5)
     cvar = terminal_vals[terminal_vals <= cvar_cutoff].mean()
 
     # Correct return calculation relative to starting capital
     p_returns = (p_values / start_cap) - 1
 
-    # Build dataframe (insert CVaR as first row)
-    df_percentiles = pd.DataFrame({
-        "Percentile": ["CVaR (5%)"] + [f"P{p}" for p in percentiles],
-        "Terminal Value ($)": [f"${cvar:,.0f}"] + [f"${v:,.0f}" for v in p_values],
-        "Return (%)": [f"{(cvar / start_cap - 1) * 100:.2f}%"] + [f"{r * 100:.2f}%" for r in p_returns],
-    })
+    # Combine into rows (CVaR first)
+    rows = [
+        ("CVaR (5%)", f"${cvar:,.0f}", f"{(cvar / start_cap - 1) * 100:.2f}%")
+    ] + [
+        (f"P{p}", f"${v:,.0f}", f"{r * 100:.2f}%")
+        for p, v, r in zip(percentiles, p_values, p_returns)
+    ]
 
-    # Compute skew and kurtosis for display below the table
+    # Convert to Markdown table manually (no index, no borders)
+    table_md = "| Percentile | Terminal Value ($) | Return (%) |\n"
+    table_md += "|:------------|:------------------:|:-----------:|\n"
+    for row in rows:
+        table_md += f"| {row[0]} | {row[1]} | {row[2]} |\n"
+
+    # Compute skewness and kurtosis
     mean_val = np.mean(terminal_vals)
     std_val = np.std(terminal_vals)
     skew = np.mean(((terminal_vals - mean_val) / (std_val + 1e-12)) ** 3)
     kurt = np.mean(((terminal_vals - mean_val) / (std_val + 1e-12)) ** 4) - 3
 
-    # Display clean borderless table
+    # Display table and metrics
     st.subheader("Forecast Distribution Summary (Percentiles)")
-    st.dataframe(df_percentiles.style.hide(axis="index").set_properties(**{
-        'border': '0px solid transparent',
-        'background-color': 'rgba(0,0,0,0)',
-        'color': 'white',
-        'font-size': '15px'
-    }), use_container_width=True)
-
-    # Display skewness and kurtosis below table
-    st.markdown(f"""
-    **Skewness:** {skew:.2f}  
-    **Kurtosis:** {kurt:.2f}
-    """)
+    st.markdown(table_md)
+    st.markdown(f"**Skewness:** {skew:.2f}  **Kurtosis:** {kurt:.2f}")
 
 # ==========================================================
 # Streamlit App
