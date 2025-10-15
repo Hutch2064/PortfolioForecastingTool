@@ -206,15 +206,22 @@ def plot_forecasts(port_rets, start_cap, central, paths):
         width: auto !important;
         background: transparent !important;
     }
-    table.custom th, table.custom td, table.custom tr {
+    table.custom th, table.custom td {
         border: none !important;
         background: transparent !important;
         box-shadow: none !important;
         outline: none !important;
         color: white !important;
+        font-family: 'Helvetica Neue', sans-serif !important;
         font-size: 15px !important;
-        padding: 2px 8px !important;
+        padding: 3px 10px !important;
         text-align: left !important;
+    }
+    table.custom th {
+        font-weight: 700 !important;
+    }
+    table.custom td {
+        font-weight: 400 !important;
     }
     </style>
     <table class="custom">
@@ -265,7 +272,7 @@ def main():
     if "forecast_val" in st.session_state and not run_pressed:
         with col_val:
             st.markdown(
-                f"<span style='font-size:16px; color:#FFD700; font-weight:600;'>"
+                f"<span style='font-size:15px; color:#FFD700; font-weight:600;'>"
                 f"Forecasted Portfolio Value ${st.session_state['forecast_val']:,.2f}</span>",
                 unsafe_allow_html=True
             )
@@ -312,8 +319,10 @@ def main():
                 "Max Drawdown": max_drawdown_from_rets(port_rets),
             }
 
-            # Display forecasted portfolio value (classic style above comparison)
-            st.metric("Forecasted Portfolio Value", f"${final[-1] * start_cap:,.2f}")
+            st.markdown(
+                f"<p style='color:white; font-size:15px; font-weight:bold;'>Forecasted Portfolio Value <span style='font-weight:400;'>${final[-1] * start_cap:,.2f}</span></p>",
+                unsafe_allow_html=True
+            )
 
             rows = [
                 ("CAGR", f"{back['CAGR']:.2%}", f"{stats['CAGR']:.2%}"),
@@ -331,15 +340,22 @@ def main():
                 width: auto !important;
                 background: transparent !important;
             }
-            table.results th, table.results td, table.results tr {
+            table.results th, table.results td {
                 border: none !important;
                 background: transparent !important;
                 box-shadow: none !important;
                 outline: none !important;
                 color: white !important;
+                font-family: 'Helvetica Neue', sans-serif !important;
                 font-size: 15px !important;
-                padding: 2px 8px !important;
+                padding: 3px 10px !important;
                 text-align: left !important;
+            }
+            table.results th {
+                font-weight: 700 !important;
+            }
+            table.results td {
+                font-weight: 400 !important;
             }
             </style>
             <table class="results">
