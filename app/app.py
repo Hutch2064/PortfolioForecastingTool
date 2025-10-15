@@ -22,7 +22,7 @@ np.random.seed(GLOBAL_SEED)
 
 DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 10
-SIMS_PER_SEED = 5000
+SIMS_PER_SEED = 10000
 FORECAST_DAYS = 252
 
 # ==========================================================
@@ -161,7 +161,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     dates = pd.date_range(start=last, periods=len(central), freq="B")
 
     terminal_vals = paths[:, -1]
-    low_cut, high_cut = np.percentile(terminal_vals, [25, 75])
+    low_cut, high_cut = np.percentile(terminal_vals, [16, 84])
     mask = (terminal_vals >= low_cut) & (terminal_vals <= high_cut)
     filtered_paths = paths[mask]
 
@@ -193,15 +193,15 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     st.pyplot(fig)
 
     # ----------------------------
-    # Forecast-Only (Zoomed) Plot
+    # Forecast-Only (Zoomed) Plot — RESET BASELINE
     # ----------------------------
     fig2, ax2 = plt.subplots(figsize=(12, 6))
     for sim in filtered_paths[:100]:
-        ax2.plot(dates, port_cum.iloc[-1] * sim / sim[0], color="gray", alpha=0.05)
-    ax2.plot(dates, port_cum.iloc[-1] * central / central[0],
+        ax2.plot(dates, start_cap * sim / sim[0], color="gray", alpha=0.05)
+    ax2.plot(dates, start_cap * central / central[0],
              color="red", lw=2, label="Forecast")
 
-    ax2.set_title("Forecast (Horizon View)")
+    ax2.set_title("Forecast (Horizon View, Reset to Starting Capital)")
     ax2.set_ylabel("Portfolio Value ($)")
     ax2.legend()
     st.pyplot(fig2)
@@ -216,9 +216,8 @@ def main():
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1_000_000.0, 10_000.0, 1000.0)
     forecast_years = st.selectbox("Forecast Horizon (Years)", [1, 2, 3, 4, 5], index=0)
     
-    # Free-form backtest start date (user can pick any date)
     backtest_start = st.date_input(
-        "Start Date",
+        "Backtest Start Date",
         value=datetime.date(2000, 1, 1),
         min_value=datetime.date(1980, 1, 1),
         max_value=datetime.date.today()
