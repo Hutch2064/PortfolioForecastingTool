@@ -232,7 +232,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
             background-color: transparent !important;
             color: white !important;
             font-size: 15px !important;
-            padding: 2px 10px !important;
+            padding: 2px 6px !important;
             line-height: 1.1 !important;
         }
         thead, tbody, tr {
@@ -253,7 +253,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     std_val = np.std(terminal_vals)
 
     # Display results
-    st.subheader("Forecast Distribution Summary (Percentiles)")
+    st.subheader("Forecast Distribution")
     st.markdown(table_md, unsafe_allow_html=True)
 
 # ==========================================================
