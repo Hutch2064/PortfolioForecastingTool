@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import streamlit as st
 from typing import List
 import datetime
+from sklearn.metrics import r2_score
 
 warnings.filterwarnings("ignore")
 
@@ -138,6 +139,23 @@ def compute_medoid_path(paths):
     return paths[idx]
 
 # ==========================================================
+# OOS Testing
+# ==========================================================
+def rolling_oos_test(port_rets):
+    """Compute rolling monthly directional accuracy and quarterly R²."""
+    monthly = port_rets.resample("M").sum()
+    quarterly = port_rets.resample("Q").sum()
+    if len(monthly) < 24:
+        return np.nan, np.nan
+    preds = monthly.shift(1).dropna()
+    actual = monthly.loc[preds.index]
+    dir_acc = (np.sign(preds) == np.sign(actual)).mean()
+    q_preds = quarterly.shift(1).dropna()
+    q_actual = quarterly.loc[q_preds.index]
+    r2 = r2_score(q_actual, q_preds)
+    return dir_acc, r2
+
+# ==========================================================
 # Stats + Plot
 # ==========================================================
 def compute_forecast_stats_from_path(path, start_cap, last_date):
@@ -173,61 +191,6 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     ax.legend()
     st.pyplot(fig)
 
-    fig2, ax2 = plt.subplots(figsize=(12, 6))
-    for sim in filtered_paths[:100]:
-        ax2.plot(dates, start_cap * sim / sim[0], color="gray", alpha=0.05)
-    ax2.plot(dates, start_cap * central / central[0],
-             color="red", lw=2, label="Forecast")
-    ax2.set_title("Forecast (Horizon View)")
-    ax2.set_ylabel("Portfolio Value ($)")
-    ax2.legend()
-    st.pyplot(fig2)
-
-    terminal_vals = paths[:, -1] * start_cap
-    percentiles = [5, 25, 50, 75, 95]
-    p_values = np.percentile(terminal_vals, percentiles)
-    cvar_cutoff = np.percentile(terminal_vals, 5)
-    cvar = terminal_vals[terminal_vals <= cvar_cutoff].mean()
-    p_returns = (p_values / start_cap) - 1
-
-    rows = [
-        ("CVaR", f"${cvar:,.0f}", f"{(cvar / start_cap - 1) * 100:.2f}%")
-    ] + [
-        (f"P{p}", f"${v:,.0f}", f"{r * 100:.2f}%")
-        for p, v, r in zip(percentiles, p_values, p_returns)
-    ]
-
-    html = """
-    <style>
-    table.custom, table.custom tr, table.custom th, table.custom td {
-        border: none !important;
-        border-collapse: collapse !important;
-        border-spacing: 0 !important;
-        background: transparent !important;
-        box-shadow: none !important;
-        outline: none !important;
-    }
-    table.custom th, table.custom td {
-        color: white !important;
-        font-family: 'Helvetica Neue', sans-serif !important;
-        font-size: 15px !important;
-        padding: 3px 10px !important;
-        text-align: left !important;
-    }
-    table.custom th { font-weight: 700 !important; }
-    table.custom td { font-weight: 400 !important; }
-    tr, td, th { border: none !important; border-bottom: none !important; }
-    </style>
-    <table class="custom">
-        <tr><th>Percentile</th><th>Terminal Value ($)</th><th>Return (%)</th></tr>
-    """
-    for row in rows:
-        html += f"<tr><td>{row[0]}</td><td>{row[1]}</td><td>{row[2]}</td></tr>"
-    html += "</table>"
-
-    st.subheader("Forecast Distribution")
-    st.markdown(html, unsafe_allow_html=True)
-
 # ==========================================================
 # Streamlit App
 # ==========================================================
@@ -237,6 +200,7 @@ def main():
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1_000_000.0, 10_000.0, 1000.0)
     forecast_years = st.selectbox("Forecast Horizon (Years)", [1, 2, 3, 4, 5], index=0)
+    enable_oos = st.selectbox("Enable OOS Testing?", ["No", "Yes"], index=0)
     backtest_start = st.date_input("Backtest Start Date",
         value=datetime.date(2000, 1, 1),
         min_value=datetime.date(1980, 1, 1),
@@ -341,6 +305,18 @@ def main():
 
             st.subheader("Performance Comparison")
             st.markdown(html, unsafe_allow_html=True)
+
+            if enable_oos == "Yes":
+                dir_acc, r2 = rolling_oos_test(port_rets)
+                oos_html = f"""
+                <table class='results'>
+                    <tr><th>OOS Metric</th><th>Value</th></tr>
+                    <tr><td>Directional Accuracy (Monthly)</td><td>{dir_acc:.2%}</td></tr>
+                    <tr><td>R² (Quarterly)</td><td>{r2:.3f}</td></tr>
+                </table>
+                """
+                st.markdown(oos_html, unsafe_allow_html=True)
+
             plot_forecasts(port_rets, start_cap, final, paths)
         except Exception as e:
             st.error(f"Error: {e}")
