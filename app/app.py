@@ -240,10 +240,10 @@ def plot_forecasts(port_rets, start_cap, central, paths):
 
         # Custom placement for P5 and P75
         if p == 5:
-            side_offset = -0.035 * x_range  # shift left
+            side_offset = -0.02 * x_range  # shift left
             ha_pos = "right"
         elif p == 75:
-            side_offset = 0.035 * x_range   # shift right
+            side_offset = 0.02 * x_range   # shift right
             ha_pos = "left"
         elif p in [25, 95]:
             side_offset *= (1 if i % 2 == 0 else -1)
@@ -253,7 +253,6 @@ def plot_forecasts(port_rets, start_cap, central, paths):
                  f"P{p}  ${v:,.0f}",
                  ha=ha_pos, va="bottom",
                  color=colors[p], fontsize=10, fontweight="bold",
-                 bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.9),
                  clip_on=False)
 
     # Legend (top-right corner)
