@@ -256,7 +256,7 @@ def main():
     weights_str = st.text_input("Weights", "0.6,0.4")
     start_cap = st.number_input("Starting Value ($)", 1000.0, 1_000_000.0, 10_000.0, 1000.0)
     forecast_years = st.selectbox("Forecast Horizon (Years)", [1, 2, 3, 4, 5], index=0)
-    enable_oos = st.selectbox("Enable OOS Testing?", ["No", "Yes"], index=0)
+    enable_oos = st.selectbox("Out-Of-Sample Testing", ["No", "Yes"], index=0)
     backtest_start = st.date_input("Backtest Start Date",
         value=datetime.date(2000, 1, 1),
         min_value=datetime.date(1980, 1, 1),
