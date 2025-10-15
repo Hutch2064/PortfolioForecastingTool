@@ -142,16 +142,19 @@ def compute_medoid_path(paths):
 # OOS Metrics
 # ==========================================================
 def compute_oos_metrics(port_rets):
-    """Compute monthly directional accuracy, MAE, and RMSE."""
+    """Compute monthly directional accuracy, normalized MAE, and RMSE."""
     monthly = port_rets.resample("M").sum()
     if len(monthly) < 24:
-        return np.nan, np.nan, np.nan
+        return np.nan, np.nan, np.nan, np.nan
     preds = monthly.shift(1).dropna()
     actual = monthly.loc[preds.index]
     dir_acc = (np.sign(preds) == np.sign(actual)).mean()
     mae = mean_absolute_error(actual, preds)
     rmse = np.sqrt(mean_squared_error(actual, preds))
-    return dir_acc, mae, rmse
+    monthly_vol = monthly.std(ddof=0)
+    norm_mae = mae / monthly_vol if monthly_vol > 0 else np.nan
+    norm_rmse = rmse / monthly_vol if monthly_vol > 0 else np.nan
+    return dir_acc, norm_mae, norm_rmse, monthly_vol
 
 # ==========================================================
 # Stats + Plot
@@ -362,14 +365,15 @@ def main():
 
             # Add OOS table below all if enabled
             if enable_oos == "Yes":
-                dir_acc, mae, rmse = compute_oos_metrics(port_rets)
+                dir_acc, norm_mae, norm_rmse, monthly_vol = compute_oos_metrics(port_rets)
                 oos_html = f"""
                 <br><br>
                 <table class='results'>
                     <tr><th>OOS Metric</th><th>Value</th></tr>
                     <tr><td>Directional Accuracy (Monthly)</td><td>{dir_acc:.2%}</td></tr>
-                    <tr><td>Mean Absolute Error (MAE)</td><td>{mae:.6f}</td></tr>
-                    <tr><td>Root Mean Squared Error (RMSE)</td><td>{rmse:.6f}</td></tr>
+                    <tr><td>Normalized MAE (MAE / Monthly Vol)</td><td>{norm_mae:.3f}</td></tr>
+                    <tr><td>Normalized RMSE (RMSE / Monthly Vol)</td><td>{norm_rmse:.3f}</td></tr>
+                    <tr><td>Monthly Volatility</td><td>{monthly_vol:.4f}</td></tr>
                 </table>
                 """
                 st.markdown(oos_html, unsafe_allow_html=True)
