@@ -22,7 +22,7 @@ np.random.seed(GLOBAL_SEED)
 
 DEFAULT_START = "2000-01-01"
 ENSEMBLE_SEEDS = 20
-SIMS_PER_SEED = 5000
+SIMS_PER_SEED = 3000
 FORECAST_DAYS = 252
 
 # ==========================================================
