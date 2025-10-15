@@ -191,7 +191,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     st.pyplot(fig2)
 
     # ----------------------------
-    # Percentile Table (Left-Aligned, No Borders)
+    # Percentile Table (Final Clean Version)
     # ----------------------------
     terminal_vals = paths[:, -1] * start_cap
     percentiles = [5, 25, 50, 75, 95]
@@ -210,24 +210,42 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     html = """
     <style>
     table.custom {
-        border-collapse: collapse;
-        width: auto;
-        margin-left: 0 !important;       /* left-align table */
-        margin-right: 0 !important;      /* prevent centering */
+        border-collapse: collapse !important;
+        border-spacing: 0 !important;
+        width: auto !important;
+        margin-left: 0 !important;
+        margin-right: 0 !important;
         border: none !important;
+        background: transparent !important;
     }
     table.custom th, table.custom td {
-        border: none !important;          /* remove all borders */
-        border-bottom: none !important;   /* remove faint horizontal lines */
+        border: none !important;
+        border-top: none !important;
+        border-bottom: none !important;
+        border-left: none !important;
+        border-right: none !important;
+        box-shadow: none !important;
+        outline: none !important;
+        background: transparent !important;
+        color: white !important;
+        font-size: 15px !important;
         padding: 2px 8px !important;
         line-height: 1.05 !important;
-        color: white !important;
-        background: transparent !important;
-        font-size: 15px !important;
-        text-align: left !important;      /* left-align columns */
+        text-align: left !important;
     }
-    table.custom th {
-        font-weight: 600 !important;
+    table.custom tr {
+        border: none !important;
+        border-bottom: none !important;
+        box-shadow: none !important;
+        outline: none !important;
+        background: transparent !important;
+    }
+    table.custom thead, table.custom tbody {
+        border: none !important;
+        border-bottom: none !important;
+        box-shadow: none !important;
+        outline: none !important;
+        background: transparent !important;
     }
     </style>
     <table class="custom">
