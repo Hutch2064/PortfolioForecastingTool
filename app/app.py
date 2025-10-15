@@ -199,33 +199,24 @@ def plot_forecasts(port_rets, start_cap, central, paths):
 
     html = """
     <style>
-    table.custom {
+    table.custom, table.custom tr, table.custom th, table.custom td {
+        border: none !important;
         border-collapse: collapse !important;
-        border: none !important;
         border-spacing: 0 !important;
-        width: auto !important;
-        background: transparent !important;
-    }
-    table.custom th, table.custom td {
-        border: none !important;
         background: transparent !important;
         box-shadow: none !important;
         outline: none !important;
+    }
+    table.custom th, table.custom td {
         color: white !important;
         font-family: 'Helvetica Neue', sans-serif !important;
         font-size: 15px !important;
         padding: 3px 10px !important;
         text-align: left !important;
     }
-    table.custom th {
-        font-weight: 700 !important;
-    }
-    table.custom td {
-        font-weight: 400 !important;
-    }
-    tr, td, th {
-        border-bottom: none !important;
-    }
+    table.custom th { font-weight: 700 !important; }
+    table.custom td { font-weight: 400 !important; }
+    tr, td, th { border: none !important; border-bottom: none !important; }
     </style>
     <table class="custom">
         <tr><th>Percentile</th><th>Terminal Value ($)</th><th>Return (%)</th></tr>
@@ -322,33 +313,24 @@ def main():
 
             html = """
             <style>
-            table.results {
+            table.results, table.results tr, table.results th, table.results td {
+                border: none !important;
                 border-collapse: collapse !important;
-                border: none !important;
                 border-spacing: 0 !important;
-                width: auto !important;
-                background: transparent !important;
-            }
-            table.results th, table.results td {
-                border: none !important;
                 background: transparent !important;
                 box-shadow: none !important;
                 outline: none !important;
+            }
+            table.results th, table.results td {
                 color: white !important;
                 font-family: 'Helvetica Neue', sans-serif !important;
                 font-size: 15px !important;
                 padding: 3px 10px !important;
                 text-align: left !important;
             }
-            table.results th {
-                font-weight: 700 !important;
-            }
-            table.results td {
-                font-weight: 400 !important;
-            }
-            tr, td, th {
-                border-bottom: none !important;
-            }
+            table.results th { font-weight: 700 !important; }
+            table.results td { font-weight: 400 !important; }
+            tr, td, th { border: none !important; border-bottom: none !important; }
             </style>
             <table class="results">
                 <tr><th>Metric</th><th>Backtest</th><th>Forecast</th></tr>
