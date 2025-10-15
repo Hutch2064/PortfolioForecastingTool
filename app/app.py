@@ -139,18 +139,27 @@ def compute_medoid_path(paths):
     return paths[idx]
 
 # ==========================================================
-# OOS Metrics
+# Rolling OOS Metrics
 # ==========================================================
 def compute_oos_metrics(port_rets):
-    """Compute monthly directional accuracy, normalized MAE, and RMSE."""
+    """Compute rolling 5-year (60-month) OOS directional accuracy and normalized errors."""
     monthly = port_rets.resample("M").sum()
-    if len(monthly) < 24:
+    if len(monthly) < 120:  # need at least 10 years (5 train + 5 test)
         return np.nan, np.nan, np.nan, np.nan
-    preds = monthly.shift(1).dropna()
-    actual = monthly.loc[preds.index]
-    dir_acc = (np.sign(preds) == np.sign(actual)).mean()
-    mae = mean_absolute_error(actual, preds)
-    rmse = np.sqrt(mean_squared_error(actual, preds))
+
+    preds = []
+    actuals = []
+    for t in range(60, len(monthly) - 1):  # start after 5 years
+        train = monthly.iloc[t-60:t]
+        pred = train.mean()  # forecast next month as mean of prior 5 years
+        preds.append(pred)
+        actuals.append(monthly.iloc[t+1])
+    preds = np.array(preds)
+    actuals = np.array(actuals)
+
+    dir_acc = np.mean(np.sign(preds) == np.sign(actuals))
+    mae = mean_absolute_error(actuals, preds)
+    rmse = np.sqrt(mean_squared_error(actuals, preds))
     monthly_vol = monthly.std(ddof=0)
     norm_mae = mae / monthly_vol if monthly_vol > 0 else np.nan
     norm_rmse = rmse / monthly_vol if monthly_vol > 0 else np.nan
@@ -363,11 +372,13 @@ def main():
             st.markdown(html, unsafe_allow_html=True)
             plot_forecasts(port_rets, start_cap, final, paths)
 
-            # Add OOS table below all if enabled
+            # Add OOS table with header if enabled
             if enable_oos == "Yes":
                 dir_acc, norm_mae, norm_rmse, monthly_vol = compute_oos_metrics(port_rets)
                 oos_html = f"""
-                <br><br>
+                <h3 style='color:white; font-size:22px; font-weight:700; margin-top:25px;'>
+                    Out-Of-Sample Testing Results
+                </h3>
                 <table class='results'>
                     <tr><th>OOS Metric</th><th>Value</th></tr>
                     <tr><td>Directional Accuracy (Monthly)</td><td>{dir_acc:.2%}</td></tr>
