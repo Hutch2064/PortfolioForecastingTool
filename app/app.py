@@ -185,7 +185,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
         ax2.plot(dates, start_cap * sim / sim[0], color="gray", alpha=0.05)
     ax2.plot(dates, start_cap * central / central[0],
              color="red", lw=2, label="Forecast")
-    ax2.set_title("Forecast (Horizon View, Reset to Starting Capital)")
+    ax2.set_title("Forecast (Horizon View)")
     ax2.set_ylabel("Portfolio Value ($)")
     ax2.legend()
     st.pyplot(fig2)
@@ -227,7 +227,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     # Display table and metrics
     st.subheader("Forecast Distribution Summary (Percentiles)")
     st.markdown(table_md)
-    st.markdown(f"**Skewness:** {skew:.2f}  **Kurtosis:** {kurt:.2f}")
+    st.markdown(f"**Skewness:** {skew:.2f}**Kurtosis:** {kurt:.2f}")
 
 # ==========================================================
 # Streamlit App
