@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import streamlit as st
 from typing import List
 import datetime
-from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score  # <-- Added r2_score
 
 warnings.filterwarnings("ignore")
 
@@ -145,7 +145,7 @@ def compute_oos_metrics(port_rets):
     """Compute rolling 5-year (60-month) OOS directional accuracy and normalized errors."""
     monthly = port_rets.resample("M").sum()
     if len(monthly) < 120:  # need at least 10 years (5 train + 5 test)
-        return np.nan, np.nan, np.nan, np.nan
+        return np.nan, np.nan, np.nan, np.nan, np.nan
 
     preds = []
     actuals = []
@@ -160,10 +160,11 @@ def compute_oos_metrics(port_rets):
     dir_acc = np.mean(np.sign(preds) == np.sign(actuals))
     mae = mean_absolute_error(actuals, preds)
     rmse = np.sqrt(mean_squared_error(actuals, preds))
+    r2 = r2_score(actuals, preds)  # <-- Added R² calculation
     monthly_vol = monthly.std(ddof=0)
     norm_mae = mae / monthly_vol if monthly_vol > 0 else np.nan
     norm_rmse = rmse / monthly_vol if monthly_vol > 0 else np.nan
-    return dir_acc, norm_mae, norm_rmse, monthly_vol
+    return dir_acc, norm_mae, norm_rmse, monthly_vol, r2
 
 # ==========================================================
 # Stats + Plot
@@ -374,7 +375,7 @@ def main():
 
             # Add OOS table with header if enabled
             if enable_oos == "Yes":
-                dir_acc, norm_mae, norm_rmse, monthly_vol = compute_oos_metrics(port_rets)
+                dir_acc, norm_mae, norm_rmse, monthly_vol, r2 = compute_oos_metrics(port_rets)
                 oos_html = f"""
                 <h3 style='color:white; font-size:22px; font-weight:700; margin-top:25px;'>
                     Out-Of-Sample Testing Results
@@ -384,6 +385,7 @@ def main():
                     <tr><td>Directional Accuracy (Monthly)</td><td>{dir_acc:.2%}</td></tr>
                     <tr><td>Normalized MAE (MAE / Monthly Vol)</td><td>{norm_mae:.3f}</td></tr>
                     <tr><td>Normalized RMSE (RMSE / Monthly Vol)</td><td>{norm_rmse:.3f}</td></tr>
+                    <tr><td>R² (Goodness of Fit)</td><td>{r2:.3f}</td></tr>
                     <tr><td>Monthly Volatility</td><td>{monthly_vol:.4f}</td></tr>
                 </table>
                 """
