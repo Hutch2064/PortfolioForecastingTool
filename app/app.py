@@ -204,7 +204,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     mean_val = np.mean(terminal_vals)
     std_val = np.std(terminal_vals)
     skew = np.mean(((terminal_vals - mean_val) / (std_val + 1e-12)) ** 3)
-    kurt = np.mean(((terminal_vals - mean_val) / (std_val + 1e-12)) ** 4) - 3
+    Kurtosis = np.mean(((terminal_vals - mean_val) / (std_val + 1e-12)) ** 4) - 3
 
     # Histogram + bin info
     counts, bins, patches = ax3.hist(
@@ -254,7 +254,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     # Skew/Kurt box anchored all the way in bottom-right corner
     ax3.text(
         0.985, 0.02,
-        f"Skew: {skew:.2f}\nKurt: {kurt:.2f}",
+        f"Skew: {skew:.2f}\nKurtosis: {Kurtosis:.2f}",
         transform=ax3.transAxes,
         ha="right", va="bottom",
         fontsize=10,
