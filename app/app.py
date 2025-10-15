@@ -191,31 +191,58 @@ def plot_forecasts(port_rets, start_cap, central, paths):
     st.pyplot(fig2)
 
     # ----------------------------
-    # Histogram of Terminal Portfolio Values
+    # Histogram of Terminal Portfolio Values (Clean Academic Version)
     # ----------------------------
     fig3, ax3 = plt.subplots(figsize=(10, 5))
     terminal_vals = paths[:, -1] * start_cap
-    percentiles = [1, 5, 25, 50, 75, 95, 99]
+
+    # Define key percentiles
+    percentiles = [5, 25, 50, 75, 95]
     p_values = np.percentile(terminal_vals, percentiles)
-    ax3.hist(terminal_vals, bins=60, color="lightgray", edgecolor="black", alpha=0.8)
+
+    # Compute skewness and kurtosis
+    mean_val = np.mean(terminal_vals)
+    skew = (np.mean((terminal_vals - mean_val) ** 3) /
+            np.std(terminal_vals) ** 3)
+    kurt = (np.mean((terminal_vals - mean_val) ** 4) /
+            np.std(terminal_vals) ** 4) - 3
+
+    # Plot histogram
+    ax3.hist(terminal_vals, bins=60, color="lightgray", edgecolor="black", alpha=0.6)
     ax3.set_title("Distribution of Terminal Portfolio Values", fontsize=13)
     ax3.set_xlabel("Final Portfolio Value ($)", fontsize=11)
     ax3.set_ylabel("Frequency", fontsize=11)
 
+    # Define colors for percentiles
     colors = {
-        1: "darkred", 5: "red", 25: "orange",
-        50: "blue", 75: "green", 95: "darkgreen", 99: "purple"
+        5: "red", 25: "orange", 50: "blue", 75: "green", 95: "darkgreen"
     }
+
+    # Add small top tick marks for each percentile and horizontal labels
+    ymax = ax3.get_ylim()[1]
     for p, v in zip(percentiles, p_values):
-        ax3.axvline(v, color=colors[p], linestyle="--", lw=1.5)
-        ax3.text(v, ax3.get_ylim()[1]*0.9, f"P{p}\n${v:,.0f}",
-                 rotation=90, color=colors[p],
-                 ha="right" if p < 50 else "left", fontsize=9)
+        ax3.plot([v, v], [ymax * 0.98, ymax], color=colors[p], lw=3)
+        ax3.text(v, ymax * 1.05, f"P{p}  ${v:,.0f}",
+                 ha="center", va="bottom", color=colors[p],
+                 fontsize=10, rotation=0, fontweight="bold")
+
+    # Add skewness and kurtosis text box in the corner
+    textstr = f"Skewness: {skew:.2f}\nKurtosis: {kurt:.2f}"
+    ax3.text(0.98, 0.95, textstr,
+             transform=ax3.transAxes,
+             fontsize=10, verticalalignment="top",
+             horizontalalignment="right",
+             bbox=dict(boxstyle="round", facecolor="white", alpha=0.8))
+
+    # Create a minimalist legend for percentile color codes
     handles = [
-        plt.Line2D([0], [0], color=colors[p], linestyle="--", lw=1.5, label=f"P{p}")
+        plt.Line2D([0], [0], color=colors[p], lw=3, label=f"P{p}")
         for p in percentiles
     ]
-    ax3.legend(handles=handles, title="Percentiles", loc="upper right", frameon=True)
+    ax3.legend(handles=handles, title="Percentiles", loc="upper left",
+               frameon=True, facecolor="white", framealpha=0.9)
+
+    plt.tight_layout()
     st.pyplot(fig3)
 
 # ==========================================================
