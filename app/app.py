@@ -152,6 +152,7 @@ def compute_oos_directional_accuracy_walkforward(prices, weights, resample_rule,
         sigma = sub_rets.std(ddof=0)
         base_mean = mu - 0.5 * sigma ** 2
         residuals = (sub_rets - mu).to_numpy(dtype=np.float32)
+        residuals -= residuals.mean()
         b_opt = estimate_optimal_block_length(residuals)
 
         all_paths = []
@@ -277,7 +278,7 @@ def main():
 
             mu, sigma = port_rets.mean(), port_rets.std(ddof=0)
             base_mean = mu - 0.5*sigma**2
-            residuals = (port_rets-mu).to_numpy(dtype=np.float32)
+            residuals = (port_rets-mu).to_numpy(dtype=np.float32); residuals -= residuals.mean()
             b_opt = estimate_optimal_block_length(residuals)
 
             total_days = 5*252
