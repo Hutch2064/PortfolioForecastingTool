@@ -249,7 +249,8 @@ def main():
     tickers = st.text_input("Tickers","VTI,AGG")
     weights_str = st.text_input("Weights","0.6,0.4")
     start_cap = st.number_input("Starting Value ($)",1000.0,1_000_000.0,10_000.0,1000.0)
-    forecast_years = st.selectbox("Forecast Horizon (Years)",[1,2,3,4,5],index=0)
+    # === Modified line: allow 1–20 years ===
+    forecast_years = st.selectbox("Forecast Horizon (Years)", list(range(1, 21)), index=0)
     enable_oos = st.selectbox("Out-Of-Sample Testing",["No","Yes"],index=0)
     backtest_start = st.date_input("Backtest Start Date",
         value=datetime.date(2000,1,1),
@@ -281,7 +282,7 @@ def main():
             residuals = (port_rets-mu).to_numpy(dtype=np.float32); residuals -= residuals.mean()
             b_opt = estimate_optimal_block_length(residuals)
 
-            total_days = 5*252
+            total_days = 20*252  # extended base simulation to 20 years
             all_paths=[]; bar2=st.progress(0); txt2=st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng=np.random.default_rng(GLOBAL_SEED+i)
