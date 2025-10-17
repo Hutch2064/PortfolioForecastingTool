@@ -268,7 +268,7 @@ def plot_forecasts(port_rets, start_cap, central, paths):
         font-size:15px!important;padding:3px 10px!important;text-align:left!important;
     }
     </style>
-    <table class="custom"><tr><th>Percentile</th><th>Terminal Value ($)</th><th>Return (%)</th></tr>
+    <table class="custom"><tr><th>Percentile</th><th>Terminal Value ($)</th><th>Total Return (%)</th></tr>
     """ + "".join([f"<tr><td>{a}</td><td>{b}</td><td>{c}</td></tr>" for a,b,c in rows]) + "</table>"
     st.subheader("Forecast Distribution")
     st.markdown(html, unsafe_allow_html=True)
