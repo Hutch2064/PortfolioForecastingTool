@@ -285,7 +285,7 @@ def main():
     enable_oos = st.selectbox("Out-Of-Sample Testing",["No","Yes"],index=0)
     backtest_start = st.date_input("Backtest Start Date",
         value=datetime.date(2000,1,1),
-        min_value=datetime.date(1980,1,1),
+        min_value=datetime.date(1924,1,1),
         max_value=datetime.date.today()
     )
 
