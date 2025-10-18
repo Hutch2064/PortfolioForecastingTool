@@ -74,15 +74,34 @@ def fetch_prices_daily(tickers, start=DEFAULT_START, include_dividends=True):
     )
     if data.empty:
         raise ValueError("No price data returned.")
-    if isinstance(data.columns, pd.MultiIndex):
-        for f in (["Adj Close"] if include_dividends else ["Close", "Adj Close"]):
-            if f in data.columns.get_level_values(0):
-                close = data[f].copy()
-                break
+
+    # ============================================
+    # Logic for price selection
+    # - If include_dividends=True → Yahoo already adjusts "Close"
+    # - If include_dividends=False → use raw "Close" or "Adj Close" fallback
+    # ============================================
+    if include_dividends:
+        # Yahoo returns only "Close" column when auto_adjust=True (dividends + splits included)
+        if isinstance(data, pd.DataFrame):
+            if "Close" in data.columns:
+                close = data["Close"].copy()
+            else:
+                # Handle rare MultiIndex case
+                close = data.xs("Close", axis=1, level=0)
         else:
-            raise ValueError("No valid price field found.")
+            raise ValueError("Unexpected data format for adjusted prices.")
     else:
-        close = data.copy()
+        # Normal mode: unadjusted prices
+        if isinstance(data.columns, pd.MultiIndex):
+            for f in ["Close", "Adj Close"]:
+                if f in data.columns.get_level_values(0):
+                    close = data[f].copy()
+                    break
+            else:
+                raise ValueError("No valid price field found.")
+        else:
+            close = data.copy()
+
     close = close.ffill().astype(np.float32)
     if isinstance(close.columns, pd.MultiIndex):
         close.columns = close.columns.get_level_values(1)
