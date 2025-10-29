@@ -204,10 +204,11 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
 # ==========================================================
 # Plot Forecasts (with Optimal Horizon)
 # ==========================================================
-def plot_forecasts(port_rets, start_cap, central, paths, bench_central=None):
+def plot_forecasts(port_rets, start_cap, central, paths, bench_central=None, bench_rets=None):
     port_cum = np.exp(port_rets.cumsum()) * start_cap
     last = port_cum.index[-1]
-    dates = pd.date_range(start=last, periods=len(central), freq="B")
+    forecast_start = last + pd.tseries.offsets.BDay(1)
+    dates = pd.date_range(start=forecast_start, periods=len(central), freq="B")
 
     terminal_vals = paths[:, -1]
     low_cut, high_cut = np.percentile(terminal_vals, [16, 84])
@@ -235,6 +236,10 @@ def plot_forecasts(port_rets, start_cap, central, paths, bench_central=None):
     # ---- Plot 1 ----
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(port_cum.index, port_cum.values, color="black", lw=2, label="Portfolio Backtest")
+    if bench_rets is not None:
+        bench_cum = np.exp(bench_rets.cumsum()) * start_cap
+        ax.plot(bench_cum.index, bench_cum.values, color="orange", lw=2, label="Benchmark Backtest")
+
     for sim in filtered[:100]:
         ax.plot(dates, port_cum.iloc[-1] * sim / sim[0], color="gray", alpha=0.05)
 
@@ -244,8 +249,8 @@ def plot_forecasts(port_rets, start_cap, central, paths, bench_central=None):
             color="#6fa8dc", lw=2, label="Beyond Optimal Horizon")
 
     # ---- Overlay Benchmark Medoid (orange, no grays) ----
-    if bench_central is not None:
-        ax.plot(dates, port_cum.iloc[-1] * bench_central / bench_central[0],
+    if bench_central is not None and bench_rets is not None:
+        ax.plot(dates, bench_cum.iloc[-1] * bench_central / bench_central[0],
                 color="orange", lw=2.5, label="Benchmark Forecast")
 
     if best_start is not None:
@@ -270,7 +275,7 @@ def plot_forecasts(port_rets, start_cap, central, paths, bench_central=None):
              color="#6fa8dc", lw=2, label="Beyond Optimal Horizon")
 
     # ---- Overlay Benchmark Medoid (orange, no grays) ----
-    if bench_central is not None:
+    if bench_central is not None and bench_rets is not None:
         ax2.plot(dates, start_cap * bench_central / bench_central[0],
                  color="orange", lw=2.5, label="Benchmark Forecast")
 
@@ -414,8 +419,15 @@ def main():
             "".join([f"<tr><td>{a}</td><td>{b}</td><td>{c}</td></tr>" for a,b,c in rows])+"</table>")
             st.subheader("Performance Comparison")
             st.markdown(html, unsafe_allow_html=True)
-            # pass benchmark medoid to overlay (orange)
-            plot_forecasts(port_rets,start_cap,final,paths,bench_central=bench_central)
+            # pass benchmark medoid to overlay (orange) and include benchmark backtest
+            plot_forecasts(
+                port_rets,
+                start_cap,
+                final,
+                paths,
+                bench_central=bench_central,
+                bench_rets=bench_rets if have_bench else None
+            )
 
             if enable_oos=="Yes":
                 w_acc,w_n=compute_oos_directional_accuracy_walkforward(prices,weights,"W",5)
