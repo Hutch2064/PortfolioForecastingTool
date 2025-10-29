@@ -75,15 +75,23 @@ def fetch_prices_daily(tickers, start=DEFAULT_START, include_dividends=True):
     if data.empty:
         raise ValueError("No price data returned.")
 
+    # ============================================
+    # Logic for price selection
+    # - If include_dividends=True → Yahoo already adjusts "Close"
+    # - If include_dividends=False → use raw "Close" or "Adj Close" fallback
+    # ============================================
     if include_dividends:
+        # Yahoo returns only "Close" column when auto_adjust=True (dividends + splits included)
         if isinstance(data, pd.DataFrame):
             if "Close" in data.columns:
                 close = data["Close"].copy()
             else:
+                # Handle rare MultiIndex case
                 close = data.xs("Close", axis=1, level=0)
         else:
             raise ValueError("Unexpected data format for adjusted prices.")
     else:
+        # Normal mode: unadjusted prices
         if isinstance(data.columns, pd.MultiIndex):
             for f in ["Close", "Adj Close"]:
                 if f in data.columns.get_level_values(0):
@@ -197,6 +205,7 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
 # Plot Forecasts (with Optimal Horizon)
 # ==========================================================
 def plot_forecasts(port_rets, start_cap, central, paths, bench_central=None, bench_rets=None):
+    # --- Backtest cum values ---
     port_cum_full = np.exp(port_rets.cumsum()) * start_cap
     if bench_rets is not None:
         bench_cum_full = np.exp(bench_rets.cumsum()) * start_cap
@@ -217,6 +226,7 @@ def plot_forecasts(port_rets, start_cap, central, paths, bench_central=None, ben
     mask = (terminal_vals >= low_cut) & (terminal_vals <= high_cut)
     filtered = paths[mask]
 
+    # ---- Best/Worst 1-year on the portfolio forecast path ----
     log_rets = np.log(central[1:] / central[:-1])
     roll_sum = pd.Series(log_rets).rolling(252).sum()
     best_idx, worst_idx = roll_sum.idxmax(), roll_sum.idxmin()
@@ -229,6 +239,7 @@ def plot_forecasts(port_rets, start_cap, central, paths, bench_central=None, ben
         best_start = best_end = worst_start = worst_end = None
         best_return = worst_return = 0.0
 
+    # ---- Compute Optimal Horizon ----
     backtest_years = len(port_rets) / 252
     opt_years = 0.2 * backtest_years
     opt_days = int(opt_years * 252)
@@ -236,36 +247,24 @@ def plot_forecasts(port_rets, start_cap, central, paths, bench_central=None, ben
     port_base = port_cum.iloc[-1]
     bench_base = bench_cum.iloc[-1] if bench_cum is not None else None
 
-    # ---- Plot 1: Full (unchanged) ----
+    # ---- Plot 1 ----
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(port_cum.index, port_cum.values, color="black", lw=2, label="Portfolio Backtest")
     if bench_cum is not None:
         ax.plot(bench_cum.index, bench_cum.values, color="orange", alpha=0.5, lw=2, label="Benchmark Backtest")
-
     for sim in filtered[:100]:
         ax.plot(dates, port_base * sim / sim[0], color="gray", alpha=0.05)
-
     ax.plot(dates[:opt_days], port_base * central[:opt_days] / central[0],
             color="blue", lw=2, label=f"Forecast (Optimal ≤ {opt_years:.1f} yrs)")
     ax.plot(dates[opt_days:], port_base * central[opt_days:] / central[0],
             color="#6fa8dc", lw=2, label="Beyond Optimal Horizon")
-
     if bench_central is not None and bench_cum is not None:
         ax.plot(dates, bench_base * bench_central / bench_central[0],
                 color="orange", lw=2.5, label="Benchmark Forecast")
-
-    if best_start is not None:
-        ax.plot(dates[best_start:best_end],
-                port_base * central[best_start:best_end] / central[0],
-                color="limegreen", lw=3, label=f"Best 1-Year Period ~ {best_return*100:.1f}%")
-    if worst_start is not None:
-        ax.plot(dates[worst_start:worst_end],
-                port_base * central[worst_start:worst_end] / central[0],
-                color="red", lw=3, label=f"Worst 1-Year Period ~ {worst_return*100:.1f}%")
     ax.legend(); ax.set_title("Forecast"); ax.set_ylabel("Portfolio Value ($)")
     st.pyplot(fig)
 
-    # ---- Plot 2: Horizon View (forecast only) ----
+    # ---- Plot 2 (Horizon View aligned) ----
     fig2, ax2 = plt.subplots(figsize=(12, 6))
     for sim in filtered[:100]:
         ax2.plot(dates, start_cap * sim / sim[0], color="gray", alpha=0.05)
@@ -275,16 +274,17 @@ def plot_forecasts(port_rets, start_cap, central, paths, bench_central=None, ben
     ax2.plot(dates[opt_days:], start_cap * central[opt_days:] / central[0],
              color="#6fa8dc", lw=2, label="Beyond Optimal Horizon")
 
-    if bench_central is not None and bench_cum is not None:
-        ax2.plot(dates, (bench_cum.iloc[-1]) * bench_central / bench_central[0],
+    # ---- MODIFIED LINE: align benchmark start to start_cap ----
+    if bench_central is not None:
+        ax2.plot(dates, start_cap * bench_central / bench_central[0],
                  color="orange", lw=2.5, label="Benchmark Forecast")
 
-    ax2.set_xlim(dates[0], dates[-1])
     ax2.set_title("Forecast (Horizon View)")
     ax2.set_ylabel("Portfolio Value ($)")
     ax2.legend()
     st.pyplot(fig2)
 
+    # ---- Percentile Table ----
     terminal_vals = paths[:, -1] * start_cap
     percentiles = [5, 25, 50, 75, 95]
     p_vals = np.percentile(terminal_vals, percentiles)
@@ -357,6 +357,7 @@ def main():
             total_days = 20*252
             all_paths=[]; bar2=st.progress(0); txt2=st.empty()
 
+            # --- Optional benchmark setup (precompute residuals to share block starts) ---
             have_bench = bench_tickers.strip() != ""
             if have_bench:
                 bench_weights = to_weights([float(x) for x in bench_weights_str.split(",")])
@@ -364,6 +365,7 @@ def main():
                 bench_prices = fetch_prices_daily(bench_list, backtest_start.strftime("%Y-%m-%d"), include_dividends=(div_mode == "Yes"))
                 bench_rets_full = portfolio_log_returns_daily(bench_prices, bench_weights)
 
+                # Align residual dates EXACTLY using intersection
                 common_idx = port_rets.index.intersection(bench_rets_full.index)
                 port_rets_for_sim = port_rets.loc[common_idx]
                 bench_rets = bench_rets_full.loc[common_idx]
@@ -377,18 +379,26 @@ def main():
                 bench_base_mean = bench_mu - 0.5*bench_sigma**2
                 bench_residuals = (bench_rets - bench_mu).to_numpy(dtype=np.float32)
                 bench_residuals -= bench_residuals.mean()
+
                 b_opt = estimate_optimal_block_length(residuals_aligned)
 
+            # --- Use SAME block length & SAME block starts for both (sync the time blocks) ---
             for i in range(ENSEMBLE_SEEDS):
                 rng=np.random.default_rng(GLOBAL_SEED+i)
                 n_blocks = int(np.ceil(total_days / b_opt))
 
                 if have_bench:
                     shared_starts = rng.integers(0, len(residuals_aligned) - b_opt, size=(SIMS_PER_SEED, n_blocks))
-                    sims = run_monte_carlo_paths(residuals_aligned,SIMS_PER_SEED,rng,base_mean_aligned,total_days,b_opt,starts=shared_starts)
+                    sims = run_monte_carlo_paths(
+                        residuals_aligned, SIMS_PER_SEED, rng, base_mean_aligned,
+                        total_days, b_opt, starts=shared_starts
+                    )
                 else:
                     shared_starts = rng.integers(0, len(residuals) - b_opt, size=(SIMS_PER_SEED, n_blocks))
-                    sims = run_monte_carlo_paths(residuals,SIMS_PER_SEED,rng,base_mean,total_days,b_opt,starts=shared_starts)
+                    sims = run_monte_carlo_paths(
+                        residuals, SIMS_PER_SEED, rng, base_mean,
+                        total_days, b_opt, starts=shared_starts
+                    )
 
                 all_paths.append(sims); bar2.progress((i+1)/ENSEMBLE_SEEDS)
                 txt2.text(f"Running forecasts... {int((i+1)/ENSEMBLE_SEEDS*100)}%")
@@ -396,7 +406,10 @@ def main():
                 if have_bench:
                     if i == 0:
                         bench_all_paths = []
-                    bench_sims = run_monte_carlo_paths(bench_residuals,SIMS_PER_SEED,rng,bench_base_mean,total_days,b_opt,starts=shared_starts)
+                    bench_sims = run_monte_carlo_paths(
+                        bench_residuals, SIMS_PER_SEED, rng, bench_base_mean,
+                        total_days, b_opt, starts=shared_starts
+                    )
                     bench_all_paths.append(bench_sims)
 
             bar2.empty(); txt2.empty()
