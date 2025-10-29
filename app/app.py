@@ -205,9 +205,22 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
 # Plot Forecasts (with Optimal Horizon)
 # ==========================================================
 def plot_forecasts(port_rets, start_cap, central, paths, bench_central=None, bench_rets=None):
-    port_cum = np.exp(port_rets.cumsum()) * start_cap
-    last = port_cum.index[-1]
-    forecast_start = last + pd.tseries.offsets.BDay(1)
+    # --- Backtest cum values ---
+    port_cum_full = np.exp(port_rets.cumsum()) * start_cap
+    if bench_rets is not None:
+        bench_cum_full = np.exp(bench_rets.cumsum()) * start_cap
+        # Align backtests to earliest common start and common end
+        common_start = max(port_cum_full.index[0], bench_cum_full.index[0])
+        common_end = min(port_cum_full.index[-1], bench_cum_full.index[-1])
+        port_cum = port_cum_full.loc[common_start:common_end]
+        bench_cum = bench_cum_full.loc[common_start:common_end]
+    else:
+        port_cum = port_cum_full
+        bench_cum = None
+        common_end = port_cum.index[-1]
+
+    # Forecast starts the next business day after the common end of backtest
+    forecast_start = common_end + pd.tseries.offsets.BDay(1)
     dates = pd.date_range(start=forecast_start, periods=len(central), freq="B")
 
     terminal_vals = paths[:, -1]
@@ -215,7 +228,7 @@ def plot_forecasts(port_rets, start_cap, central, paths, bench_central=None, ben
     mask = (terminal_vals >= low_cut) & (terminal_vals <= high_cut)
     filtered = paths[mask]
 
-    # ---- Best/Worst 1-year ----
+    # ---- Best/Worst 1-year on the portfolio forecast path ----
     log_rets = np.log(central[1:] / central[:-1])
     roll_sum = pd.Series(log_rets).rolling(252).sum()
     best_idx, worst_idx = roll_sum.idxmax(), roll_sum.idxmin()
@@ -233,38 +246,46 @@ def plot_forecasts(port_rets, start_cap, central, paths, bench_central=None, ben
     opt_years = 0.2 * backtest_years
     opt_days = int(opt_years * 252)
 
+    # Bases at the common end (keep lines separate)
+    port_base = port_cum.iloc[-1]
+    bench_base = bench_cum.iloc[-1] if bench_cum is not None else None
+
     # ---- Plot 1 ----
     fig, ax = plt.subplots(figsize=(12, 6))
+    # Portfolio backtest (black)
     ax.plot(port_cum.index, port_cum.values, color="black", lw=2, label="Portfolio Backtest")
-    if bench_rets is not None:
-        bench_cum = np.exp(bench_rets.cumsum()) * start_cap
-        ax.plot(bench_cum.index, bench_cum.values, color="orange", lw=2, label="Benchmark Backtest")
+    # Benchmark backtest (lighter orange)
+    if bench_cum is not None:
+        ax.plot(bench_cum.index, bench_cum.values, color="orange", alpha=0.5, lw=2, label="Benchmark Backtest")
 
+    # Fan (portfolio)
     for sim in filtered[:100]:
-        ax.plot(dates, port_cum.iloc[-1] * sim / sim[0], color="gray", alpha=0.05)
+        ax.plot(dates, port_base * sim / sim[0], color="gray", alpha=0.05)
 
-    ax.plot(dates[:opt_days], port_cum.iloc[-1] * central[:opt_days] / central[0],
+    # Portfolio forecast (blue / light blue)
+    ax.plot(dates[:opt_days], port_base * central[:opt_days] / central[0],
             color="blue", lw=2, label=f"Forecast (Optimal ≤ {opt_years:.1f} yrs)")
-    ax.plot(dates[opt_days:], port_cum.iloc[-1] * central[opt_days:] / central[0],
+    ax.plot(dates[opt_days:], port_base * central[opt_days:] / central[0],
             color="#6fa8dc", lw=2, label="Beyond Optimal Horizon")
 
-    # ---- Overlay Benchmark Medoid (orange, no grays) ----
-    if bench_central is not None and bench_rets is not None:
-        ax.plot(dates, bench_cum.iloc[-1] * bench_central / bench_central[0],
+    # Benchmark forecast (darker orange), connected to its own backtest
+    if bench_central is not None and bench_cum is not None:
+        ax.plot(dates, bench_base * bench_central / bench_central[0],
                 color="orange", lw=2.5, label="Benchmark Forecast")
 
+    # Best/Worst 1-year segments on portfolio forecast
     if best_start is not None:
         ax.plot(dates[best_start:best_end],
-                port_cum.iloc[-1] * central[best_start:best_end] / central[0],
+                port_base * central[best_start:best_end] / central[0],
                 color="limegreen", lw=3, label=f"Best 1-Year Period ~ {best_return*100:.1f}%")
     if worst_start is not None:
         ax.plot(dates[worst_start:worst_end],
-                port_cum.iloc[-1] * central[worst_start:worst_end] / central[0],
+                port_base * central[worst_start:worst_end] / central[0],
                 color="red", lw=3, label=f"Worst 1-Year Period ~ {worst_return*100:.1f}%")
     ax.legend(); ax.set_title("Forecast"); ax.set_ylabel("Portfolio Value ($)")
     st.pyplot(fig)
 
-    # ---- Plot 2 ----
+    # ---- Plot 2 (Horizon View) ----
     fig2, ax2 = plt.subplots(figsize=(12, 6))
     for sim in filtered[:100]:
         ax2.plot(dates, start_cap * sim / sim[0], color="gray", alpha=0.05)
@@ -274,9 +295,11 @@ def plot_forecasts(port_rets, start_cap, central, paths, bench_central=None, ben
     ax2.plot(dates[opt_days:], start_cap * central[opt_days:] / central[0],
              color="#6fa8dc", lw=2, label="Beyond Optimal Horizon")
 
-    # ---- Overlay Benchmark Medoid (orange, no grays) ----
-    if bench_central is not None and bench_rets is not None:
-        ax2.plot(dates, start_cap * bench_central / bench_central[0],
+    # Benchmark backtest (lighter orange) + forecast (darker orange) also shown here, separated
+    if bench_cum is not None:
+        ax2.plot(bench_cum.index, bench_cum.values, color="orange", alpha=0.5, lw=2, label="Benchmark Backtest")
+    if bench_central is not None and bench_cum is not None:
+        ax2.plot(dates, (bench_cum.iloc[-1]) * bench_central / bench_central[0],
                  color="orange", lw=2.5, label="Benchmark Forecast")
 
     ax2.set_title("Forecast (Horizon View)")
@@ -357,37 +380,74 @@ def main():
             b_opt = estimate_optimal_block_length(residuals)
             total_days = 20*252
             all_paths=[]; bar2=st.progress(0); txt2=st.empty()
+
             # --- Optional benchmark setup (precompute residuals to share block starts) ---
             have_bench = bench_tickers.strip() != ""
             if have_bench:
                 bench_weights = to_weights([float(x) for x in bench_weights_str.split(",")])
                 bench_list = [t.strip() for t in bench_tickers.split(",") if t.strip()]
                 bench_prices = fetch_prices_daily(bench_list, backtest_start.strftime("%Y-%m-%d"), include_dividends=(div_mode == "Yes"))
-                bench_rets = portfolio_log_returns_daily(bench_prices, bench_weights)
+                bench_rets_full = portfolio_log_returns_daily(bench_prices, bench_weights)
+
+                # Align residual dates EXACTLY using intersection
+                common_idx = port_rets.index.intersection(bench_rets_full.index)
+                # Use aligned series to ensure the same dates feed both residual blocks
+                port_rets_for_sim = port_rets.loc[common_idx]
+                bench_rets = bench_rets_full.loc[common_idx]
+
+                # Recompute mu/sigma & residuals on the aligned window (for simulation only)
+                mu_aligned, sigma_aligned = port_rets_for_sim.mean(), port_rets_for_sim.std(ddof=0)
+                base_mean_aligned = mu_aligned - 0.5*sigma_aligned**2
+                residuals_aligned = (port_rets_for_sim - mu_aligned).to_numpy(dtype=np.float32)
+                residuals_aligned -= residuals_aligned.mean()
+
                 bench_mu, bench_sigma = bench_rets.mean(), bench_rets.std(ddof=0)
                 bench_base_mean = bench_mu - 0.5*bench_sigma**2
-                bench_residuals = (bench_rets - bench_mu).to_numpy(dtype=np.float32); bench_residuals -= bench_residuals.mean()
+                bench_residuals = (bench_rets - bench_mu).to_numpy(dtype=np.float32)
+                bench_residuals -= bench_residuals.mean()
+
+                # Use same block length based on portfolio residuals (aligned)
+                b_opt = estimate_optimal_block_length(residuals_aligned)
+
             # --- Use SAME block length & SAME block starts for both (sync the time blocks) ---
             for i in range(ENSEMBLE_SEEDS):
                 rng=np.random.default_rng(GLOBAL_SEED+i)
-                # shared starts from the portfolio residual timeline
                 n_blocks = int(np.ceil(total_days / b_opt))
-                shared_starts = rng.integers(0, len(residuals) - b_opt, size=(SIMS_PER_SEED, n_blocks))
-                sims=run_monte_carlo_paths(residuals,SIMS_PER_SEED,rng,base_mean,total_days,b_opt,starts=shared_starts)
+
+                if have_bench:
+                    # Shared starts based on ALIGNED portfolio residual timeline
+                    shared_starts = rng.integers(0, len(residuals_aligned) - b_opt, size=(SIMS_PER_SEED, n_blocks))
+                    sims = run_monte_carlo_paths(
+                        residuals_aligned, SIMS_PER_SEED, rng, base_mean_aligned,
+                        total_days, b_opt, starts=shared_starts
+                    )
+                else:
+                    # Original behavior when no benchmark provided
+                    shared_starts = rng.integers(0, len(residuals) - b_opt, size=(SIMS_PER_SEED, n_blocks))
+                    sims = run_monte_carlo_paths(
+                        residuals, SIMS_PER_SEED, rng, base_mean,
+                        total_days, b_opt, starts=shared_starts
+                    )
+
                 all_paths.append(sims); bar2.progress((i+1)/ENSEMBLE_SEEDS)
                 txt2.text(f"Running forecasts... {int((i+1)/ENSEMBLE_SEEDS*100)}%")
-                # If benchmark present, run with SAME starts (mapped via modulo inside function)
+
+                # If benchmark present, run with SAME starts (exact same dates)
                 if have_bench:
-                    # stash benchmark sims per seed for later stacking
                     if i == 0:
                         bench_all_paths = []
-                    bench_sims = run_monte_carlo_paths(bench_residuals,SIMS_PER_SEED,rng,bench_base_mean,total_days,b_opt,starts=shared_starts)
+                    bench_sims = run_monte_carlo_paths(
+                        bench_residuals, SIMS_PER_SEED, rng, bench_base_mean,
+                        total_days, b_opt, starts=shared_starts
+                    )
                     bench_all_paths.append(bench_sims)
+
             bar2.empty(); txt2.empty()
             paths_full=np.vstack(all_paths)
             medoid_full=compute_medoid_path(paths_full)
             forecast_days=forecast_years*252
             paths=paths_full[:,:forecast_days]; final=medoid_full[:forecast_days]
+
             # Benchmark medoid (if provided)
             bench_central = None
             if have_bench:
@@ -419,14 +479,14 @@ def main():
             "".join([f"<tr><td>{a}</td><td>{b}</td><td>{c}</td></tr>" for a,b,c in rows])+"</table>")
             st.subheader("Performance Comparison")
             st.markdown(html, unsafe_allow_html=True)
-            # pass benchmark medoid to overlay (orange) and include benchmark backtest
+            # pass benchmark medoid to overlay (orange) and include benchmark backtest (bench_rets_full aligned inside plot)
             plot_forecasts(
                 port_rets,
                 start_cap,
                 final,
                 paths,
                 bench_central=bench_central,
-                bench_rets=bench_rets if have_bench else None
+                bench_rets=(bench_rets if have_bench else None)
             )
 
             if enable_oos=="Yes":
