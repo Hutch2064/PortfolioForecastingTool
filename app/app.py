@@ -192,8 +192,7 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
         "Sharpe": annualized_sharpe_daily(rets),
         "Max Drawdown": max_drawdown_from_rets(rets),
     }
-
-# ==========================================================
+    # ==========================================================
 # Plot Forecasts (with Optimal Horizon)
 # ==========================================================
 def plot_forecasts(port_rets, start_cap, central, paths, bench_central=None, bench_rets=None):
@@ -216,17 +215,6 @@ def plot_forecasts(port_rets, start_cap, central, paths, bench_central=None, ben
     low_cut, high_cut = np.percentile(terminal_vals, [16, 84])
     mask = (terminal_vals >= low_cut) & (terminal_vals <= high_cut)
     filtered = paths[mask]
-    log_rets = np.log(central[1:] / central[:-1])
-    roll_sum = pd.Series(log_rets).rolling(252).sum()
-    best_idx, worst_idx = roll_sum.idxmax(), roll_sum.idxmin()
-    if not np.isnan(best_idx) and not np.isnan(worst_idx):
-        best_start, best_end = int(best_idx - 252), int(best_idx)
-        worst_start, worst_end = int(worst_idx - 252), int(worst_idx)
-        best_return = np.exp(roll_sum.max()) - 1
-        worst_return = np.exp(roll_sum.min()) - 1
-    else:
-        best_start = best_end = worst_start = worst_end = None
-        best_return = worst_return = 0.0
 
     backtest_years = len(port_rets) / 252
     opt_years = 0.2 * backtest_years
@@ -235,10 +223,12 @@ def plot_forecasts(port_rets, start_cap, central, paths, bench_central=None, ben
     port_base = port_cum.iloc[-1]
     bench_base = bench_cum.iloc[-1] if bench_cum is not None else None
 
+    # ---- Plot 1 (Full Backtest + Forecast) ----
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(port_cum.index, port_cum.values, color="black", lw=2, label="Portfolio Backtest")
     if bench_cum is not None:
         ax.plot(bench_cum.index, bench_cum.values, color="orange", alpha=0.5, lw=2, label="Benchmark Backtest")
+
     for sim in filtered[:100]:
         ax.plot(dates, port_base * sim / sim[0], color="gray", alpha=0.05)
     ax.plot(dates[:opt_days], port_base * central[:opt_days] / central[0],
@@ -251,7 +241,7 @@ def plot_forecasts(port_rets, start_cap, central, paths, bench_central=None, ben
     ax.legend(); ax.set_title("Forecast"); ax.set_ylabel("Portfolio Value ($)")
     st.pyplot(fig)
 
-    # ---- Plot 2 (Horizon View aligned) ----
+    # ---- Plot 2 (Horizon-only view) ----
     fig2, ax2 = plt.subplots(figsize=(12, 6))
     for sim in filtered[:100]:
         ax2.plot(dates, start_cap * sim / sim[0], color="gray", alpha=0.05)
@@ -260,7 +250,6 @@ def plot_forecasts(port_rets, start_cap, central, paths, bench_central=None, ben
              color="blue", lw=2, label=f"Forecast (Optimal ≤ {opt_years:.1f} yrs)")
     ax2.plot(dates[opt_days:], start_cap * central[opt_days:] / central[0],
              color="#6fa8dc", lw=2, label="Beyond Optimal Horizon")
-
     if bench_central is not None:
         ax2.plot(dates, start_cap * bench_central / bench_central[0],
                  color="orange", lw=2.5, label="Benchmark Forecast")
@@ -303,107 +292,108 @@ def plot_forecasts(port_rets, start_cap, central, paths, bench_central=None, ben
 # ==========================================================
 def main():
     st.title("Portfolio Forecasting Tool")
-    tickers = st.text_input("Tickers","VTI,AGG")
-    weights_str = st.text_input("Weights","0.6,0.4")
+    tickers = st.text_input("Tickers", "VTI,AGG")
+    weights_str = st.text_input("Weights", "0.6,0.4")
     bench_tickers = st.text_input("Benchmark Tickers (optional)", "SPY")
     bench_weights_str = st.text_input("Benchmark Weights", "1.0")
 
-    start_cap = st.number_input("Starting Value ($)",1000.0,1_000_000.0,10_000.0,1000.0)
-    forecast_years = st.selectbox("Forecast Horizon (Years)", list(range(1,21)), index=0)
-    enable_oos = st.selectbox("Out-of-sample Testing",["No","Yes"],index=0)
+    start_cap = st.number_input("Starting Value ($)", 1000.0, 1_000_000.0, 10_000.0, 1000.0)
+    forecast_years = st.selectbox("Forecast Horizon (Years)", list(range(1, 21)), index=0)
+    enable_oos = st.selectbox("Out-of-sample Testing", ["No", "Yes"], index=0)
     div_mode = st.selectbox("Reinvest Dividends", ["No", "Yes"], index=1)
     backtest_start = st.date_input("Backtest Start Date",
-        value=datetime.date(2000,1,1),
-        min_value=datetime.date(1924,1,1),
-        max_value=datetime.date.today()
-    )
+                                   value=datetime.date(2000, 1, 1),
+                                   min_value=datetime.date(1924, 1, 1),
+                                   max_value=datetime.date.today())
 
-    col_run, col_val = st.columns([1,3])
-    with col_run: run_pressed = st.button("Run")
-
-    if st.session_state.get("last_tickers")!=st.session_state.get("curr_tickers",""):
-        st.session_state.pop("forecast_val",None)
-    if st.session_state.get("last_weights")!=st.session_state.get("curr_weights",""):
-        st.session_state.pop("forecast_val",None)
-    st.session_state["curr_tickers"]=tickers
-    st.session_state["curr_weights"]=weights_str
-    st.session_state["last_tickers"]=tickers
-    st.session_state["last_weights"]=weights_str
+    col_run, col_val = st.columns([1, 3])
+    with col_run:
+        run_pressed = st.button("Run")
 
     if run_pressed:
         try:
             weights = to_weights([float(x) for x in weights_str.split(",")])
             tickers = [t.strip() for t in tickers.split(",") if t.strip()]
-            prices = fetch_prices_daily(tickers, backtest_start.strftime("%Y-%m-%d"), include_dividends=(div_mode == "Yes"))
+            prices = fetch_prices_daily(tickers, backtest_start.strftime("%Y-%m-%d"),
+                                        include_dividends=(div_mode == "Yes"))
             port_rets = portfolio_log_returns_daily(prices, weights)
             mu, sigma = port_rets.mean(), port_rets.std(ddof=0)
-            base_mean = mu - 0.5*sigma**2
-            residuals = (port_rets-mu).to_numpy(dtype=np.float32); residuals -= residuals.mean()
+            base_mean = mu - 0.5 * sigma**2
+            residuals = (port_rets - mu).to_numpy(dtype=np.float32)
+            residuals -= residuals.mean()
             b_opt = estimate_optimal_block_length(residuals)
-            total_days = 20*252
-            all_paths=[]; bar2=st.progress(0); txt2=st.empty()
+            n_res_port = len(residuals)
+            b_opt = int(min(b_opt, max(2, n_res_port)))
+            total_days = 20 * 252
+            all_paths = []
+            bar2 = st.progress(0)
+            txt2 = st.empty()
 
             have_bench = bench_tickers.strip() != ""
             if have_bench:
                 bench_weights = to_weights([float(x) for x in bench_weights_str.split(",")])
                 bench_list = [t.strip() for t in bench_tickers.split(",") if t.strip()]
-                bench_prices = fetch_prices_daily(bench_list, backtest_start.strftime("%Y-%m-%d"), include_dividends=(div_mode == "Yes"))
+                bench_prices = fetch_prices_daily(bench_list, backtest_start.strftime("%Y-%m-%d"),
+                                                  include_dividends=(div_mode == "Yes"))
                 bench_rets_full = portfolio_log_returns_daily(bench_prices, bench_weights)
 
-                # Align residual dates EXACTLY using intersection
+                # --- Defensive alignment + clipping ---
                 common_idx = port_rets.index.intersection(bench_rets_full.index)
                 port_rets_for_sim = port_rets.loc[common_idx]
                 bench_rets = bench_rets_full.loc[common_idx]
+                min_len = min(len(port_rets_for_sim), len(bench_rets))
+                port_rets_for_sim = port_rets_for_sim.iloc[-min_len:]
+                bench_rets = bench_rets.iloc[-min_len:]
 
                 mu_aligned, sigma_aligned = port_rets_for_sim.mean(), port_rets_for_sim.std(ddof=0)
-                base_mean_aligned = mu_aligned - 0.5*sigma_aligned**2
+                base_mean_aligned = mu_aligned - 0.5 * sigma_aligned**2
                 residuals_aligned = (port_rets_for_sim - mu_aligned).to_numpy(dtype=np.float32)
                 residuals_aligned -= residuals_aligned.mean()
 
                 bench_mu, bench_sigma = bench_rets.mean(), bench_rets.std(ddof=0)
-                bench_base_mean = bench_mu - 0.5*bench_sigma**2
+                bench_base_mean = bench_mu - 0.5 * bench_sigma**2
                 bench_residuals = (bench_rets - bench_mu).to_numpy(dtype=np.float32)
                 bench_residuals -= bench_residuals.mean()
 
-                b_opt = estimate_optimal_block_length(residuals_aligned)
+                if len(residuals_aligned) != len(bench_residuals):
+                    m = min(len(residuals_aligned), len(bench_residuals))
+                    residuals_aligned = residuals_aligned[-m:]
+                    bench_residuals = bench_residuals[-m:]
 
-            # --- JOINT residual bootstrap preserving correlation ---
+                b_opt = estimate_optimal_block_length(residuals_aligned)
+                b_opt = int(min(b_opt, max(2, len(residuals_aligned) - 1)))
+
+            # ==========================================================
+            # Monte Carlo Loop (joint residual fix)
+            # ==========================================================
             for i in range(ENSEMBLE_SEEDS):
-                rng=np.random.default_rng(GLOBAL_SEED+i)
+                rng = np.random.default_rng(GLOBAL_SEED + i)
                 n_blocks = int(np.ceil(total_days / b_opt))
                 offsets = np.arange(b_opt)
 
                 if have_bench:
-                    # --- FIXED: joint block bootstrap preserving true date alignment ---
-                    # Stack residuals into a single 2D matrix so historical dates stay locked across both assets
+                    # --- Robust joint residual sampling ---
                     joint_residuals = np.column_stack([residuals_aligned, bench_residuals])
                     n_res = len(joint_residuals)
-                    n_blocks = int(np.ceil(total_days / b_opt))
-                    offsets = np.arange(b_opt)
+                    if n_res <= 1:
+                        raise ValueError("Not enough overlapping residuals between portfolio and benchmark.")
 
-                    # Draw starting indices jointly
-                    paired_idx = rng.integers(0, n_res - b_opt, size=(SIMS_PER_SEED, n_blocks))
-                    idx = (paired_idx[..., None] + offsets).reshape(SIMS_PER_SEED, -1)
-                    idx = np.mod(idx, n_res)[:, :total_days]
+                    paired_idx = rng.integers(0, n_res, size=(SIMS_PER_SEED, n_blocks))
+                    idx = (paired_idx[..., None] + offsets) % n_res
+                    idx = idx.reshape(SIMS_PER_SEED, -1)[:, :total_days]
 
-                    # Extract paired residuals for portfolio and benchmark
                     joint_eps = joint_residuals[idx]
                     eps_port = joint_eps[..., 0]
                     eps_bench = joint_eps[..., 1]
 
-                    # Apply identical block structure for both series
                     log_port = np.cumsum(base_mean_aligned + eps_port, axis=1, dtype=np.float32)
                     log_bench = np.cumsum(bench_base_mean + eps_bench, axis=1, dtype=np.float32)
-
-                    # Convert to price paths (normalized to 1)
                     sims = np.exp(log_port - log_port[:, [0]])
                     bench_sims = np.exp(log_bench - log_bench[:, [0]])
                 else:
                     shared_starts = rng.integers(0, len(residuals) - b_opt, size=(SIMS_PER_SEED, n_blocks))
-                    sims = run_monte_carlo_paths(
-                        residuals, SIMS_PER_SEED, rng, base_mean,
-                        total_days, b_opt, starts=shared_starts
-                    )
+                    sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean,
+                                                 total_days, b_opt, starts=shared_starts)
 
                 all_paths.append(sims)
                 if have_bench:
@@ -411,14 +401,18 @@ def main():
                         bench_all_paths = []
                     bench_all_paths.append(bench_sims)
 
-                bar2.progress((i+1)/ENSEMBLE_SEEDS)
-                txt2.text(f"Running forecasts... {int((i+1)/ENSEMBLE_SEEDS*100)}%")
+                bar2.progress((i + 1) / ENSEMBLE_SEEDS)
+                txt2.text(f"Running forecasts... {int((i + 1) / ENSEMBLE_SEEDS * 100)}%")
 
+            # ==========================================================
+            # Wrap-up + Display
+            # ==========================================================
             bar2.empty(); txt2.empty()
-            paths_full=np.vstack(all_paths)
-            medoid_full=compute_medoid_path(paths_full)
-            forecast_days=forecast_years*252
-            paths=paths_full[:,:forecast_days]; final=medoid_full[:forecast_days]
+            paths_full = np.vstack(all_paths)
+            medoid_full = compute_medoid_path(paths_full)
+            forecast_days = forecast_years * 252
+            paths = paths_full[:, :forecast_days]
+            final = medoid_full[:forecast_days]
 
             bench_central = None
             if have_bench:
@@ -426,13 +420,13 @@ def main():
                 bench_medoid_full = compute_medoid_path(bench_paths_full)
                 bench_central = bench_medoid_full[:forecast_days]
 
-            st.session_state["forecast_val"]=final[-1]*start_cap
-            stats=compute_forecast_stats_from_path(final,start_cap,port_rets.index[-1])
-            back={
-                "CAGR":annualized_return_daily(port_rets),
-                "Volatility":annualized_vol_daily(port_rets),
-                "Sharpe":annualized_sharpe_daily(port_rets),
-                "Max Drawdown":max_drawdown_from_rets(port_rets),
+            st.session_state["forecast_val"] = final[-1] * start_cap
+            stats = compute_forecast_stats_from_path(final, start_cap, port_rets.index[-1])
+            back = {
+                "CAGR": annualized_return_daily(port_rets),
+                "Volatility": annualized_vol_daily(port_rets),
+                "Sharpe": annualized_sharpe_daily(port_rets),
+                "Max Drawdown": max_drawdown_from_rets(port_rets),
             }
 
             st.markdown(
@@ -440,53 +434,30 @@ def main():
                 f"Forecasted Portfolio Value ~ <span style='font-weight:300;'>${final[-1]*start_cap:,.2f}</span></p>",
                 unsafe_allow_html=True)
 
-            rows=[("CAGR",f"{back['CAGR']:.2%}",f"{stats['CAGR']:.2%}"),
-                  ("Volatility",f"{back['Volatility']:.2%}",f"{stats['Volatility']:.2%}"),
-                  ("Sharpe",f"{back['Sharpe']:.2f}",f"{stats['Sharpe']:.2f}"),
-                  ("Max Drawdown",f"{back['Max Drawdown']:.2%}",f"{stats['Max Drawdown']:.2%}")]
-            html=("""
-            <style>table.results,table.results tr,table.results th,table.results td{
-            border:none!important;border-collapse:collapse!important;background:transparent!important;}
-            table.results th,table.results td{color:white!important;font-family:'Helvetica Neue',sans-serif!important;
-            font-size:15px!important;padding:3px 10px!important;text-align:left!important;}
-            </style><table class='results'><tr><th>Metric</th><th>Backtest</th><th>Forecast</th></tr>"""+
-            "".join([f"<tr><td>{a}</td><td>{b}</td><td>{c}</td></tr>" for a,b,c in rows])+"</table>")
+            rows = [
+                ("CAGR", f"{back['CAGR']:.2%}", f"{stats['CAGR']:.2%}"),
+                ("Volatility", f"{back['Volatility']:.2%}", f"{stats['Volatility']:.2%}"),
+                ("Sharpe", f"{back['Sharpe']:.2f}", f"{stats['Sharpe']:.2f}"),
+                ("Max Drawdown", f"{back['Max Drawdown']:.2%}", f"{stats['Max Drawdown']:.2%}")
+            ]
+            html = (
+                "<style>table.results,table.results tr,table.results th,table.results td{"
+                "border:none!important;border-collapse:collapse!important;background:transparent!important;}"
+                "table.results th,table.results td{color:white!important;font-family:'Helvetica Neue',sans-serif!important;"
+                "font-size:15px!important;padding:3px 10px!important;text-align:left!important;}"
+                "</style><table class='results'><tr><th>Metric</th><th>Backtest</th><th>Forecast</th></tr>"
+                + "".join([f"<tr><td>{a}</td><td>{b}</td><td>{c}</td></tr>" for a, b, c in rows])
+                + "</table>"
+            )
             st.subheader("Performance Comparison")
             st.markdown(html, unsafe_allow_html=True)
 
-            plot_forecasts(
-                port_rets,
-                start_cap,
-                final,
-                paths,
-                bench_central=bench_central,
-                bench_rets=(bench_rets if have_bench else None)
-            )
-
-            if enable_oos=="Yes":
-                w_acc,w_n=compute_oos_directional_accuracy_walkforward(prices,weights,"W",5)
-                m_acc,m_n=compute_oos_directional_accuracy_walkforward(prices,weights,"M",21)
-                q_acc,q_n=compute_oos_directional_accuracy_walkforward(prices,weights,"Q",63)
-                s_acc,s_n=compute_oos_directional_accuracy_walkforward(prices,weights,"2Q",126)
-                a_acc,a_n=compute_oos_directional_accuracy_walkforward(prices,weights,"Y",252)
-
-                oos_html=f"""
-                <h3 style='color:white;font-size:22px;font-weight:700;margin-top:25px;'>
-                    Out-Of-Sample Testing Results
-                </h3>
-                <table class='results'>
-                    <tr><th>OOS Horizon</th><th>Directional Accuracy</th><th>Sample Size</th></tr>
-                    <tr><td>Weekly</td><td>{w_acc:.2%}</td><td>{w_n}</td></tr>
-                    <tr><td>Monthly</td><td>{m_acc:.2%}</td><td>{m_n}</td></tr>
-                    <tr><td>Quarterly</td><td>{q_acc:.2%}</td><td>{q_n}</td></tr>
-                    <tr><td>Semiannual</td><td>{s_acc:.2%}</td><td>{s_n}</td></tr>
-                    <tr><td>Annual</td><td>{a_acc:.2%}</td><td>{a_n}</td></tr>
-                </table>
-                """
-                st.markdown(oos_html, unsafe_allow_html=True)
+            plot_forecasts(port_rets, start_cap, final, paths,
+                           bench_central=bench_central,
+                           bench_rets=(bench_rets if have_bench else None))
 
         except Exception as e:
             st.error(f"Error: {e}")
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
