@@ -216,7 +216,6 @@ def plot_forecasts(port_rets, start_cap, central, paths, bench_central=None, ben
     low_cut, high_cut = np.percentile(terminal_vals, [16, 84])
     mask = (terminal_vals >= low_cut) & (terminal_vals <= high_cut)
     filtered = paths[mask]
-
     log_rets = np.log(central[1:] / central[:-1])
     roll_sum = pd.Series(log_rets).rolling(252).sum()
     best_idx, worst_idx = roll_sum.idxmax(), roll_sum.idxmin()
@@ -251,6 +250,7 @@ def plot_forecasts(port_rets, start_cap, central, paths, bench_central=None, ben
                 color="orange", lw=2.5, label="Benchmark Forecast")
     ax.legend(); ax.set_title("Forecast"); ax.set_ylabel("Portfolio Value ($)")
     st.pyplot(fig)
+
     # ---- Plot 2 (Horizon View aligned) ----
     fig2, ax2 = plt.subplots(figsize=(12, 6))
     for sim in filtered[:100]:
@@ -261,7 +261,6 @@ def plot_forecasts(port_rets, start_cap, central, paths, bench_central=None, ben
     ax2.plot(dates[opt_days:], start_cap * central[opt_days:] / central[0],
              color="#6fa8dc", lw=2, label="Beyond Optimal Horizon")
 
-    # ---- MODIFIED LINE: align benchmark start to start_cap ----
     if bench_central is not None:
         ax2.plot(dates, start_cap * bench_central / bench_central[0],
                  color="orange", lw=2.5, label="Benchmark Forecast")
@@ -368,19 +367,21 @@ def main():
 
                 b_opt = estimate_optimal_block_length(residuals_aligned)
 
-            # --- Use SAME block length & JOINT residual sampling (preserve correlation) ---
+            # --- JOINT residual bootstrap preserving correlation ---
             for i in range(ENSEMBLE_SEEDS):
                 rng=np.random.default_rng(GLOBAL_SEED+i)
                 n_blocks = int(np.ceil(total_days / b_opt))
                 offsets = np.arange(b_opt)
 
                 if have_bench:
-                    paired_idx = rng.integers(0, len(residuals_aligned) - b_opt, size=(SIMS_PER_SEED, n_blocks))
+                    joint_residuals = np.column_stack([residuals_aligned, bench_residuals])
+                    paired_idx = rng.integers(0, len(joint_residuals) - b_opt, size=(SIMS_PER_SEED, n_blocks))
                     idx = (paired_idx[..., None] + offsets).reshape(SIMS_PER_SEED, -1)
-                    idx = np.mod(idx, len(residuals_aligned))[:, :total_days]
+                    idx = np.mod(idx, len(joint_residuals))[:, :total_days]
 
-                    eps_port = residuals_aligned[idx]
-                    eps_bench = bench_residuals[idx]
+                    joint_eps = joint_residuals[idx]
+                    eps_port = joint_eps[..., 0]
+                    eps_bench = joint_eps[..., 1]
 
                     sims = np.exp(np.cumsum(base_mean_aligned + eps_port, axis=1, dtype=np.float32) -
                                   np.cumsum(base_mean_aligned + eps_port, axis=1, dtype=np.float32)[:, [0]])
