@@ -374,19 +374,30 @@ def main():
                 offsets = np.arange(b_opt)
 
                 if have_bench:
+                    # --- FIXED: joint block bootstrap preserving true date alignment ---
+                    # Stack residuals into a single 2D matrix so historical dates stay locked across both assets
                     joint_residuals = np.column_stack([residuals_aligned, bench_residuals])
-                    paired_idx = rng.integers(0, len(joint_residuals) - b_opt, size=(SIMS_PER_SEED, n_blocks))
-                    idx = (paired_idx[..., None] + offsets).reshape(SIMS_PER_SEED, -1)
-                    idx = np.mod(idx, len(joint_residuals))[:, :total_days]
+                    n_res = len(joint_residuals)
+                    n_blocks = int(np.ceil(total_days / b_opt))
+                    offsets = np.arange(b_opt)
 
+                    # Draw starting indices jointly
+                    paired_idx = rng.integers(0, n_res - b_opt, size=(SIMS_PER_SEED, n_blocks))
+                    idx = (paired_idx[..., None] + offsets).reshape(SIMS_PER_SEED, -1)
+                    idx = np.mod(idx, n_res)[:, :total_days]
+
+                    # Extract paired residuals for portfolio and benchmark
                     joint_eps = joint_residuals[idx]
                     eps_port = joint_eps[..., 0]
                     eps_bench = joint_eps[..., 1]
 
-                    sims = np.exp(np.cumsum(base_mean_aligned + eps_port, axis=1, dtype=np.float32) -
-                                  np.cumsum(base_mean_aligned + eps_port, axis=1, dtype=np.float32)[:, [0]])
-                    bench_sims = np.exp(np.cumsum(bench_base_mean + eps_bench, axis=1, dtype=np.float32) -
-                                        np.cumsum(bench_base_mean + eps_bench, axis=1, dtype=np.float32)[:, [0]])
+                    # Apply identical block structure for both series
+                    log_port = np.cumsum(base_mean_aligned + eps_port, axis=1, dtype=np.float32)
+                    log_bench = np.cumsum(bench_base_mean + eps_bench, axis=1, dtype=np.float32)
+
+                    # Convert to price paths (normalized to 1)
+                    sims = np.exp(log_port - log_port[:, [0]])
+                    bench_sims = np.exp(log_bench - log_bench[:, [0]])
                 else:
                     shared_starts = rng.integers(0, len(residuals) - b_opt, size=(SIMS_PER_SEED, n_blocks))
                     sims = run_monte_carlo_paths(
