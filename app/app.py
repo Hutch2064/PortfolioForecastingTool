@@ -285,8 +285,15 @@ def plot_forecasts(port_rets, start_cap, central, paths,
                 port_cum.iloc[-1] * central[worst_start:worst_end] / central[0],
                 lw=3, label=f"Worst 1-Year ~ {worst_return*100:.1f}%", color="red")
 
-    # Benchmark overlays (if provided)
+    # ---- Benchmark overlay fix ----
     if bench_port_rets is not None and bench_central is not None and bench_start_cap is not None:
+        bench_central = np.array(bench_central).flatten()
+        if len(bench_central) != len(dates):
+            bench_central = np.interp(
+                np.linspace(0, len(bench_central)-1, len(dates)),
+                np.arange(len(bench_central)),
+                bench_central
+            )
         bench_cum = np.exp(bench_port_rets.cumsum()) * bench_start_cap
         ax.plot(bench_cum.index, bench_cum.values, lw=2, label="Benchmark Backtest", color="dimgray")
         ax.plot(dates, bench_cum.iloc[-1] * bench_central / bench_central[0],
@@ -316,9 +323,15 @@ def plot_forecasts(port_rets, start_cap, central, paths,
                  start_cap * central[worst_start:worst_end] / central[0],
                  lw=3, label=f"Worst 1-Year ~ {worst_return*100:.1f}%", color="red")
 
-    # Benchmark overlay on Plot 2
-    if bench_central is not None:
-        ax2.plot(dates, start_cap * 0 + start_cap * 0, alpha=0)  # keep layout stable
+    # ---- Benchmark overlay fix for Plot 2 ----
+    if bench_central is not None and bench_start_cap is not None:
+        bench_central = np.array(bench_central).flatten()
+        if len(bench_central) != len(dates):
+            bench_central = np.interp(
+                np.linspace(0, len(bench_central)-1, len(dates)),
+                np.arange(len(bench_central)),
+                bench_central
+            )
         ax2.plot(dates, bench_start_cap * bench_central / bench_central[0],
                  lw=2, label="Benchmark Forecast", color="orange")
 
@@ -327,7 +340,7 @@ def plot_forecasts(port_rets, start_cap, central, paths,
     ax2.legend()
     st.pyplot(fig2)
 
-    # ---- Percentile Table (main only, as before) ----
+    # ---- Percentile Table (main only, unchanged) ----
     terminal_vals = paths[:, -1] * start_cap
     percentiles = [5, 25, 50, 75, 95]
     p_vals = np.percentile(terminal_vals, percentiles)
