@@ -141,16 +141,18 @@ def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, total_days, 
     idx = np.mod(idx, n_res)[:, :total_days]
     eps = residuals[idx]
     log_paths = np.cumsum(base_mean + eps, axis=1, dtype=np.float32)
-    return np.exp(log_paths - log_paths[:, [0]]), eps  # return paths AND eps actually used
+    return np.exp(log_paths - log_paths[:, [0]]), eps  # return paths and eps used
 
 # ==========================================================
 # Mean-Like Path
 # ==========================================================
-def compute_medoid_path(paths):
+def compute_medoid_path(paths, return_index=False):
     log_paths = np.log(paths)
     mean_path = np.mean(log_paths, axis=0, dtype=np.float32)
     distances = np.linalg.norm(log_paths - mean_path, axis=1)
     idx = np.argmin(distances)
+    if return_index:
+        return paths[idx], int(idx)
     return paths[idx]
 
 # ==========================================================
@@ -343,7 +345,8 @@ def main():
     tickers = st.text_input("Tickers","VTI,AGG")
     weights_str = st.text_input("Weights","0.6,0.4")
 
-    # --- Benchmark inputs (new) ---
+    # --- Benchmark inputs (single section; not duplicated) ---
+    st.subheader("Benchmark Settings")
     bench_tickers_str = st.text_input("Benchmark Tickers (optional)", "SPY")
     bench_weights_str = st.text_input("Benchmark Weights (optional)", "1.0")
 
@@ -374,44 +377,59 @@ def main():
             # ---------- Main portfolio ----------
             weights = to_weights([float(x) for x in weights_str.split(",")])
             tickers_list = [t.strip() for t in tickers.split(",") if t.strip()]
+
             # --- Fetch main portfolio prices ---
-            prices = fetch_prices_daily(tickers, backtest_start.strftime("%Y-%m-%d"),
+            prices = fetch_prices_daily(tickers_list, backtest_start.strftime("%Y-%m-%d"),
                                         include_dividends=(div_mode == "Yes"))
 
-            # --- Fetch benchmark prices ---
-            bench_tickers = [t.strip() for t in st.text_input("Benchmark Tickers", "SPY").split(",") if t.strip()]
-            bench_weights_str = st.text_input("Benchmark Weights", "1.0")
-            bench_weights = to_weights([float(x) for x in bench_weights_str.split(",")])
+            # --- Optional benchmark fetch (before any returns) ---
+            bench_tickers = [t.strip() for t in bench_tickers_str.split(",") if t.strip()]
+            bench_weights = to_weights([float(x) for x in bench_weights_str.split(",")]) if bench_tickers else None
+            bench_prices = None
+            if bench_tickers:
+                bench_prices = fetch_prices_daily(bench_tickers, backtest_start.strftime("%Y-%m-%d"),
+                                                  include_dividends=(div_mode == "Yes"))
 
-            bench_prices = fetch_prices_daily(bench_tickers, backtest_start.strftime("%Y-%m-%d"),
-                                              include_dividends=(div_mode == "Yes"))
-
-            # --- Align both series to their common overlapping date range ---
-            common_index = prices.index.intersection(bench_prices.index)
-            prices = prices.loc[common_index]
-            bench_prices = bench_prices.loc[common_index]
+                # --- Align both series to their common overlapping date range ---
+                common_index = prices.index.intersection(bench_prices.index)
+                if len(common_index) < 10:
+                    st.warning("Very small overlap between portfolio and benchmark data; correlation may be unreliable.")
+                prices = prices.loc[common_index]
+                bench_prices = bench_prices.loc[common_index]
 
             # --- Compute returns only after alignment ---
             port_rets = portfolio_log_returns_daily(prices, weights)
-            bench_port_rets = portfolio_log_returns_daily(bench_prices, bench_weights)
-            
-            mu, sigma = port_rets.mean(), port_rets.std(ddof=0)
+            bench_port_rets = portfolio_log_returns_daily(bench_prices, bench_weights) if bench_tickers else None
+
+            # --- Main residuals & base mean ---
+            mu = port_rets.mean()
+            sigma = port_rets.std(ddof=0)
             base_mean = mu - 0.5*sigma**2
-            residuals = (port_rets-mu).to_numpy(dtype=np.float32); residuals -= residuals.mean()
+            residuals = (port_rets - mu).to_numpy(dtype=np.float32); residuals -= residuals.mean()
+
+            # --- Block length & simulation settings ---
             b_opt = estimate_optimal_block_length(residuals)
             total_days = 20*252
+
+            # --- Simulate MAIN ensemble; capture eps actually used ---
             all_paths=[]; all_eps=[]; bar2=st.progress(0); txt2=st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng=np.random.default_rng(GLOBAL_SEED+i)
                 sims, eps_used = run_monte_carlo_paths(residuals,SIMS_PER_SEED,rng,base_mean,total_days,b_opt)
-                all_paths.append(sims); all_eps.append(eps_used); bar2.progress((i+1)/ENSEMBLE_SEEDS)
+                all_paths.append(sims); all_eps.append(eps_used)
+                bar2.progress((i+1)/ENSEMBLE_SEEDS)
                 txt2.text(f"Running forecasts... {int((i+1)/ENSEMBLE_SEEDS*100)}%")
             bar2.empty(); txt2.empty()
-            paths_full=np.vstack(all_paths)
-            eps_full=np.vstack(all_eps)  # <-- the exact residuals used in main simulations
-            medoid_full=compute_medoid_path(paths_full)
+
+            paths_full=np.vstack(all_paths)          # (N_paths, total_days)
+            eps_full=np.vstack(all_eps)              # (N_paths, total_days)
+
+            # Medoid for main AND keep index
+            medoid_full, medoid_idx = compute_medoid_path(paths_full, return_index=True)
             forecast_days=forecast_years*252
-            paths=paths_full[:,:forecast_days]; final=medoid_full[:forecast_days]
+            paths=paths_full[:,:forecast_days]
+            final=medoid_full[:forecast_days]
+
             st.session_state["forecast_val"]=final[-1]*start_cap
             stats=compute_forecast_stats_from_path(final,start_cap,port_rets.index[-1])
             back={
@@ -420,10 +438,12 @@ def main():
                 "Sharpe":annualized_sharpe_daily(port_rets),
                 "Max Drawdown":max_drawdown_from_rets(port_rets),
             }
+
             st.markdown(
                 f"<p style='color:white;font-size:27px;font-weight:bold;margin-top:17px;'>"
                 f"Forecasted Portfolio Value ~ <span style='font-weight:300;'>${final[-1]*start_cap:,.2f}</span></p>",
                 unsafe_allow_html=True)
+
             rows=[("CAGR",f"{back['CAGR']:.2%}",f"{stats['CAGR']:.2%}"),
                   ("Volatility",f"{back['Volatility']:.2%}",f"{stats['Volatility']:.2%}"),
                   ("Sharpe",f"{back['Sharpe']:.2f}",f"{stats['Sharpe']:.2f}"),
@@ -438,48 +458,39 @@ def main():
             st.subheader("Performance Comparison")
             st.markdown(html, unsafe_allow_html=True)
 
-            # ---------- Optional Benchmark: reuse main residuals, scale by rho * (sig_b / sig_m), add bench drift ----------
-            bench_port_rets = None
+            # ---------- Optional Benchmark: reuse main eps, scale by rho*(sig_b/sig_m), add bench drift ----------
             bench_final = None
-            bench_paths = None
-            bench_tickers = [t.strip() for t in bench_tickers_str.split(",") if t.strip()]
+            if bench_tickers and bench_port_rets is not None:
+                # Residual correlation on aligned data
+                mu_m = port_rets.mean(); sig_m = port_rets.std(ddof=0)
+                mu_b = bench_port_rets.mean(); sig_b = bench_port_rets.std(ddof=0)
 
-            if bench_tickers and bench_weights_str.strip():
-                bench_weights = to_weights([float(x) for x in bench_weights_str.split(",")])
-                bench_prices = fetch_prices_daily(bench_tickers, backtest_start.strftime("%Y-%m-%d"),
-                                                  include_dividends=(div_mode == "Yes"))
-                bench_port_rets = portfolio_log_returns_daily(bench_prices, bench_weights)
+                eps_m_hist = (port_rets - mu_m).to_numpy(dtype=np.float32)
+                eps_b_hist = (bench_port_rets - mu_b).to_numpy(dtype=np.float32)
+                eps_m_hist -= eps_m_hist.mean(); eps_b_hist -= eps_b_hist.mean()
 
-                # Historical residual stats & correlation
-                aligned = pd.concat([port_rets, bench_port_rets], axis=1, join="inner").dropna()
-                aligned.columns = ["m", "b"]
-                if len(aligned) > 5:
-                    mu_m = aligned["m"].mean(); sig_m = aligned["m"].std(ddof=0)
-                    mu_b = aligned["b"].mean(); sig_b = aligned["b"].std(ddof=0)
-                    eps_m_hist = (aligned["m"] - mu_m).to_numpy(dtype=np.float32)
-                    eps_b_hist = (aligned["b"] - mu_b).to_numpy(dtype=np.float32)
-                    eps_m_hist -= eps_m_hist.mean(); eps_b_hist -= eps_b_hist.mean()
-                    rho = float(np.corrcoef(eps_m_hist, eps_b_hist)[0,1]) if sig_m>0 and sig_b>0 else 0.0
-                else:
-                    # Fallback to overall series stats
-                    mu_m = port_rets.mean(); sig_m = port_rets.std(ddof=0)
-                    mu_b = bench_port_rets.mean(); sig_b = bench_port_rets.std(ddof=0)
+                if len(eps_m_hist) != len(eps_b_hist):
+                    L = min(len(eps_m_hist), len(eps_b_hist))
+                    eps_m_hist = eps_m_hist[-L:]
+                    eps_b_hist = eps_b_hist[-L:]
+
+                # Corr of residuals (signed)
+                if eps_m_hist.std() == 0 or eps_b_hist.std() == 0:
                     rho = 0.0
+                else:
+                    rho = float(np.corrcoef(eps_m_hist, eps_b_hist)[0,1])
 
-                # Benchmark drift and scaled residuals from EXACT main eps used
                 base_mean_b = float(mu_b - 0.5 * (sig_b**2))
                 sig_m_safe = float(sig_m) if float(sig_m) != 0.0 else 1e-12
                 scale = float(rho) * (float(sig_b) / sig_m_safe)
 
-                # Use the *same* eps used in the main ensemble, truncate to forecast_days
-                eps_for_bench = eps_full[:, :forecast_days] * scale  # shape: (ENSEMBLE*SIMS, forecast_days)
-
-                # Build benchmark paths pathwise with its own drift
+                # Use IDENTICAL shocks pathwise; truncate horizon; add drift of benchmark
+                eps_for_bench = eps_full[:, :forecast_days] * scale  # (N_paths, T)
                 log_paths_b = np.cumsum(base_mean_b + eps_for_bench, axis=1, dtype=np.float32)
                 bench_paths_full = np.exp(log_paths_b - log_paths_b[:, [0]])
-                bench_medoid_full = compute_medoid_path(bench_paths_full)
-                bench_paths = bench_paths_full[:, :forecast_days]
-                bench_final = bench_medoid_full[:forecast_days]
+
+                # Use SAME medoid index to keep the central shock path synchronized
+                bench_final = bench_paths_full[medoid_idx, :forecast_days]
 
             # ---------- Plot (with optional benchmark overlay) ----------
             plot_forecasts(
