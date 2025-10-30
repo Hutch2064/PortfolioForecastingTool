@@ -374,8 +374,27 @@ def main():
             # ---------- Main portfolio ----------
             weights = to_weights([float(x) for x in weights_str.split(",")])
             tickers_list = [t.strip() for t in tickers.split(",") if t.strip()]
-            prices = fetch_prices_daily(tickers_list, backtest_start.strftime("%Y-%m-%d"), include_dividends=(div_mode == "Yes"))
+            # --- Fetch main portfolio prices ---
+            prices = fetch_prices_daily(tickers, backtest_start.strftime("%Y-%m-%d"),
+                                        include_dividends=(div_mode == "Yes"))
+
+            # --- Fetch benchmark prices ---
+            bench_tickers = [t.strip() for t in st.text_input("Benchmark Tickers", "SPY").split(",") if t.strip()]
+            bench_weights_str = st.text_input("Benchmark Weights", "1.0")
+            bench_weights = to_weights([float(x) for x in bench_weights_str.split(",")])
+
+            bench_prices = fetch_prices_daily(bench_tickers, backtest_start.strftime("%Y-%m-%d"),
+                                              include_dividends=(div_mode == "Yes"))
+
+            # --- Align both series to their common overlapping date range ---
+            common_index = prices.index.intersection(bench_prices.index)
+            prices = prices.loc[common_index]
+            bench_prices = bench_prices.loc[common_index]
+
+            # --- Compute returns only after alignment ---
             port_rets = portfolio_log_returns_daily(prices, weights)
+            bench_port_rets = portfolio_log_returns_daily(bench_prices, bench_weights)
+            
             mu, sigma = port_rets.mean(), port_rets.std(ddof=0)
             base_mean = mu - 0.5*sigma**2
             residuals = (port_rets-mu).to_numpy(dtype=np.float32); residuals -= residuals.mean()
