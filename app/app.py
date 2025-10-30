@@ -141,7 +141,7 @@ def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, total_days, 
     idx = np.mod(idx, n_res)[:, :total_days]
     eps = residuals[idx]
     log_paths = np.cumsum(base_mean + eps, axis=1, dtype=np.float32)
-    return np.exp(log_paths - log_paths[:, [0]]), eps  # return paths and eps used
+    return np.exp(log_paths - log_paths[:, [0]]), eps  # return paths AND eps actually used
 
 # ==========================================================
 # Mean-Like Path
@@ -204,16 +204,7 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
 # Plot Forecasts (with optional Benchmark)
 # ==========================================================
 def plot_forecasts(port_rets, start_cap, central, paths,
-                   bench_port_rets=None, bench_start_cap=None, bench_central=None,
-                   rho=None, sigma_main=None, sigma_bench=None):
-    """
-    Plots portfolio and (optionally) benchmark forecasts.
-    If benchmark stats (rho, sigma_main, sigma_bench) are provided,
-    the benchmark forecast is generated as a correlated scaled version of the main forecast:
-        correlated_bench = rho * (sigma_bench / sigma_main) * central
-    This preserves the main forecast exactly and ties the benchmark to it.
-    """
-
+                   bench_port_rets=None, bench_start_cap=None, bench_central=None):
     port_cum = np.exp(port_rets.cumsum()) * start_cap
     last = port_cum.index[-1]
     dates = pd.date_range(start=last, periods=len(central), freq="B")
@@ -261,19 +252,18 @@ def plot_forecasts(port_rets, start_cap, central, paths,
                 port_cum.iloc[-1] * central[worst_start:worst_end] / central[0],
                 lw=3, label=f"Worst 1-Year ~ {worst_return*100:.1f}%", color="red")
 
-    # ---- Benchmark overlay using simplified correlation scaling ----
-    if (bench_port_rets is not None and bench_start_cap is not None and
-        rho is not None and sigma_main is not None and sigma_bench is not None):
-        # Use main forecast scaled by correlation and volatility ratio
-        # Safeguard: avoid divide-by-zero on sigma_main
-        sigma_main_safe = float(sigma_main) if float(sigma_main) != 0.0 else 1e-12
-        correlated_bench = rho * (float(sigma_bench) / sigma_main_safe) * central
-        correlated_bench = correlated_bench / correlated_bench[0]  # normalize
-
+    # ---- Benchmark overlays (if provided) ----
+    if bench_port_rets is not None and bench_central is not None and bench_start_cap is not None:
+        bench_central = np.array(bench_central).flatten()
+        if len(bench_central) != len(dates):
+            bench_central = np.interp(
+                np.linspace(0, len(bench_central)-1, len(dates)),
+                np.arange(len(bench_central)),
+                bench_central
+            )
         bench_cum = np.exp(bench_port_rets.cumsum()) * bench_start_cap
-        ax.plot(bench_cum.index, bench_cum.values, lw=2,
-                label="Benchmark Backtest", color="dimgray")
-        ax.plot(dates, bench_cum.iloc[-1] * correlated_bench,
+        ax.plot(bench_cum.index, bench_cum.values, lw=2, label="Benchmark Backtest", color="dimgray")
+        ax.plot(dates, bench_cum.iloc[-1] * bench_central / bench_central[0],
                 lw=2, label="Benchmark Forecast", color="orange")
 
     ax.legend()
@@ -300,13 +290,16 @@ def plot_forecasts(port_rets, start_cap, central, paths,
                  start_cap * central[worst_start:worst_end] / central[0],
                  lw=3, label=f"Worst 1-Year ~ {worst_return*100:.1f}%", color="red")
 
-    # ---- Benchmark overlay for Plot 2 ----
-    if (rho is not None and sigma_main is not None and sigma_bench is not None and
-        bench_start_cap is not None):
-        sigma_main_safe = float(sigma_main) if float(sigma_main) != 0.0 else 1e-12
-        correlated_bench = rho * (float(sigma_bench) / sigma_main_safe) * central
-        correlated_bench = correlated_bench / correlated_bench[0]
-        ax2.plot(dates, bench_start_cap * correlated_bench,
+    # ---- Benchmark overlay on Plot 2 ----
+    if bench_central is not None and bench_start_cap is not None:
+        bench_central = np.array(bench_central).flatten()
+        if len(bench_central) != len(dates):
+            bench_central = np.interp(
+                np.linspace(0, len(bench_central)-1, len(dates)),
+                np.arange(len(bench_central)),
+                bench_central
+            )
+        ax2.plot(dates, bench_start_cap * bench_central / bench_central[0],
                  lw=2, label="Benchmark Forecast", color="orange")
 
     ax2.set_title("Forecast (Horizon View)")
@@ -396,7 +389,7 @@ def main():
                 txt2.text(f"Running forecasts... {int((i+1)/ENSEMBLE_SEEDS*100)}%")
             bar2.empty(); txt2.empty()
             paths_full=np.vstack(all_paths)
-            eps_full=np.vstack(all_eps)
+            eps_full=np.vstack(all_eps)  # <-- the exact residuals used in main simulations
             medoid_full=compute_medoid_path(paths_full)
             forecast_days=forecast_years*252
             paths=paths_full[:,:forecast_days]; final=medoid_full[:forecast_days]
@@ -426,12 +419,11 @@ def main():
             st.subheader("Performance Comparison")
             st.markdown(html, unsafe_allow_html=True)
 
-            # ---------- Optional Benchmark: correlated to main ----------
+            # ---------- Optional Benchmark: reuse main residuals, scale by rho * (sig_b / sig_m), add bench drift ----------
             bench_port_rets = None
             bench_final = None
             bench_paths = None
             bench_tickers = [t.strip() for t in bench_tickers_str.split(",") if t.strip()]
-            rho = None; sigma_main = None; sigma_bench = None
 
             if bench_tickers and bench_weights_str.strip():
                 bench_weights = to_weights([float(x) for x in bench_weights_str.split(",")])
@@ -439,7 +431,7 @@ def main():
                                                   include_dividends=(div_mode == "Yes"))
                 bench_port_rets = portfolio_log_returns_daily(bench_prices, bench_weights)
 
-                # Align for historical residual correlation
+                # Historical residual stats & correlation
                 aligned = pd.concat([port_rets, bench_port_rets], axis=1, join="inner").dropna()
                 aligned.columns = ["m", "b"]
                 if len(aligned) > 5:
@@ -449,20 +441,33 @@ def main():
                     eps_b_hist = (aligned["b"] - mu_b).to_numpy(dtype=np.float32)
                     eps_m_hist -= eps_m_hist.mean(); eps_b_hist -= eps_b_hist.mean()
                     rho = float(np.corrcoef(eps_m_hist, eps_b_hist)[0,1]) if sig_m>0 and sig_b>0 else 0.0
-                    sigma_main = float(sig_m); sigma_bench = float(sig_b)
                 else:
-                    # Fallback if limited overlap
-                    sigma_main = float(port_rets.std(ddof=0))
-                    sigma_bench = float(bench_port_rets.std(ddof=0))
+                    # Fallback to overall series stats
+                    mu_m = port_rets.mean(); sig_m = port_rets.std(ddof=0)
+                    mu_b = bench_port_rets.mean(); sig_b = bench_port_rets.std(ddof=0)
                     rho = 0.0
+
+                # Benchmark drift and scaled residuals from EXACT main eps used
+                base_mean_b = float(mu_b - 0.5 * (sig_b**2))
+                sig_m_safe = float(sig_m) if float(sig_m) != 0.0 else 1e-12
+                scale = float(rho) * (float(sig_b) / sig_m_safe)
+
+                # Use the *same* eps used in the main ensemble, truncate to forecast_days
+                eps_for_bench = eps_full[:, :forecast_days] * scale  # shape: (ENSEMBLE*SIMS, forecast_days)
+
+                # Build benchmark paths pathwise with its own drift
+                log_paths_b = np.cumsum(base_mean_b + eps_for_bench, axis=1, dtype=np.float32)
+                bench_paths_full = np.exp(log_paths_b - log_paths_b[:, [0]])
+                bench_medoid_full = compute_medoid_path(bench_paths_full)
+                bench_paths = bench_paths_full[:, :forecast_days]
+                bench_final = bench_medoid_full[:forecast_days]
 
             # ---------- Plot (with optional benchmark overlay) ----------
             plot_forecasts(
                 port_rets, start_cap, final, paths,
                 bench_port_rets=bench_port_rets,
                 bench_start_cap=start_cap,
-                bench_central=bench_final,
-                rho=rho, sigma_main=sigma_main, sigma_bench=sigma_bench
+                bench_central=bench_final
             )
 
             # ---------- OOS (unchanged) ----------
