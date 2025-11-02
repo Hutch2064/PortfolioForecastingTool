@@ -21,8 +21,8 @@ random.seed(GLOBAL_SEED)
 np.random.seed(GLOBAL_SEED)
 
 DEFAULT_START = "2000-01-01"
-ENSEMBLE_SEEDS = 20
-SIMS_PER_SEED = 5000
+ENSEMBLE_SEEDS = 10
+SIMS_PER_SEED = 2000
 FORECAST_DAYS = 21  # 1-month horizon base
 
 # ==========================================================
@@ -141,18 +141,16 @@ def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, total_days, 
     idx = np.mod(idx, n_res)[:, :total_days]
     eps = residuals[idx]
     log_paths = np.cumsum(base_mean + eps, axis=1, dtype=np.float32)
-    return np.exp(log_paths - log_paths[:, [0]]), eps  # return paths and eps used
+    return np.exp(log_paths - log_paths[:, [0]])
 
 # ==========================================================
 # Mean-Like Path
 # ==========================================================
-def compute_medoid_path(paths, return_index=False):
+def compute_medoid_path(paths):
     log_paths = np.log(paths)
     mean_path = np.mean(log_paths, axis=0, dtype=np.float32)
     distances = np.linalg.norm(log_paths - mean_path, axis=1)
     idx = np.argmin(distances)
-    if return_index:
-        return paths[idx], int(idx)
     return paths[idx]
 
 # ==========================================================
@@ -175,8 +173,8 @@ def compute_oos_directional_accuracy_walkforward(prices, weights, resample_rule,
         all_paths = []
         for seed in range(ENSEMBLE_SEEDS):
             rng = np.random.default_rng(GLOBAL_SEED + seed)
-            sims, _ = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean,
-                                            horizon_days, block_length=b_opt)
+            sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean,
+                                         horizon_days, block_length=b_opt)
             all_paths.append(sims)
         paths = np.vstack(all_paths)
         medoid = compute_medoid_path(paths)
@@ -203,10 +201,9 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
     }
 
 # ==========================================================
-# Plot Forecasts (with optional Benchmark)
+# Plot Forecasts (with Optimal Horizon)
 # ==========================================================
-def plot_forecasts(port_rets, start_cap, central, paths,
-                   bench_port_rets=None, bench_start_cap=None, bench_central=None):
+def plot_forecasts(port_rets, start_cap, central, paths):
     port_cum = np.exp(port_rets.cumsum()) * start_cap
     last = port_cum.index[-1]
     dates = pd.date_range(start=last, periods=len(central), freq="B")
@@ -236,80 +233,52 @@ def plot_forecasts(port_rets, start_cap, central, paths,
 
     # ---- Plot 1 ----
     fig, ax = plt.subplots(figsize=(12, 6))
-    ax.plot(port_cum.index, port_cum.values, lw=2, label="Portfolio Backtest", color="black")
+    ax.plot(port_cum.index, port_cum.values, color="black", lw=2, label="Portfolio Backtest")
     for sim in filtered[:100]:
-        ax.plot(dates, port_cum.iloc[-1] * sim / sim[0], alpha=0.05, color="gray")
+        ax.plot(dates, port_cum.iloc[-1] * sim / sim[0], color="gray", alpha=0.05)
 
     ax.plot(dates[:opt_days], port_cum.iloc[-1] * central[:opt_days] / central[0],
-            lw=2, label=f"Forecast (Optimal ≤ {opt_years:.1f} yrs)", color="blue")
+            color="blue", lw=2, label=f"Forecast (Optimal ≤ {opt_years:.1f} yrs)")
     ax.plot(dates[opt_days:], port_cum.iloc[-1] * central[opt_days:] / central[0],
-            lw=2, label="Beyond Optimal Horizon", color="#6fa8dc")
+            color="#6fa8dc", lw=2, label="Beyond Optimal Horizon")
 
     if best_start is not None:
         ax.plot(dates[best_start:best_end],
                 port_cum.iloc[-1] * central[best_start:best_end] / central[0],
-                lw=3, label=f"Best 1-Year ~ {best_return*100:.1f}%", color="limegreen")
+                color="limegreen", lw=3, label=f"Best 1-Year Period ~ {best_return*100:.1f}%")
     if worst_start is not None:
         ax.plot(dates[worst_start:worst_end],
                 port_cum.iloc[-1] * central[worst_start:worst_end] / central[0],
-                lw=3, label=f"Worst 1-Year ~ {worst_return*100:.1f}%", color="red")
-
-    # ---- Benchmark overlays (if provided) ----
-    if bench_port_rets is not None and bench_central is not None and bench_start_cap is not None:
-        bench_central = np.array(bench_central).flatten()
-        if len(bench_central) != len(dates):
-            bench_central = np.interp(
-                np.linspace(0, len(bench_central)-1, len(dates)),
-                np.arange(len(bench_central)),
-                bench_central
-            )
-        bench_cum = np.exp(bench_port_rets.cumsum()) * bench_start_cap
-        ax.plot(bench_cum.index, bench_cum.values, lw=2, label="Benchmark Backtest", color="dimgray")
-        ax.plot(dates, bench_cum.iloc[-1] * bench_central / bench_central[0],
-                lw=2, label="Benchmark Forecast", color="orange")
-
-    ax.legend()
-    ax.set_title("Forecast")
-    ax.set_ylabel("Portfolio Value ($)")
+                color="red", lw=3, label=f"Worst 1-Year Period ~ {worst_return*100:.1f}%")
+    ax.legend(); ax.set_title("Forecast"); ax.set_ylabel("Portfolio Value ($)")
     st.pyplot(fig)
 
     # ---- Plot 2 ----
     fig2, ax2 = plt.subplots(figsize=(12, 6))
     for sim in filtered[:100]:
-        ax2.plot(dates, start_cap * sim / sim[0], alpha=0.05, color="gray")
+        ax2.plot(dates, start_cap * sim / sim[0], color="gray", alpha=0.05)
 
     ax2.plot(dates[:opt_days], start_cap * central[:opt_days] / central[0],
-             lw=2, label=f"Forecast (Optimal ≤ {opt_years:.1f} yrs)", color="blue")
+             color="blue", lw=2, label=f"Forecast (Optimal ≤ {opt_years:.1f} yrs)")
     ax2.plot(dates[opt_days:], start_cap * central[opt_days:] / central[0],
-             lw=2, label="Beyond Optimal Horizon", color="#6fa8dc")
+             color="#6fa8dc", lw=2, label="Beyond Optimal Horizon")
 
     if best_start is not None:
         ax2.plot(dates[best_start:best_end],
                  start_cap * central[best_start:best_end] / central[0],
-                 lw=3, label=f"Best 1-Year ~ {best_return*100:.1f}%", color="limegreen")
+                 color="limegreen", lw=3,
+                 label=f"Best 1-Year Period ~ {best_return*100:.1f}%")
     if worst_start is not None:
         ax2.plot(dates[worst_start:worst_end],
                  start_cap * central[worst_start:worst_end] / central[0],
-                 lw=3, label=f"Worst 1-Year ~ {worst_return*100:.1f}%", color="red")
-
-    # ---- Benchmark overlay on Plot 2 ----
-    if bench_central is not None and bench_start_cap is not None:
-        bench_central = np.array(bench_central).flatten()
-        if len(bench_central) != len(dates):
-            bench_central = np.interp(
-                np.linspace(0, len(bench_central)-1, len(dates)),
-                np.arange(len(bench_central)),
-                bench_central
-            )
-        ax2.plot(dates, bench_start_cap * bench_central / bench_central[0],
-                 lw=2, label="Benchmark Forecast", color="orange")
-
+                 color="red", lw=3,
+                 label=f"Worst 1-Year Period ~ {worst_return*100:.1f}%")
     ax2.set_title("Forecast (Horizon View)")
     ax2.set_ylabel("Portfolio Value ($)")
     ax2.legend()
     st.pyplot(fig2)
 
-    # ---- Percentile Table (main only, unchanged) ----
+    # ---- Percentile Table ----
     terminal_vals = paths[:, -1] * start_cap
     percentiles = [5, 25, 50, 75, 95]
     p_vals = np.percentile(terminal_vals, percentiles)
@@ -344,12 +313,6 @@ def main():
     st.title("Portfolio Forecasting Tool")
     tickers = st.text_input("Tickers","VTI,AGG")
     weights_str = st.text_input("Weights","0.6,0.4")
-
-    # --- Benchmark inputs (single section; not duplicated) ---
-    st.subheader("Benchmark Settings")
-    bench_tickers_str = st.text_input("Benchmark Tickers (optional)", "SPY")
-    bench_weights_str = st.text_input("Benchmark Weights (optional)", "1.0")
-
     start_cap = st.number_input("Starting Value ($)",1000.0,1_000_000.0,10_000.0,1000.0)
     forecast_years = st.selectbox("Forecast Horizon (Years)", list(range(1,21)), index=0)
     enable_oos = st.selectbox("Out-of-sample Testing",["No","Yes"],index=0)
@@ -374,62 +337,26 @@ def main():
 
     if run_pressed:
         try:
-            # ---------- Main portfolio ----------
             weights = to_weights([float(x) for x in weights_str.split(",")])
-            tickers_list = [t.strip() for t in tickers.split(",") if t.strip()]
-
-            # --- Fetch main portfolio prices ---
-            prices = fetch_prices_daily(tickers_list, backtest_start.strftime("%Y-%m-%d"),
-                                        include_dividends=(div_mode == "Yes"))
-
-            # --- Optional benchmark fetch (before any returns) ---
-            bench_tickers = [t.strip() for t in bench_tickers_str.split(",") if t.strip()]
-            bench_weights = to_weights([float(x) for x in bench_weights_str.split(",")]) if bench_tickers else None
-            bench_prices = None
-            if bench_tickers:
-                bench_prices = fetch_prices_daily(bench_tickers, backtest_start.strftime("%Y-%m-%d"),
-                                                  include_dividends=(div_mode == "Yes"))
-
-                # --- Align both series to their common overlapping date range ---
-                common_index = prices.index.intersection(bench_prices.index)
-                if len(common_index) < 10:
-                    st.warning("Very small overlap between portfolio and benchmark data; correlation may be unreliable.")
-                prices = prices.loc[common_index]
-                bench_prices = bench_prices.loc[common_index]
-
-            # --- Compute returns only after alignment ---
+            tickers = [t.strip() for t in tickers.split(",") if t.strip()]
+            prices = fetch_prices_daily(tickers, backtest_start.strftime("%Y-%m-%d"), include_dividends=(div_mode == "Yes"))
             port_rets = portfolio_log_returns_daily(prices, weights)
-            bench_port_rets = portfolio_log_returns_daily(bench_prices, bench_weights) if bench_tickers else None
-
-            # --- Main residuals & base mean ---
-            mu = port_rets.mean()
-            sigma = port_rets.std(ddof=0)
+            mu, sigma = port_rets.mean(), port_rets.std(ddof=0)
             base_mean = mu - 0.5*sigma**2
-            residuals = (port_rets - mu).to_numpy(dtype=np.float32); residuals -= residuals.mean()
-
-            # --- Block length & simulation settings ---
+            residuals = (port_rets-mu).to_numpy(dtype=np.float32); residuals -= residuals.mean()
             b_opt = estimate_optimal_block_length(residuals)
             total_days = 20*252
-
-            # --- Simulate MAIN ensemble; capture eps actually used ---
-            all_paths=[]; all_eps=[]; bar2=st.progress(0); txt2=st.empty()
+            all_paths=[]; bar2=st.progress(0); txt2=st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng=np.random.default_rng(GLOBAL_SEED+i)
-                sims, eps_used = run_monte_carlo_paths(residuals,SIMS_PER_SEED,rng,base_mean,total_days,b_opt)
-                all_paths.append(sims); all_eps.append(eps_used)
-                bar2.progress((i+1)/ENSEMBLE_SEEDS)
+                sims=run_monte_carlo_paths(residuals,SIMS_PER_SEED,rng,base_mean,total_days,b_opt)
+                all_paths.append(sims); bar2.progress((i+1)/ENSEMBLE_SEEDS)
                 txt2.text(f"Running forecasts... {int((i+1)/ENSEMBLE_SEEDS*100)}%")
             bar2.empty(); txt2.empty()
-
-            paths_full=np.vstack(all_paths)          # (N_paths, total_days)
-            eps_full=np.vstack(all_eps)              # (N_paths, total_days)
-
-            # Medoid for main AND keep index
-            medoid_full, medoid_idx = compute_medoid_path(paths_full, return_index=True)
+            paths_full=np.vstack(all_paths)
+            medoid_full=compute_medoid_path(paths_full)
             forecast_days=forecast_years*252
-            paths=paths_full[:,:forecast_days]
-            final=medoid_full[:forecast_days]
-
+            paths=paths_full[:,:forecast_days]; final=medoid_full[:forecast_days]
             st.session_state["forecast_val"]=final[-1]*start_cap
             stats=compute_forecast_stats_from_path(final,start_cap,port_rets.index[-1])
             back={
@@ -438,12 +365,10 @@ def main():
                 "Sharpe":annualized_sharpe_daily(port_rets),
                 "Max Drawdown":max_drawdown_from_rets(port_rets),
             }
-
             st.markdown(
                 f"<p style='color:white;font-size:27px;font-weight:bold;margin-top:17px;'>"
                 f"Forecasted Portfolio Value ~ <span style='font-weight:300;'>${final[-1]*start_cap:,.2f}</span></p>",
                 unsafe_allow_html=True)
-
             rows=[("CAGR",f"{back['CAGR']:.2%}",f"{stats['CAGR']:.2%}"),
                   ("Volatility",f"{back['Volatility']:.2%}",f"{stats['Volatility']:.2%}"),
                   ("Sharpe",f"{back['Sharpe']:.2f}",f"{stats['Sharpe']:.2f}"),
@@ -457,50 +382,8 @@ def main():
             "".join([f"<tr><td>{a}</td><td>{b}</td><td>{c}</td></tr>" for a,b,c in rows])+"</table>")
             st.subheader("Performance Comparison")
             st.markdown(html, unsafe_allow_html=True)
+            plot_forecasts(port_rets,start_cap,final,paths)
 
-            # ---------- Optional Benchmark: reuse main eps, scale by rho*(sig_b/sig_m), add bench drift ----------
-            bench_final = None
-            if bench_tickers and bench_port_rets is not None:
-                # Residual correlation on aligned data
-                mu_m = port_rets.mean(); sig_m = port_rets.std(ddof=0)
-                mu_b = bench_port_rets.mean(); sig_b = bench_port_rets.std(ddof=0)
-
-                eps_m_hist = (port_rets - mu_m).to_numpy(dtype=np.float32)
-                eps_b_hist = (bench_port_rets - mu_b).to_numpy(dtype=np.float32)
-                eps_m_hist -= eps_m_hist.mean(); eps_b_hist -= eps_b_hist.mean()
-
-                if len(eps_m_hist) != len(eps_b_hist):
-                    L = min(len(eps_m_hist), len(eps_b_hist))
-                    eps_m_hist = eps_m_hist[-L:]
-                    eps_b_hist = eps_b_hist[-L:]
-
-                # Corr of residuals (signed)
-                if eps_m_hist.std() == 0 or eps_b_hist.std() == 0:
-                    rho = 0.0
-                else:
-                    rho = float(np.corrcoef(eps_m_hist, eps_b_hist)[0,1])
-
-                base_mean_b = float(mu_b - 0.5 * (sig_b**2))
-                sig_m_safe = float(sig_m) if float(sig_m) != 0.0 else 1e-12
-                scale = float(rho) * (float(sig_b) / sig_m_safe)
-
-                # Use IDENTICAL shocks pathwise; truncate horizon; add drift of benchmark
-                eps_for_bench = eps_full[:, :forecast_days] * scale  # (N_paths, T)
-                log_paths_b = np.cumsum(base_mean_b + eps_for_bench, axis=1, dtype=np.float32)
-                bench_paths_full = np.exp(log_paths_b - log_paths_b[:, [0]])
-
-                # Use SAME medoid index to keep the central shock path synchronized
-                bench_final = bench_paths_full[medoid_idx, :forecast_days]
-
-            # ---------- Plot (with optional benchmark overlay) ----------
-            plot_forecasts(
-                port_rets, start_cap, final, paths,
-                bench_port_rets=bench_port_rets,
-                bench_start_cap=start_cap,
-                bench_central=bench_final
-            )
-
-            # ---------- OOS (unchanged) ----------
             if enable_oos=="Yes":
                 w_acc,w_n=compute_oos_directional_accuracy_walkforward(prices,weights,"W",5)
                 m_acc,m_n=compute_oos_directional_accuracy_walkforward(prices,weights,"M",21)
