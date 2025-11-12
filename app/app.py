@@ -135,13 +135,16 @@ def estimate_optimal_block_length(residuals):
 def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, total_days, block_length):
     n_res = len(residuals)
     n_blocks = int(np.ceil(total_days / block_length))
-    starts = rng.integers(0, n_res - block_length, size=(sims_per_seed, n_blocks))
-    offsets = np.arange(block_length)
+    starts = rng.integers(0, n_res - block_length, size=(sims_per_seed, n_blocks), dtype=np.int32)
+    offsets = np.arange(block_length, dtype=np.int32)
     idx = (starts[..., None] + offsets).reshape(sims_per_seed, -1)
-    idx = np.mod(idx, n_res)[:, :total_days]
-    eps = residuals[idx]
+    idx = np.mod(idx, n_res, dtype=np.int32)[:, :total_days]
+
+    eps = residuals[idx].astype(np.float32, copy=False)
+    base_mean = np.float32(base_mean)
+
     log_paths = np.cumsum(base_mean + eps, axis=1, dtype=np.float32)
-    return np.exp(log_paths - log_paths[:, [0]])
+    return np.exp(log_paths - log_paths[:, [0]], dtype=np.float32)
 
 # ==========================================================
 # Mean-Like Path
@@ -346,14 +349,24 @@ def main():
             residuals = (port_rets-mu).to_numpy(dtype=np.float32); residuals -= residuals.mean()
             b_opt = estimate_optimal_block_length(residuals)
             total_days = 40*252
-            all_paths=[]; bar2=st.progress(0); txt2=st.empty()
+            bar2 = st.progress(0)
+            txt2 = st.empty()
+
+            total_sims = ENSEMBLE_SEEDS * SIMS_PER_SEED
+            paths_full = np.empty((total_sims, total_days), dtype=np.float32)
+
             for i in range(ENSEMBLE_SEEDS):
-                rng=np.random.default_rng(GLOBAL_SEED+i)
-                sims=run_monte_carlo_paths(residuals,SIMS_PER_SEED,rng,base_mean,total_days,b_opt)
-                all_paths.append(sims); bar2.progress((i+1)/ENSEMBLE_SEEDS)
-                txt2.text(f"Running forecasts... {int((i+1)/ENSEMBLE_SEEDS*100)}%")
-            bar2.empty(); txt2.empty()
-            paths_full=np.vstack(all_paths)
+                rng = np.random.default_rng(GLOBAL_SEED + i)
+                sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean, total_days, b_opt)
+                start = i * SIMS_PER_SEED
+                paths_full[start:start + SIMS_PER_SEED, :] = sims
+                bar2.progress((i + 1) / ENSEMBLE_SEEDS)
+                txt2.text(f"Running forecasts... {int((i + 1) / ENSEMBLE_SEEDS * 100)}%")
+
+            bar2.empty()
+            txt2.empty()
+            del sims  # free memory from last batch
+            import gc; gc.collect()
             medoid_full=compute_medoid_path(paths_full)
             forecast_days=forecast_years*252
             paths=paths_full[:,:forecast_days]; final=medoid_full[:forecast_days]
