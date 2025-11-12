@@ -2,7 +2,6 @@ import sys
 import warnings
 import random
 import os
-import tempfile
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -136,16 +135,13 @@ def estimate_optimal_block_length(residuals):
 def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, total_days, block_length):
     n_res = len(residuals)
     n_blocks = int(np.ceil(total_days / block_length))
-    starts = rng.integers(0, n_res - block_length, size=(sims_per_seed, n_blocks), dtype=np.int32)
-    offsets = np.arange(block_length, dtype=np.int32)
+    starts = rng.integers(0, n_res - block_length, size=(sims_per_seed, n_blocks))
+    offsets = np.arange(block_length)
     idx = (starts[..., None] + offsets).reshape(sims_per_seed, -1)
-    idx = np.mod(idx, n_res, dtype=np.int32)[:, :total_days]
-
-    eps = residuals[idx].astype(np.float32, copy=False)
-    base_mean = np.float32(base_mean)
-
+    idx = np.mod(idx, n_res)[:, :total_days]
+    eps = residuals[idx]
     log_paths = np.cumsum(base_mean + eps, axis=1, dtype=np.float32)
-    return np.exp(log_paths - log_paths[:, [0]], dtype=np.float32)
+    return np.exp(log_paths - log_paths[:, [0]])
 
 # ==========================================================
 # Mean-Like Path
@@ -318,7 +314,7 @@ def main():
     tickers = st.text_input("Tickers","VTI,AGG")
     weights_str = st.text_input("Weights","0.6,0.4")
     start_cap = st.number_input("Starting Value ($)",1000.0,1_000_000.0,10_000.0,1000.0)
-    forecast_years = st.selectbox("Forecast Horizon (Years)", list(range(1,41)), index=0)
+    forecast_years = st.selectbox("Forecast Horizon (Years)", list(range(1,21)), index=0)
     enable_oos = st.selectbox("Out-of-sample Testing",["No","Yes"],index=0)
     div_mode = st.selectbox("Reinvest Dividends", ["No", "Yes"], index=1)
     backtest_start = st.date_input("Backtest Start Date",
@@ -349,39 +345,15 @@ def main():
             base_mean = mu - 0.5*sigma**2
             residuals = (port_rets-mu).to_numpy(dtype=np.float32); residuals -= residuals.mean()
             b_opt = estimate_optimal_block_length(residuals)
-            total_days = 40*252
-            bar2 = st.progress(0)
-            txt2 = st.empty()
-
-            # --- Memory-mapped array to prevent RAM exhaustion ---
-            import gc, os
-            memmap_path = tempfile.NamedTemporaryFile(delete=False).name
-            total_sims = ENSEMBLE_SEEDS * SIMS_PER_SEED
-            paths_full = np.memmap(memmap_path, dtype=np.float32, mode="w+", shape=(total_sims, total_days))
-
+            total_days = 20*252
+            all_paths=[]; bar2=st.progress(0); txt2=st.empty()
             for i in range(ENSEMBLE_SEEDS):
-                rng = np.random.default_rng(GLOBAL_SEED + i)
-                sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean, total_days, b_opt)
-                start = i * SIMS_PER_SEED
-                paths_full[start:start + SIMS_PER_SEED, :] = sims
-                del sims
-                gc.collect()
-                bar2.progress((i + 1) / ENSEMBLE_SEEDS)
-                txt2.text(f"Running forecasts... {int((i + 1) / ENSEMBLE_SEEDS * 100)}%")
-
-            bar2.empty()
-            txt2.empty()
-
-            # Convert back to normal NumPy array (still float32)
-            paths_full = np.array(paths_full, dtype=np.float32)
-
-            # Clean up the temporary file
-            try:
-                os.remove(memmap_path)
-            except Exception:
-                pass
-
-            gc.collect()
+                rng=np.random.default_rng(GLOBAL_SEED+i)
+                sims=run_monte_carlo_paths(residuals,SIMS_PER_SEED,rng,base_mean,total_days,b_opt)
+                all_paths.append(sims); bar2.progress((i+1)/ENSEMBLE_SEEDS)
+                txt2.text(f"Running forecasts... {int((i+1)/ENSEMBLE_SEEDS*100)}%")
+            bar2.empty(); txt2.empty()
+            paths_full=np.vstack(all_paths)
             medoid_full=compute_medoid_path(paths_full)
             forecast_days=forecast_years*252
             paths=paths_full[:,:forecast_days]; final=medoid_full[:forecast_days]
