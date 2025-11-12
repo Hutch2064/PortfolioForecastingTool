@@ -2,6 +2,7 @@ import sys
 import warnings
 import random
 import os
+import tempfile
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -352,21 +353,35 @@ def main():
             bar2 = st.progress(0)
             txt2 = st.empty()
 
+            # --- Memory-mapped array to prevent RAM exhaustion ---
+            import gc, os
+            memmap_path = tempfile.NamedTemporaryFile(delete=False).name
             total_sims = ENSEMBLE_SEEDS * SIMS_PER_SEED
-            paths_full = np.empty((total_sims, total_days), dtype=np.float32)
+            paths_full = np.memmap(memmap_path, dtype=np.float32, mode="w+", shape=(total_sims, total_days))
 
             for i in range(ENSEMBLE_SEEDS):
                 rng = np.random.default_rng(GLOBAL_SEED + i)
                 sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean, total_days, b_opt)
                 start = i * SIMS_PER_SEED
                 paths_full[start:start + SIMS_PER_SEED, :] = sims
+                del sims
+                gc.collect()
                 bar2.progress((i + 1) / ENSEMBLE_SEEDS)
                 txt2.text(f"Running forecasts... {int((i + 1) / ENSEMBLE_SEEDS * 100)}%")
 
             bar2.empty()
             txt2.empty()
-            del sims  # free memory from last batch
-            import gc; gc.collect()
+
+            # Convert back to normal NumPy array (still float32)
+            paths_full = np.array(paths_full, dtype=np.float32)
+
+            # Clean up the temporary file
+            try:
+                os.remove(memmap_path)
+            except Exception:
+                pass
+
+            gc.collect()
             medoid_full=compute_medoid_path(paths_full)
             forecast_days=forecast_years*252
             paths=paths_full[:,:forecast_days]; final=medoid_full[:forecast_days]
