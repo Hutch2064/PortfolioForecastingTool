@@ -345,7 +345,7 @@ def main():
             base_mean = mu - 0.5*sigma**2
             residuals = (port_rets-mu).to_numpy(dtype=np.float32); residuals -= residuals.mean()
             b_opt = estimate_optimal_block_length(residuals)
-            total_days = 20*252
+            total_days = 40*252
             all_paths=[]; bar2=st.progress(0); txt2=st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng=np.random.default_rng(GLOBAL_SEED+i)
