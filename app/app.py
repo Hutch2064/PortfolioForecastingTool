@@ -314,7 +314,7 @@ def main():
     tickers = st.text_input("Tickers","VTI,AGG")
     weights_str = st.text_input("Weights","0.6,0.4")
     start_cap = st.number_input("Starting Value ($)",1000.0,1_000_000.0,10_000.0,1000.0)
-    forecast_years = st.selectbox("Forecast Horizon (Years)", list(range(1,21)), index=0)
+    forecast_years = st.selectbox("Forecast Horizon (Years)", list(range(1,41)), index=0)
     enable_oos = st.selectbox("Out-of-sample Testing",["No","Yes"],index=0)
     div_mode = st.selectbox("Reinvest Dividends", ["No", "Yes"], index=1)
     backtest_start = st.date_input("Backtest Start Date",
