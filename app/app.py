@@ -144,7 +144,7 @@ def run_monte_carlo_paths(residuals, sims_per_seed, rng, base_mean, total_days, 
     return np.exp(log_paths - log_paths[:, [0]])
 
 # ==========================================================
-# Mean-Like Path
+# Most Likely Path
 # ==========================================================
 def compute_medoid_path(paths):
     log_paths = np.log(paths)
