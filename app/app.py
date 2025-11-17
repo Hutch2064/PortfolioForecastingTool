@@ -203,7 +203,7 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
 # ==========================================================
 # Plot Forecasts (with Optimal Horizon)
 # ==========================================================
-def plot_forecasts(port_rets, start_cap, central, paths):
+def plot_forecasts(port_rets, start_cap, central, paths, median_path):
     port_cum = np.exp(port_rets.cumsum()) * start_cap
     last = port_cum.index[-1]
     dates = pd.date_range(start=last, periods=len(central), freq="B")
@@ -241,6 +241,11 @@ def plot_forecasts(port_rets, start_cap, central, paths):
             color="blue", lw=2, label=f"Forecast (Optimal ≤ {opt_years:.1f} yrs)")
     ax.plot(dates[opt_days:], port_cum.iloc[-1] * central[opt_days:] / central[0],
             color="#6fa8dc", lw=2, label="Beyond Optimal Horizon")
+   
+    # ---- Median Path (Plot 1) ----
+    median_norm = median_path / median_path[0]
+    ax.plot(dates, port_cum.iloc[-1] * median_norm,
+            color="orange", lw=2, linestyle="--", label="Median Path")
 
     if best_start is not None:
         ax.plot(dates[best_start:best_end],
@@ -262,6 +267,11 @@ def plot_forecasts(port_rets, start_cap, central, paths):
              color="blue", lw=2, label=f"Forecast (Optimal ≤ {opt_years:.1f} yrs)")
     ax2.plot(dates[opt_days:], start_cap * central[opt_days:] / central[0],
              color="#6fa8dc", lw=2, label="Beyond Optimal Horizon")
+
+    # ---- Median Path (Plot 2) ----
+    median_norm = median_path / median_path[0]
+    ax2.plot(dates, start_cap * median_norm,
+             color="orange", lw=2, linestyle="--", label="Median Path")
 
     if best_start is not None:
         ax2.plot(dates[best_start:best_end],
@@ -357,6 +367,7 @@ def main():
             medoid_full=compute_medoid_path(paths_full)
             forecast_days=forecast_years*252
             paths=paths_full[:,:forecast_days]; final=medoid_full[:forecast_days]
+            median_path = np.median(paths, axis=0).astype(np.float32)
             st.session_state["forecast_val"]=final[-1]*start_cap
             stats=compute_forecast_stats_from_path(final,start_cap,port_rets.index[-1])
             back={
@@ -382,7 +393,7 @@ def main():
             "".join([f"<tr><td>{a}</td><td>{b}</td><td>{c}</td></tr>" for a,b,c in rows])+"</table>")
             st.subheader("Performance Comparison")
             st.markdown(html, unsafe_allow_html=True)
-            plot_forecasts(port_rets,start_cap,final,paths)
+            plot_forecasts(port_rets,start_cap,final,paths,median_path)
 
             if enable_oos=="Yes":
                 w_acc,w_n=compute_oos_directional_accuracy_walkforward(prices,weights,"W",5)
