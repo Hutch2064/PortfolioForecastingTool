@@ -245,7 +245,7 @@ def plot_forecasts(port_rets, start_cap, central, paths, median_path):
     # ---- Median Path (Plot 1) ----
     median_norm = median_path / median_path[0]
     ax.plot(dates, port_cum.iloc[-1] * median_norm,
-            color="orange", lw=2, linestyle="--", label="Median Path")
+            color="orange", lw=2, label="Median Path")
 
     if best_start is not None:
         ax.plot(dates[best_start:best_end],
@@ -271,7 +271,7 @@ def plot_forecasts(port_rets, start_cap, central, paths, median_path):
     # ---- Median Path (Plot 2) ----
     median_norm = median_path / median_path[0]
     ax2.plot(dates, start_cap * median_norm,
-             color="orange", lw=2, linestyle="--", label="Median Path")
+             color="orange", lw=2, label="Median Path")
 
     if best_start is not None:
         ax2.plot(dates[best_start:best_end],
