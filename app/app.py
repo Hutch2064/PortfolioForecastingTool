@@ -65,19 +65,46 @@ def max_drawdown_from_rets(returns):
     return (cum / roll_max - 1.0).min()
 
     
-def simulate_leveraged_etf(price, L=3, vol_window=20):
+def simulate_leveraged_etf(price, L=3, vol_window=20, repo_rate=0.05):
+    """
+    Realistic levered ETF simulator:
+    - Daily rebalanced leverage
+    - Volatility drag
+    - Leverage-scaled financing drag
+    - Leverage-scaled tracking drag
+    - 1% management fee for all levered ETFs
+    """
     # Daily log returns
     log_ret = np.log(price / price.shift(1)).fillna(0)
 
-    # Rolling volatility
+    # Rolling volatility estimate
     sigma = log_ret.rolling(vol_window).std().fillna(method="bfill")
 
-    # Leverage-adjusted log returns with volatility drag
-    lev_log_ret = L * log_ret - (L**2 - L) * (sigma**2 / 2)
+    # 1% management fee
+    mgmt_fee = 0.01
+
+    # Financing drag scales with (L - 1)
+    financing_drag = (L - 1) * repo_rate
+
+    # Tracking/friction drag scales with leverage
+    tracking_drag = (L - 1) * 0.01
+
+    # Total annual drag
+    annual_drag = mgmt_fee + financing_drag + tracking_drag
+
+    # Convert annual drag to daily log-return drag
+    daily_drag = annual_drag / 252
+
+    # Leverage returns with volatility drag + daily drag
+    lev_log_ret = (
+        L * log_ret
+        - (L**2 - L) * (sigma**2 / 2)
+        - daily_drag
+    )
 
     # Rebuild price series
     lev_price = np.exp(lev_log_ret.cumsum())
-    lev_price *= price.iloc[0]  # maintain starting level
+    lev_price *= price.iloc[0]
 
     return lev_price
 
