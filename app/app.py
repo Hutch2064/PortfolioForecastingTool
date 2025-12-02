@@ -63,6 +63,22 @@ def max_drawdown_from_rets(returns):
     cum = np.exp(returns.cumsum())
     roll_max = cum.cummax()
     return (cum / roll_max - 1.0).min()
+    
+    def simulate_leveraged_etf(price, L=3, vol_window=20):
+    # Daily log returns
+    log_ret = np.log(price / price.shift(1)).fillna(0)
+
+    # Rolling volatility
+    sigma = log_ret.rolling(vol_window).std().fillna(method="bfill")
+
+    # Leverage-adjusted log returns with volatility drag
+    lev_log_ret = L * log_ret - (L**2 - L) * (sigma**2 / 2)
+
+    # Rebuild price series
+    lev_price = np.exp(lev_log_ret.cumsum())
+    lev_price *= price.iloc[0]  # maintain starting level
+
+    return lev_price
 
 # ==========================================================
 # Data Fetch
@@ -363,13 +379,33 @@ def main():
     if run_pressed:
         try:
             weights = to_weights([float(x) for x in weights_str.split(",")])
-            tickers = [t.strip() for t in tickers.split(",") if t.strip()]
+            raw_inputs = [t.strip() for t in tickers.split(",") if t.strip()]
+            tickers = []
+            leverage_map = {}
+
+            for item in raw_inputs:
+                if "=" in item:
+                # Format: GLDL=3  or  BTC=2  or  SPY=1.5
+                symbol, lev = item.split("=")
+                symbol = symbol.strip()
+                lev = float(lev.strip())
+                tickers.append(symbol)
+                leverage_map[symbol] = lev
+            else:
+                tickers.append(item)
+                leverage_map[item] = 1.0  # default: no leverage
+                
             prices = fetch_prices_daily(
                 tickers,
                 backtest_start.strftime("%Y-%m-%d"),
                 include_dividends=(div_mode == "Yes")
             )
-
+            # Apply leverage transformations asset by asset
+            for col in prices.columns:
+                L = leverage_map.get(col, 1.0)
+                if L != 1.0:
+                    prices[col] = simulate_leveraged_etf(prices[col], L)
+                    
             # Base portfolio
             port_rets = portfolio_log_returns_daily(prices, weights)
 
