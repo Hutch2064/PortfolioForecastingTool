@@ -407,16 +407,22 @@ def main():
                 if L != 1.0:
                     prices[col] = simulate_leveraged_etf(prices[col], L)
                     
+            # --- SANITIZE PRICE SERIES AFTER LEVERAGE ---
+            prices = prices.replace([np.inf, -np.inf], np.nan).ffill().bfill()
+                   
             # Base portfolio
             port_rets = portfolio_log_returns_daily(prices, weights)
 
             # ---- SHARPE-OPTIMAL PORTFOLIO (ADDED HERE) ----
-            rets_matrix = np.log(prices / prices.shift(1)).dropna()
+            # --- CLEAN RETURN MATRIX FOR SHARPE OPTIMIZATION ---
+            rets_matrix = np.log(prices / prices.shift(1))
+            rets_matrix = rets_matrix.replace([np.inf, -np.inf], np.nan).dropna(how="any")
             mu_vec = rets_matrix.mean().values
-            cov = rets_matrix.cov().values
             # --- Prevent covariance singularities from leveraged assets ---
             eps = 1e-8
-            cov = cov + np.eye(cov.shape[0]) * eps
+            # --- STABILIZE COVARIANCE FOR LEVERAGED ASSETS ---
+            cov += np.eye(cov.shape[0]) * 1e-8
+
             inv_cov = np.linalg.pinv(cov)
             w_opt = inv_cov @ mu_vec
             w_opt = w_opt / w_opt.sum()
