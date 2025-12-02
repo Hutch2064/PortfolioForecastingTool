@@ -379,20 +379,28 @@ def main():
     if run_pressed:
         try:
             weights = to_weights([float(x) for x in weights_str.split(",")])
-            raw_inputs = [t.strip() for t in tickers.split(",") if t.strip()]
+            # Parse leverage tickers like "GLD=3" or "AGG=2"
+            ticker_input = tickers.strip()
+            raw_inputs = [t.strip() for t in ticker_input.split(",") if t.strip()]
+
             tickers = []
             leverage_map = {}
 
             for item in raw_inputs:
                 if "=" in item:
-                    symbol, lev = item.split("=")
+                    # Exact split: ticker name left, leverage right
+                    symbol, lev = item.split("=", 1)
                     symbol = symbol.strip()
                     lev = float(lev.strip())
+
                     tickers.append(symbol)
                     leverage_map[symbol] = lev
+
                 else:
-                    tickers.append(item)
-                    leverage_map[item] = 1.0
+                    # Regular non-leveraged ticker
+                    symbol = item.strip()
+                    tickers.append(symbol)
+                    leverage_map[symbol] = 1.0
                 
             prices = fetch_prices_daily(
                 tickers,
