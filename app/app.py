@@ -225,7 +225,7 @@ def compute_medoid_path(paths):
 # Forecast-Based Walk-Forward Directional Accuracy
 # ==========================================================
 def compute_oos_directional_accuracy_walkforward(prices, weights, resample_rule, horizon_days):
-    port_rets = portfolio_log_returns_daily(prices, weights)
+    port_rets = np.exp(portfolio_log_returns_daily(prices, weights)) - 1
     agg_returns = port_rets.resample(resample_rule).sum()
     dates = agg_returns.index
     preds, acts = [], []
@@ -265,7 +265,7 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
     norm = path / path[0]
     idx = pd.date_range(start=last_date, periods=len(norm) + 1, freq="B")
     price = pd.Series(norm, index=idx[:-1]) * start_cap
-    rets = np.log(price / price.shift(1)).dropna()
+    rets = price.pct_change().dropna()
     return {
         "CAGR": annualized_return_daily(rets),
         "Volatility": annualized_vol_daily(rets),
@@ -498,13 +498,13 @@ def main():
             prices = prices.replace([np.inf, -np.inf], np.nan).ffill().bfill()
 
             # Base portfolio returns
-            port_rets = portfolio_log_returns_daily(prices, weights)
+            port_rets = np.exp(portfolio_log_returns_daily(prices, weights)) - 1
 
             # ==========================================================
             # Sharpe-optimal Portfolio Section
             # ==========================================================
             # --- CLEAN RETURN MATRIX BEFORE OPT ---
-            rets_matrix = np.log(prices / prices.shift(1))
+            rets_matrix = prices.pct_change()
             rets_matrix = rets_matrix.replace([np.inf, -np.inf], np.nan).dropna(how="any")
 
             mu_vec = rets_matrix.mean().values
