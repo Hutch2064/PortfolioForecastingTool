@@ -380,7 +380,6 @@ def main():
         try:
             weights = to_weights([float(x) for x in weights_str.split(",")])
             # Parse leverage tickers like "GLD=3" or "AGG=2"
-            ticker_input = tickers.strip()
             raw_inputs = [t.strip() for t in tickers.split(",") if t.strip()]
             tickers = []
             leverage_map = {}
