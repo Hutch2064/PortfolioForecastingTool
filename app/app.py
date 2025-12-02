@@ -422,7 +422,7 @@ def main():
             table.results th,table.results td{color:white!important;font-family:'Helvetica Neue',sans-serif!important;
             font-size:15px!important;padding:3px 10px!important;text-align:left!important;}
             </style><table class='results'><tr><th>Metric</th><th>Backtest</th><th>Forecast</th><th>Sharpe-Optimal</th></tr>"""+
-            "".join([f"<tr><td>{a}</td><td>{b}</td><td>{c}</td></tr>" for a,b,c in rows])+"</table>")
+            "".join([f"<tr><td>{a}</td><td>{b}</td><td>{c}</td><td>{d}</td></tr>" for a,b,c,d in rows])
             st.subheader("Performance Comparison")
             st.markdown(html, unsafe_allow_html=True)
             plot_forecasts(port_rets,start_cap,final,paths,median_path,opt_cum=opt_cum)
