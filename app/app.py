@@ -566,7 +566,7 @@ def main():
 
             st.markdown(
                 "<p style='color:white;font-size:14px;margin-top:5px;'>"
-                f"<b>Sharpe-Optimal Weights:</b> weights_display"
+                f"<b>Sharpe-Optimal Weights:</b> {weights_display}"
                 "</p>",
                 unsafe_allow_html=True
             )
