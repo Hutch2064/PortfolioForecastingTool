@@ -417,9 +417,23 @@ def main():
                 include_dividends=(div_mode == "Yes")
             )
           
-            # --- ALIGN START DATE TO FIRST FULL ROW (all tickers available) ---
-            first_valid = prices.dropna(how="any").index[0]
-            prices = prices.loc[first_valid:]
+            # --- FIND TRUE INCEPTION DATE FOR EACH TICKER (NO GHOST DATA) ---
+            valid_starts = []
+
+            for col in prices.columns:
+                s = prices[col]
+
+                # Find first REAL price (not NaN, not 0, not ghost filler)
+                real_idx = s[(s.notna()) & (s > 0)].index
+
+                if len(real_idx) == 0:
+                    raise ValueError(f"No valid data found for ticker {col}")
+
+                valid_starts.append(real_idx[0])
+
+            # TRUE backtest start = latest real inception date across all tickers
+            true_start = max(valid_starts)
+            prices = prices.loc[true_start:]
             
             
             
