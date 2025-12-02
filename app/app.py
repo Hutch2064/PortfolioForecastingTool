@@ -414,6 +414,9 @@ def main():
             rets_matrix = np.log(prices / prices.shift(1)).dropna()
             mu_vec = rets_matrix.mean().values
             cov = rets_matrix.cov().values
+            # --- Prevent covariance singularities from leveraged assets ---
+            eps = 1e-8
+            cov = cov + np.eye(cov.shape[0]) * eps
             inv_cov = np.linalg.pinv(cov)
             w_opt = inv_cov @ mu_vec
             w_opt = w_opt / w_opt.sum()
