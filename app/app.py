@@ -50,13 +50,37 @@ def annualized_vol_daily(r):
     return r.std(ddof=0) * np.sqrt(252) if len(r) > 1 else np.nan
 
 
-def annualized_sharpe_daily(r, rf_daily=0.0):
+def annualized_sharpe(r, rf_annual=0.0):
+    """
+    Industry-standard Sharpe ratio:
+    - simple returns
+    - sample std (ddof=1)
+    - auto-detect annualization frequency based on actual dates
+    - matches PortfolioVisualizer, Koyfin, TradingView, Binance Analytics, etc.
+    """
     r = r.dropna()
     if r.empty:
         return np.nan
-    excess = r - rf_daily
-    mu, sigma = excess.mean(), excess.std(ddof=0)
-    return (mu / sigma) * np.sqrt(252) if sigma and sigma > 0 else np.nan
+
+    # Convert log returns to simple
+    if np.any(r < -1):  
+        r = np.exp(r) - 1
+
+    # Determine periods per year from timestamp spacing
+    if isinstance(r.index, pd.DatetimeIndex):
+        total_days = (r.index[-1] - r.index[0]).days
+        periods = len(r)
+        periods_per_year = periods / (total_days / 365.0)
+    else:
+        periods_per_year = 252  # fallback
+
+    rf_period = rf_annual / periods_per_year
+    excess = r - rf_period
+
+    mu = excess.mean()
+    sigma = excess.std(ddof=1)
+
+    return (mu / sigma) * np.sqrt(periods_per_year) if sigma > 0 else np.nan
 
 
 def max_drawdown_from_rets(returns):
@@ -245,7 +269,7 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
     return {
         "CAGR": annualized_return_daily(rets),
         "Volatility": annualized_vol_daily(rets),
-        "Sharpe": annualized_sharpe_daily(rets),
+        "Sharpe": annualized_sharpe(rets),
         "Max Drawdown": max_drawdown_from_rets(rets),
     }
 
@@ -502,7 +526,7 @@ def main():
             opt_stats = {
                 "CAGR": annualized_return_daily(opt_port),
                 "Volatility": annualized_vol_daily(opt_port),
-                "Sharpe": annualized_sharpe_daily(opt_port),
+                "Sharpe": annualized_sharpe(opt_port),
                 "Max Drawdown": max_drawdown_from_rets(opt_port),
             }
 
@@ -548,7 +572,7 @@ def main():
             back = {
                 "CAGR": annualized_return_daily(port_rets),
                 "Volatility": annualized_vol_daily(port_rets),
-                "Sharpe": annualized_sharpe_daily(port_rets),
+                "Sharpe": annualized_sharpe(port_rets),
                 "Max Drawdown": max_drawdown_from_rets(port_rets),
             }
 
