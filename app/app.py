@@ -64,7 +64,7 @@ def max_drawdown_from_rets(returns):
     roll_max = cum.cummax()
     return (cum / roll_max - 1.0).min()
     
-    def simulate_leveraged_etf(price, L=3, vol_window=20):
+def simulate_leveraged_etf(price, L=3, vol_window=20):
     # Daily log returns
     log_ret = np.log(price / price.shift(1)).fillna(0)
 
@@ -385,15 +385,14 @@ def main():
 
             for item in raw_inputs:
                 if "=" in item:
-                # Format: GLDL=3  or  BTC=2  or  SPY=1.5
-                symbol, lev = item.split("=")
-                symbol = symbol.strip()
-                lev = float(lev.strip())
-                tickers.append(symbol)
-                leverage_map[symbol] = lev
-            else:
-                tickers.append(item)
-                leverage_map[item] = 1.0  # default: no leverage
+                    symbol, lev = item.split("=")
+                    symbol = symbol.strip()
+                    lev = float(lev.strip())
+                    tickers.append(symbol)
+                    leverage_map[symbol] = lev
+                else:
+                    tickers.append(item)
+                    leverage_map[item] = 1.0
                 
             prices = fetch_prices_daily(
                 tickers,
