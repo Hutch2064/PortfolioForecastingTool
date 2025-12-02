@@ -416,7 +416,13 @@ def main():
                 backtest_start.strftime("%Y-%m-%d"),
                 include_dividends=(div_mode == "Yes")
             )
-
+          
+            # --- ALIGN START DATE TO FIRST FULL ROW (all tickers available) ---
+            first_valid = prices.dropna(how="any").index[0]
+            prices = prices.loc[first_valid:]
+            
+            
+            
             # Apply leverage asset-by-asset
             for col in prices.columns:
                 L = leverage_map.get(col, 1.0)
