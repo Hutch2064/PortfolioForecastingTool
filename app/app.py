@@ -442,7 +442,10 @@ def main():
             # --- STABILIZE COVARIANCE ---
             cov += np.eye(cov.shape[0]) * 1e-8
 
-            inv_cov = np.linalg.pinv(cov)
+            # --- SAFE SVD-BASED INVERSE (NEVER FAILS) ---
+            u, s, vh = np.linalg.svd(cov, full_matrices=False)
+            s = np.where(s < 1e-12, 1e-12, s)  # floor singular values
+            inv_cov = (vh.T * (1.0 / s)) @ u.T
             w_opt = inv_cov @ mu_vec
             w_opt = w_opt / w_opt.sum()
 
