@@ -63,6 +63,7 @@ def max_drawdown_from_rets(returns):
     cum = np.exp(returns.cumsum())
     roll_max = cum.cummax()
     return (cum / roll_max - 1.0).min()
+
     
 def simulate_leveraged_etf(price, L=3, vol_window=20):
     # Daily log returns
@@ -84,6 +85,7 @@ def simulate_leveraged_etf(price, L=3, vol_window=20):
 # Data Fetch
 # ==========================================================
 def fetch_prices_daily(tickers, start=DEFAULT_START, include_dividends=True):
+
     data = yf.download(
         tickers, start=start, interval="1d",
         auto_adjust=include_dividends, progress=False, threads=False
@@ -111,8 +113,15 @@ def fetch_prices_daily(tickers, start=DEFAULT_START, include_dividends=True):
             close = data.copy()
 
     close = close.ffill().astype(np.float32)
+
     if isinstance(close.columns, pd.MultiIndex):
         close.columns = close.columns.get_level_values(1)
+
+    # --- ENFORCE USER TICKER ORDER ---
+    if isinstance(tickers, (list, tuple, np.ndarray)):
+        cols = [t for t in tickers if t in close.columns]
+        close = close[cols]
+
     return close.dropna(how="all")
 
 
@@ -182,8 +191,10 @@ def compute_oos_directional_accuracy_walkforward(prices, weights, resample_rule,
         all_paths = []
         for seed in range(ENSEMBLE_SEEDS):
             rng = np.random.default_rng(GLOBAL_SEED + seed)
-            sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean,
-                                         horizon_days, block_length=b_opt)
+            sims = run_monte_carlo_paths(
+                residuals, SIMS_PER_SEED, rng, base_mean,
+                horizon_days, block_length=b_opt
+            )
             all_paths.append(sims)
 
         paths = np.vstack(all_paths)
@@ -212,9 +223,10 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
     }
 
 # ==========================================================
-# Plot Forecasts — Updated to include Sharpe-optimal in first plot only
+# Plot Forecasts
 # ==========================================================
 def plot_forecasts(port_rets, start_cap, central, paths, median_path, opt_cum):
+
     port_cum = np.exp(port_rets.cumsum()) * start_cap
     last = port_cum.index[-1]
     dates = pd.date_range(start=last, periods=len(central), freq="B")
@@ -224,7 +236,7 @@ def plot_forecasts(port_rets, start_cap, central, paths, median_path, opt_cum):
     mask = (terminal_vals >= low_cut) & (terminal_vals <= high_cut)
     filtered = paths[mask]
 
-    # ---- Best/Worst 1-year ----
+    # best/worst 1-year
     log_rets = np.log(central[1:] / central[:-1])
     roll_sum = pd.Series(log_rets).rolling(252).sum()
     best_idx, worst_idx = roll_sum.idxmax(), roll_sum.idxmin()
@@ -241,22 +253,18 @@ def plot_forecasts(port_rets, start_cap, central, paths, median_path, opt_cum):
     opt_years = 0.2 * backtest_years
     opt_days = int(opt_years * 252)
 
-    # ---- Plot 1 ----
+    # plot 1
     fig, ax = plt.subplots(figsize=(12, 6))
-    ax.plot(port_cum.index, port_cum.values,
-            color="black", lw=2, label="Portfolio Backtest")
-
-    # ADD SHARPE-OPTIMAL BACKTEST (FIRST PLOT ONLY)
-    ax.plot(opt_cum.index, opt_cum.values,
-            color="magenta", lw=2, label="Sharpe-Optimal Portfolio")
+    ax.plot(port_cum.index, port_cum.values, color="black", lw=2, label="Portfolio Backtest")
+    ax.plot(opt_cum.index, opt_cum.values, color="magenta", lw=2, label="Sharpe-Optimal Portfolio")
 
     for sim in filtered[:100]:
-        ax.plot(dates, port_cum.iloc[-1] * sim / sim[0],
-                color="gray", alpha=0.05)
+        ax.plot(dates, port_cum.iloc[-1] * sim / sim[0], color="gray", alpha=0.05)
 
     ax.plot(dates[:opt_days],
             port_cum.iloc[-1] * central[:opt_days] / central[0],
             color="blue", lw=2, label=f"Forecast (Optimal ≤ {opt_years:.1f} yrs)")
+
     ax.plot(dates[opt_days:],
             port_cum.iloc[-1] * central[opt_days:] / central[0],
             color="#6fa8dc", lw=2, label="Beyond Optimal Horizon")
@@ -270,6 +278,7 @@ def plot_forecasts(port_rets, start_cap, central, paths, median_path, opt_cum):
                 port_cum.iloc[-1] * central[best_start:best_end] / central[0],
                 color="limegreen", lw=3,
                 label=f"Best 1-Year ~ {best_return*100:.1f}%")
+
     if worst_start is not None:
         ax.plot(dates[worst_start:worst_end],
                 port_cum.iloc[-1] * central[worst_start:worst_end] / central[0],
@@ -281,11 +290,10 @@ def plot_forecasts(port_rets, start_cap, central, paths, median_path, opt_cum):
     ax.set_ylabel("Portfolio Value ($)")
     st.pyplot(fig)
 
-    # ---- Plot 2 (NO SHARPE-OPTIMAL HERE) ----
+    # plot 2
     fig2, ax2 = plt.subplots(figsize=(12, 6))
     for sim in filtered[:100]:
-        ax2.plot(dates, start_cap * sim / sim[0],
-                 color="gray", alpha=0.05)
+        ax2.plot(dates, start_cap * sim / sim[0], color="gray", alpha=0.05)
 
     ax2.plot(dates[:opt_days],
              start_cap * central[:opt_days] / central[0],
@@ -303,6 +311,7 @@ def plot_forecasts(port_rets, start_cap, central, paths, median_path, opt_cum):
                  start_cap * central[best_start:best_end] / central[0],
                  color="limegreen", lw=3,
                  label=f"Best 1-Year ~ {best_return*100:.1f}%")
+
     if worst_start is not None:
         ax2.plot(dates[worst_start:worst_end],
                  start_cap * central[worst_start:worst_end] / central[0],
@@ -314,7 +323,7 @@ def plot_forecasts(port_rets, start_cap, central, paths, median_path, opt_cum):
     ax2.legend()
     st.pyplot(fig2)
 
-    # ---- Percentile Table ----
+    # percentile table
     terminal_vals = paths[:, -1] * start_cap
     percentiles = [5, 25, 50, 75, 95]
     p_vals = np.percentile(terminal_vals, percentiles)
@@ -346,18 +355,22 @@ def plot_forecasts(port_rets, start_cap, central, paths, median_path, opt_cum):
     st.subheader("Forecast Distribution")
     st.markdown(html, unsafe_allow_html=True)
 
+
 # ==========================================================
 # Streamlit App
 # ==========================================================
 def main():
     st.title("Portfolio Forecasting Tool")
+
     tickers = st.text_input("Tickers","VTI,AGG")
     weights_str = st.text_input("Weights","0.6,0.4")
     start_cap = st.number_input("Starting Value ($)",1000.0,1_000_000.0,10_000.0,1000.0)
     forecast_years = st.selectbox("Forecast Horizon (Years)", list(range(1,21)), index=0)
     enable_oos = st.selectbox("Out-of-sample Testing",["No","Yes"],index=0)
     div_mode = st.selectbox("Reinvest Dividends", ["No", "Yes"], index=1)
-    backtest_start = st.date_input("Backtest Start Date",
+
+    backtest_start = st.date_input(
+        "Backtest Start Date",
         value=datetime.date(2000,1,1),
         min_value=datetime.date(1924,1,1),
         max_value=datetime.date.today()
@@ -367,19 +380,21 @@ def main():
     with col_run:
         run_pressed = st.button("Run")
 
-    if st.session_state.get("last_tickers")!=st.session_state.get("curr_tickers",""):
+    if st.session_state.get("last_tickers") != st.session_state.get("curr_tickers",""):
         st.session_state.pop("forecast_val",None)
-    if st.session_state.get("last_weights")!=st.session_state.get("curr_weights",""):
+    if st.session_state.get("last_weights") != st.session_state.get("curr_weights",""):
         st.session_state.pop("forecast_val",None)
-    st.session_state["curr_tickers"]=tickers
-    st.session_state["curr_weights"]=weights_str
-    st.session_state["last_tickers"]=tickers
-    st.session_state["last_weights"]=weights_str
+
+    st.session_state["curr_tickers"] = tickers
+    st.session_state["curr_weights"] = weights_str
+    st.session_state["last_tickers"] = tickers
+    st.session_state["last_weights"] = weights_str
 
     if run_pressed:
         try:
             weights = to_weights([float(x) for x in weights_str.split(",")])
-            # Parse leverage tickers like "GLD=3" or "AGG=2"
+
+            # Parse leverage tickers like "GLD=3"
             raw_inputs = [t.strip() for t in tickers.split(",") if t.strip()]
             tickers = []
             leverage_map = {}
@@ -389,38 +404,42 @@ def main():
                     symbol, lev = item.split("=")
                     symbol = symbol.strip().upper()
                     lev = float(lev.strip())
-                    tickers.append(symbol)        # REAL ticker (AGG)
-                    leverage_map[symbol] = lev    # leverage factor
+                    tickers.append(symbol)
+                    leverage_map[symbol] = lev
                 else:
                     symbol = item.strip().upper()
                     tickers.append(symbol)
                     leverage_map[symbol] = 1.0
-                
+
             prices = fetch_prices_daily(
                 tickers,
                 backtest_start.strftime("%Y-%m-%d"),
                 include_dividends=(div_mode == "Yes")
             )
-            # Apply leverage transformations asset by asset
+
+            # Apply leverage asset-by-asset
             for col in prices.columns:
                 L = leverage_map.get(col, 1.0)
                 if L != 1.0:
                     prices[col] = simulate_leveraged_etf(prices[col], L)
-                    
+
             # --- SANITIZE PRICE SERIES AFTER LEVERAGE ---
             prices = prices.replace([np.inf, -np.inf], np.nan).ffill().bfill()
-                   
-            # Base portfolio
+
+            # Base portfolio returns
             port_rets = portfolio_log_returns_daily(prices, weights)
 
-            # ---- SHARPE-OPTIMAL PORTFOLIO (ADDED HERE) ----
-            # --- CLEAN RETURN MATRIX FOR SHARPE OPTIMIZATION ---
+            # ==========================================================
+            # Sharpe-optimal Portfolio Section
+            # ==========================================================
+            # --- CLEAN RETURN MATRIX BEFORE OPT ---
             rets_matrix = np.log(prices / prices.shift(1))
             rets_matrix = rets_matrix.replace([np.inf, -np.inf], np.nan).dropna(how="any")
+
             mu_vec = rets_matrix.mean().values
-            # --- Prevent covariance singularities from leveraged assets ---
-            eps = 1e-8
-            # --- STABILIZE COVARIANCE FOR LEVERAGED ASSETS ---
+            cov = rets_matrix.cov().values
+
+            # --- STABILIZE COVARIANCE ---
             cov += np.eye(cov.shape[0]) * 1e-8
 
             inv_cov = np.linalg.pinv(cov)
@@ -437,60 +456,69 @@ def main():
                 "Max Drawdown": max_drawdown_from_rets(opt_port),
             }
 
-            # Monte Carlo
+            # Monte Carlo forecast
             mu, sigma = port_rets.mean(), port_rets.std(ddof=0)
             base_mean = mu - 0.5*sigma**2
-            residuals = (port_rets-mu).to_numpy(dtype=np.float32)
+            residuals = (port_rets - mu).to_numpy(dtype=np.float32)
             residuals -= residuals.mean()
             b_opt = estimate_optimal_block_length(residuals)
 
-            total_days = 20*252
-            all_paths=[]; bar2=st.progress(0); txt2=st.empty()
+            total_days = 20 * 252
+            all_paths = []
+            bar2 = st.progress(0)
+            txt2 = st.empty()
+
             for i in range(ENSEMBLE_SEEDS):
-                rng=np.random.default_rng(GLOBAL_SEED+i)
-                sims=run_monte_carlo_paths(
-                    residuals,SIMS_PER_SEED,rng,
-                    base_mean,total_days,b_opt
+                rng = np.random.default_rng(GLOBAL_SEED + i)
+                sims = run_monte_carlo_paths(
+                    residuals, SIMS_PER_SEED, rng,
+                    base_mean, total_days, b_opt
                 )
                 all_paths.append(sims)
                 bar2.progress((i+1)/ENSEMBLE_SEEDS)
                 txt2.text(f"Running forecasts... {int((i+1)/ENSEMBLE_SEEDS*100)}%")
-            bar2.empty(); txt2.empty()
 
-            paths_full=np.vstack(all_paths)
-            medoid_full=compute_medoid_path(paths_full)
+            bar2.empty()
+            txt2.empty()
 
-            forecast_days=forecast_years*252
-            paths=paths_full[:,:forecast_days]
-            final=medoid_full[:forecast_days]
+            paths_full = np.vstack(all_paths)
+            medoid_full = compute_medoid_path(paths_full)
 
+            forecast_days = forecast_years * 252
+            paths = paths_full[:, :forecast_days]
+            final = medoid_full[:forecast_days]
             median_path = np.median(paths, axis=0).astype(np.float32)
-            st.session_state["forecast_val"]=final[-1]*start_cap
 
-            stats=compute_forecast_stats_from_path(
-                final,start_cap,port_rets.index[-1]
+            st.session_state["forecast_val"] = final[-1] * start_cap
+
+            stats = compute_forecast_stats_from_path(
+                final, start_cap, port_rets.index[-1]
             )
 
-            back={
-                "CAGR":annualized_return_daily(port_rets),
-                "Volatility":annualized_vol_daily(port_rets),
-                "Sharpe":annualized_sharpe_daily(port_rets),
-                "Max Drawdown":max_drawdown_from_rets(port_rets),
+            back = {
+                "CAGR": annualized_return_daily(port_rets),
+                "Volatility": annualized_vol_daily(port_rets),
+                "Sharpe": annualized_sharpe_daily(port_rets),
+                "Max Drawdown": max_drawdown_from_rets(port_rets),
             }
 
             st.markdown(
                 f"<p style='color:white;font-size:27px;font-weight:bold;margin-top:17px;'>"
                 f"Forecasted Portfolio Value ~ <span style='font-weight:300;'>${final[-1]*start_cap:,.2f}</span></p>",
-                unsafe_allow_html=True)
+                unsafe_allow_html=True
+            )
 
-            # ---- UPDATED PERFORMANCE TABLE ----
-            rows=[
-                ("CAGR",f"{back['CAGR']:.2%}",f"{opt_stats['CAGR']:.2%}",f"{stats['CAGR']:.2%}"),
-                ("Volatility",f"{back['Volatility']:.2%}",f"{opt_stats['Volatility']:.2%}",f"{stats['Volatility']:.2%}"),
-                ("Sharpe",f"{back['Sharpe']:.2f}",f"{opt_stats['Sharpe']:.2f}",f"{stats['Sharpe']:.2f}"),
-                ("Max Drawdown",f"{back['Max Drawdown']:.2%}",f"{opt_stats['Max Drawdown']:.2%}",f"{stats['Max Drawdown']:.2%}")]
-            
-            html=("""
+            # ==========================================================
+            # Performance Table
+            # ==========================================================
+            rows = [
+                ("CAGR", f"{back['CAGR']:.2%}", f"{opt_stats['CAGR']:.2%}", f"{stats['CAGR']:.2%}"),
+                ("Volatility", f"{back['Volatility']:.2%}", f"{opt_stats['Volatility']:.2%}", f"{stats['Volatility']:.2%}"),
+                ("Sharpe", f"{back['Sharpe']:.2f}", f"{opt_stats['Sharpe']:.2f}", f"{stats['Sharpe']:.2f}"),
+                ("Max Drawdown", f"{back['Max Drawdown']:.2%}", f"{opt_stats['Max Drawdown']:.2%}", f"{stats['Max Drawdown']:.2%}")
+            ]
+
+            html = ("""
             <style>table.results,table.results tr,table.results th,table.results td{
             border:none!important;border-collapse:collapse!important;background:transparent!important;}
             table.results th,table.results td{color:white!important;font-family:'Helvetica Neue',sans-serif!important;
@@ -498,35 +526,42 @@ def main():
             </style>
             <table class='results'>
             <tr><th>Metric</th><th>Backtest</th><th>Sharpe-Optimal</th><th>Forecast</th></tr>"""
-            +
-            "".join([f"<tr><td>{a}</td><td>{b}</td><td>{c}</td><td>{d}</td></tr>"
-                     for a,b,c,d in rows])
-            +
-            "</table>")
-            
+            + "".join([
+                f"<tr><td>{a}</td><td>{b}</td><td>{c}</td><td>{d}</td></tr>"
+                for a,b,c,d in rows
+            ])
+            + "</table>"
+            )
+
             st.subheader("Performance Comparison")
             st.markdown(html, unsafe_allow_html=True)
 
-            # ---- DISPLAY SHARPE-OPTIMAL WEIGHTS ----
+            # ==========================================================
+            # DISPLAY LABELED SHARPE OPT WEIGHTS
+            # ==========================================================
+            weights_display = {col: float(f"{w:.4f}") for col, w in zip(prices.columns, w_opt)}
+
             st.markdown(
                 "<p style='color:white;font-size:14px;margin-top:5px;'>"
-                f"<b>Sharpe-Optimal Weights:</b> {list(np.round(w_opt,4))}"
+                f"<b>Sharpe-Optimal Weights:</b> {weights_display}"
                 "</p>",
                 unsafe_allow_html=True
             )
 
-            plot_forecasts(
-                port_rets,start_cap,final,paths,median_path,opt_cum
-            )
+            plot_forecasts(port_rets, start_cap, final, paths, median_path, opt_cum)
 
-            if enable_oos=="Yes":
-                w_acc,w_n=compute_oos_directional_accuracy_walkforward(prices,weights,"W",5)
-                m_acc,m_n=compute_oos_directional_accuracy_walkforward(prices,weights,"M",21)
-                q_acc,q_n=compute_oos_directional_accuracy_walkforward(prices,weights,"Q",63)
-                s_acc,s_n=compute_oos_directional_accuracy_walkforward(prices,weights,"2Q",126)
-                a_acc,a_n=compute_oos_directional_accuracy_walkforward(prices,weights,"Y",252)
+            # ==========================================================
+            # Out-of-sample testing
+            # ==========================================================
+            if enable_oos == "Yes":
 
-                oos_html=f"""
+                w_acc, w_n = compute_oos_directional_accuracy_walkforward(prices, weights, "W", 5)
+                m_acc, m_n = compute_oos_directional_accuracy_walkforward(prices, weights, "M", 21)
+                q_acc, q_n = compute_oos_directional_accuracy_walkforward(prices, weights, "Q", 63)
+                s_acc, s_n = compute_oos_directional_accuracy_walkforward(prices, weights, "2Q", 126)
+                a_acc, a_n = compute_oos_directional_accuracy_walkforward(prices, weights, "Y", 252)
+
+                oos_html = f"""
                 <h3 style='color:white;font-size:22px;font-weight:700;margin-top:25px;'>
                     Out-Of-Sample Testing Results
                 </h3>
@@ -544,5 +579,5 @@ def main():
         except Exception as e:
             st.error(f"Error: {e}")
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
