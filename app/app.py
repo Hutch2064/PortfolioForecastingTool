@@ -562,11 +562,11 @@ def main():
             # ==========================================================
             # DISPLAY LABELED SHARPE OPT WEIGHTS
             # ==========================================================
-            weights_display = {col: float(f"{w:.4f}") for col, w in zip(prices.columns, w_opt)}
+            weights_display = {col: float(f"{w:.4f}*100") for col, w in zip(prices.columns, w_opt)}
 
             st.markdown(
                 "<p style='color:white;font-size:14px;margin-top:5px;'>"
-                f"<b>Sharpe-Optimal Weights:</b> {weights_display}"
+                f"<b>Sharpe-Optimal Weights:</b> weights_display"
                 "</p>",
                 unsafe_allow_html=True
             )
