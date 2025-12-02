@@ -75,23 +75,15 @@ def fetch_prices_daily(tickers, start=DEFAULT_START, include_dividends=True):
     if data.empty:
         raise ValueError("No price data returned.")
 
-    # ============================================
-    # Logic for price selection
-    # - If include_dividends=True → Yahoo already adjusts "Close"
-    # - If include_dividends=False → use raw "Close" or "Adj Close" fallback
-    # ============================================
     if include_dividends:
-        # Yahoo returns only "Close" column when auto_adjust=True (dividends + splits included)
         if isinstance(data, pd.DataFrame):
             if "Close" in data.columns:
                 close = data["Close"].copy()
             else:
-                # Handle rare MultiIndex case
                 close = data.xs("Close", axis=1, level=0)
         else:
             raise ValueError("Unexpected data format for adjusted prices.")
     else:
-        # Normal mode: unadjusted prices
         if isinstance(data.columns, pd.MultiIndex):
             for f in ["Close", "Adj Close"]:
                 if f in data.columns.get_level_values(0):
@@ -154,7 +146,7 @@ def compute_medoid_path(paths):
     return paths[idx]
 
 # ==========================================================
-# Forecast-Based Walk-Forward Directional Accuracy (Generalized)
+# Forecast-Based Walk-Forward Directional Accuracy
 # ==========================================================
 def compute_oos_directional_accuracy_walkforward(prices, weights, resample_rule, horizon_days):
     port_rets = portfolio_log_returns_daily(prices, weights)
@@ -170,17 +162,20 @@ def compute_oos_directional_accuracy_walkforward(prices, weights, resample_rule,
         residuals = (sub_rets - mu).to_numpy(dtype=np.float32)
         residuals -= residuals.mean()
         b_opt = estimate_optimal_block_length(residuals)
+
         all_paths = []
         for seed in range(ENSEMBLE_SEEDS):
             rng = np.random.default_rng(GLOBAL_SEED + seed)
             sims = run_monte_carlo_paths(residuals, SIMS_PER_SEED, rng, base_mean,
                                          horizon_days, block_length=b_opt)
             all_paths.append(sims)
+
         paths = np.vstack(all_paths)
         medoid = compute_medoid_path(paths)
         forecast_ret = np.log(medoid[-1] / medoid[0])
         preds.append(forecast_ret)
         acts.append(agg_returns.iloc[i + 1])
+
     preds, acts = np.array(preds), np.array(acts)
     dir_acc = np.mean(np.sign(preds) == np.sign(acts))
     return dir_acc, len(preds)
@@ -201,9 +196,9 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
     }
 
 # ==========================================================
-# Plot Forecasts (with Optimal Horizon)
+# Plot Forecasts — Updated to include Sharpe-optimal in first plot only
 # ==========================================================
-def plot_forecasts(port_rets, start_cap, central, paths, median_path):
+def plot_forecasts(port_rets, start_cap, central, paths, median_path, opt_cum):
     port_cum = np.exp(port_rets.cumsum()) * start_cap
     last = port_cum.index[-1]
     dates = pd.date_range(start=last, periods=len(central), freq="B")
@@ -226,65 +221,78 @@ def plot_forecasts(port_rets, start_cap, central, paths, median_path):
         best_start = best_end = worst_start = worst_end = None
         best_return = worst_return = 0.0
 
-    # ---- Compute Optimal Horizon ----
     backtest_years = len(port_rets) / 252
     opt_years = 0.2 * backtest_years
     opt_days = int(opt_years * 252)
 
     # ---- Plot 1 ----
     fig, ax = plt.subplots(figsize=(12, 6))
-    ax.plot(port_cum.index, port_cum.values, color="black", lw=2, label="Portfolio Backtest")
-    for sim in filtered[:100]:
-        ax.plot(dates, port_cum.iloc[-1] * sim / sim[0], color="gray", alpha=0.05)
+    ax.plot(port_cum.index, port_cum.values,
+            color="black", lw=2, label="Portfolio Backtest")
 
-    ax.plot(dates[:opt_days], port_cum.iloc[-1] * central[:opt_days] / central[0],
+    # ADD SHARPE-OPTIMAL BACKTEST (FIRST PLOT ONLY)
+    ax.plot(opt_cum.index, opt_cum.values,
+            color="magenta", lw=2, label="Sharpe-Optimal Portfolio")
+
+    for sim in filtered[:100]:
+        ax.plot(dates, port_cum.iloc[-1] * sim / sim[0],
+                color="gray", alpha=0.05)
+
+    ax.plot(dates[:opt_days],
+            port_cum.iloc[-1] * central[:opt_days] / central[0],
             color="blue", lw=2, label=f"Forecast (Optimal ≤ {opt_years:.1f} yrs)")
-    ax.plot(dates[opt_days:], port_cum.iloc[-1] * central[opt_days:] / central[0],
+    ax.plot(dates[opt_days:],
+            port_cum.iloc[-1] * central[opt_days:] / central[0],
             color="#6fa8dc", lw=2, label="Beyond Optimal Horizon")
 
-    # ---- Median Path (Plot 1)
     median_norm = median_path / median_path[0]
     ax.plot(dates, port_cum.iloc[-1] * median_norm,
-            color="#f1c40f",alpha=0.7,lw=2, label="Median Path")
-            
+            color="#f1c40f", alpha=0.7, lw=2, label="Median Path")
 
     if best_start is not None:
         ax.plot(dates[best_start:best_end],
                 port_cum.iloc[-1] * central[best_start:best_end] / central[0],
-                color="limegreen", lw=3, label=f"Best 1-Year Period ~ {best_return*100:.1f}%")
+                color="limegreen", lw=3,
+                label=f"Best 1-Year ~ {best_return*100:.1f}%")
     if worst_start is not None:
         ax.plot(dates[worst_start:worst_end],
                 port_cum.iloc[-1] * central[worst_start:worst_end] / central[0],
-                color="red", lw=3, label=f"Worst 1-Year Period ~ {worst_return*100:.1f}%")
-    ax.legend(); ax.set_title("Forecast"); ax.set_ylabel("Portfolio Value ($)")
+                color="red", lw=3,
+                label=f"Worst 1-Year ~ {worst_return*100:.1f}%")
+
+    ax.legend()
+    ax.set_title("Forecast")
+    ax.set_ylabel("Portfolio Value ($)")
     st.pyplot(fig)
 
-    # ---- Plot 2 ----
+    # ---- Plot 2 (NO SHARPE-OPTIMAL HERE) ----
     fig2, ax2 = plt.subplots(figsize=(12, 6))
     for sim in filtered[:100]:
-        ax2.plot(dates, start_cap * sim / sim[0], color="gray", alpha=0.05)
+        ax2.plot(dates, start_cap * sim / sim[0],
+                 color="gray", alpha=0.05)
 
-    ax2.plot(dates[:opt_days], start_cap * central[:opt_days] / central[0],
+    ax2.plot(dates[:opt_days],
+             start_cap * central[:opt_days] / central[0],
              color="blue", lw=2, label=f"Forecast (Optimal ≤ {opt_years:.1f} yrs)")
-    ax2.plot(dates[opt_days:], start_cap * central[opt_days:] / central[0],
+    ax2.plot(dates[opt_days:],
+             start_cap * central[opt_days:] / central[0],
              color="#6fa8dc", lw=2, label="Beyond Optimal Horizon")
 
-    # ---- Median Path (Plot 2)
     median_norm = median_path / median_path[0]
     ax2.plot(dates, start_cap * median_norm,
-             color="#f1c40f",alpha=0.7,lw=2, label="Median Path")
-        
+             color="#f1c40f", alpha=0.7, lw=2, label="Median Path")
 
     if best_start is not None:
         ax2.plot(dates[best_start:best_end],
                  start_cap * central[best_start:best_end] / central[0],
                  color="limegreen", lw=3,
-                 label=f"Best 1-Year Period ~ {best_return*100:.1f}%")
+                 label=f"Best 1-Year ~ {best_return*100:.1f}%")
     if worst_start is not None:
         ax2.plot(dates[worst_start:worst_end],
                  start_cap * central[worst_start:worst_end] / central[0],
                  color="red", lw=3,
-                 label=f"Worst 1-Year Period ~ {worst_return*100:.1f}%")
+                 label=f"Worst 1-Year ~ {worst_return*100:.1f}%")
+
     ax2.set_title("Forecast (Horizon View)")
     ax2.set_ylabel("Portfolio Value ($)")
     ax2.legend()
@@ -297,9 +305,12 @@ def plot_forecasts(port_rets, start_cap, central, paths, median_path):
     cvar_cutoff = np.percentile(terminal_vals, 5)
     cvar = terminal_vals[terminal_vals <= cvar_cutoff].mean()
     p_rets = (p_vals / start_cap) - 1
+
     rows = [("CVaR", f"${cvar:,.0f}", f"{(cvar/start_cap-1)*100:.2f}%")] + [
-        (f"P{p}", f"${v:,.0f}", f"{r*100:.2f}%") for p, v, r in zip(percentiles, p_vals, p_rets)
+        (f"P{p}", f"${v:,.0f}", f"{r*100:.2f}%")
+        for p, v, r in zip(percentiles, p_vals, p_rets)
     ]
+
     html = """
     <style>
     table.custom, table.custom tr, table.custom th, table.custom td {
@@ -315,6 +326,7 @@ def plot_forecasts(port_rets, start_cap, central, paths, median_path):
     """ + "".join(
         [f"<tr><td>{a}</td><td>{b}</td><td>{c}</td></tr>" for a, b, c in rows]
     ) + "</table>"
+
     st.subheader("Forecast Distribution")
     st.markdown(html, unsafe_allow_html=True)
 
@@ -336,7 +348,8 @@ def main():
     )
 
     col_run, col_val = st.columns([1,3])
-    with col_run: run_pressed = st.button("Run")
+    with col_run:
+        run_pressed = st.button("Run")
 
     if st.session_state.get("last_tickers")!=st.session_state.get("curr_tickers",""):
         st.session_state.pop("forecast_val",None)
@@ -351,51 +364,114 @@ def main():
         try:
             weights = to_weights([float(x) for x in weights_str.split(",")])
             tickers = [t.strip() for t in tickers.split(",") if t.strip()]
-            prices = fetch_prices_daily(tickers, backtest_start.strftime("%Y-%m-%d"), include_dividends=(div_mode == "Yes"))
+            prices = fetch_prices_daily(
+                tickers,
+                backtest_start.strftime("%Y-%m-%d"),
+                include_dividends=(div_mode == "Yes")
+            )
+
+            # Base portfolio
             port_rets = portfolio_log_returns_daily(prices, weights)
+
+            # ---- SHARPE-OPTIMAL PORTFOLIO (ADDED HERE) ----
+            rets_matrix = np.log(prices / prices.shift(1)).dropna()
+            mu_vec = rets_matrix.mean().values
+            cov = rets_matrix.cov().values
+            inv_cov = np.linalg.pinv(cov)
+            w_opt = inv_cov @ mu_vec
+            w_opt = w_opt / w_opt.sum()
+
+            opt_port = (rets_matrix * w_opt).sum(axis=1)
+            opt_cum = np.exp(opt_port.cumsum()) * start_cap
+
+            opt_stats = {
+                "CAGR": annualized_return_daily(opt_port),
+                "Volatility": annualized_vol_daily(opt_port),
+                "Sharpe": annualized_sharpe_daily(opt_port),
+                "Max Drawdown": max_drawdown_from_rets(opt_port),
+            }
+
+            # Monte Carlo
             mu, sigma = port_rets.mean(), port_rets.std(ddof=0)
             base_mean = mu - 0.5*sigma**2
-            residuals = (port_rets-mu).to_numpy(dtype=np.float32); residuals -= residuals.mean()
+            residuals = (port_rets-mu).to_numpy(dtype=np.float32)
+            residuals -= residuals.mean()
             b_opt = estimate_optimal_block_length(residuals)
+
             total_days = 20*252
             all_paths=[]; bar2=st.progress(0); txt2=st.empty()
             for i in range(ENSEMBLE_SEEDS):
                 rng=np.random.default_rng(GLOBAL_SEED+i)
-                sims=run_monte_carlo_paths(residuals,SIMS_PER_SEED,rng,base_mean,total_days,b_opt)
-                all_paths.append(sims); bar2.progress((i+1)/ENSEMBLE_SEEDS)
+                sims=run_monte_carlo_paths(
+                    residuals,SIMS_PER_SEED,rng,
+                    base_mean,total_days,b_opt
+                )
+                all_paths.append(sims)
+                bar2.progress((i+1)/ENSEMBLE_SEEDS)
                 txt2.text(f"Running forecasts... {int((i+1)/ENSEMBLE_SEEDS*100)}%")
             bar2.empty(); txt2.empty()
+
             paths_full=np.vstack(all_paths)
             medoid_full=compute_medoid_path(paths_full)
+
             forecast_days=forecast_years*252
-            paths=paths_full[:,:forecast_days]; final=medoid_full[:forecast_days]
+            paths=paths_full[:,:forecast_days]
+            final=medoid_full[:forecast_days]
+
             median_path = np.median(paths, axis=0).astype(np.float32)
             st.session_state["forecast_val"]=final[-1]*start_cap
-            stats=compute_forecast_stats_from_path(final,start_cap,port_rets.index[-1])
+
+            stats=compute_forecast_stats_from_path(
+                final,start_cap,port_rets.index[-1]
+            )
+
             back={
                 "CAGR":annualized_return_daily(port_rets),
                 "Volatility":annualized_vol_daily(port_rets),
                 "Sharpe":annualized_sharpe_daily(port_rets),
                 "Max Drawdown":max_drawdown_from_rets(port_rets),
             }
+
             st.markdown(
                 f"<p style='color:white;font-size:27px;font-weight:bold;margin-top:17px;'>"
                 f"Forecasted Portfolio Value ~ <span style='font-weight:300;'>${final[-1]*start_cap:,.2f}</span></p>",
                 unsafe_allow_html=True)
-            rows=[("CAGR",f"{back['CAGR']:.2%}",f"{stats['CAGR']:.2%}"),
-                  ("Volatility",f"{back['Volatility']:.2%}",f"{stats['Volatility']:.2%}"),
-                  ("Sharpe",f"{back['Sharpe']:.2f}",f"{stats['Sharpe']:.2f}"),
-                  ("Max Drawdown",f"{back['Max Drawdown']:.2%}",f"{stats['Max Drawdown']:.2%}")]
+
+            # ---- UPDATED PERFORMANCE TABLE ----
+            rows=[
+                ("CAGR",f"{back['CAGR']:.2%}",f"{opt_stats['CAGR']:.2%}",f"{stats['CAGR']:.2%}"),
+                ("Volatility",f"{back['Volatility']:.2%}",f"{opt_stats['Volatility']:.2%}",f"{stats['Volatility']:.2%}"),
+                ("Sharpe",f"{back['Sharpe']:.2f}",f"{opt_stats['Sharpe']:.2f}",f"{stats['Sharpe']:.2f}"),
+                ("Max Drawdown",f"{back['Max Drawdown']:.2%}",f"{opt_stats['Max Drawdown']:.2%}",f"{stats['Max Drawdown']:.2%}")]
+            
             html=("""
             <style>table.results,table.results tr,table.results th,table.results td{
             border:none!important;border-collapse:collapse!important;background:transparent!important;}
             table.results th,table.results td{color:white!important;font-family:'Helvetica Neue',sans-serif!important;
             font-size:15px!important;padding:3px 10px!important;text-align:left!important;}
-            </style><table class='results'><tr><th>Metric</th><th>Backtest</th><th>Forecast</th></tr>"""+
-            "".join([f"<tr><td>{a}</td><td>{b}</td><td>{c}</td></tr>" for a,b,c in rows])+"</table>")
+            </style>
+            <table class='results'>
+            <tr><th>Metric</th><th>Backtest</th><th>Sharpe-Optimal</th><th>Forecast</th></tr>"""
+            +
+            "".join([f"<tr><td>{a}</td><td>{b}</td><td>{c}</td><td>{d}</td></tr>"
+                     for a,b,c,d in rows])
+            +
+            "</table>")
+            
             st.subheader("Performance Comparison")
             st.markdown(html, unsafe_allow_html=True)
-            plot_forecasts(port_rets,start_cap,final,paths,median_path)
+
+            # ---- DISPLAY SHARPE-OPTIMAL WEIGHTS ----
+            st.markdown(
+                "<p style='color:white;font-size:14px;margin-top:5px;'>"
+                f"<b>Sharpe-Optimal Weights:</b> {list(np.round(w_opt,4))}"
+                "</p>",
+                unsafe_allow_html=True
+            )
+
+            plot_forecasts(
+                port_rets,start_cap,final,paths,median_path,opt_cum
+            )
 
             if enable_oos=="Yes":
                 w_acc,w_n=compute_oos_directional_accuracy_walkforward(prices,weights,"W",5)
