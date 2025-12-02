@@ -381,7 +381,7 @@ def main():
                 "Volatility": annualized_vol_daily(opt_rets),
                 "Sharpe": annualized_sharpe_daily(opt_rets),
                 "Max Drawdown": max_drawdown_from_rets(opt_rets),
-
+            }
             mu, sigma = port_rets.mean(), port_rets.std(ddof=0)
             base_mean = mu - 0.5*sigma**2
             residuals = (port_rets-mu).to_numpy(dtype=np.float32); residuals -= residuals.mean()
