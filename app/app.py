@@ -128,7 +128,25 @@ def estimate_optimal_block_length(residuals):
     T = len(res2)
     b_opt = 1.5 * ((T / (1 - rho1**2 + 1e-9)) ** (1 / 3))
     return int(np.clip(b_opt, 5, 100))
+    
+# ==========================================================
+# Sharpe-Optimal Portfolio (Tangency Portfolio)
+# ==========================================================
+def compute_sharpe_optimal_weights(prices, rf_daily=0.0):
+    rets = np.log(prices / prices.shift(1)).dropna()
+    mu = rets.mean().values
+    cov = rets.cov().values
+    inv_cov = np.linalg.pinv(cov)
+    excess = mu - rf_daily
+    w = inv_cov @ excess
+    w = w / w.sum()  # normalize to long-only
+    return w.astype(np.float64)
 
+def backtest_from_weights(prices, weights, start_cap):
+    port = portfolio_log_returns_daily(prices, weights)
+    cum = np.exp(port.cumsum()) * start_cap
+    return cum, port
+    
 # ==========================================================
 # Monte Carlo Simulation
 # ==========================================================
@@ -203,7 +221,7 @@ def compute_forecast_stats_from_path(path, start_cap, last_date):
 # ==========================================================
 # Plot Forecasts (with Optimal Horizon)
 # ==========================================================
-def plot_forecasts(port_rets, start_cap, central, paths, median_path):
+def plot_forecasts(port_rets, start_cap, central, paths, median_path,opt_cum):
     port_cum = np.exp(port_rets.cumsum()) * start_cap
     last = port_cum.index[-1]
     dates = pd.date_range(start=last, periods=len(central), freq="B")
@@ -234,6 +252,8 @@ def plot_forecasts(port_rets, start_cap, central, paths, median_path):
     # ---- Plot 1 ----
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(port_cum.index, port_cum.values, color="black", lw=2, label="Portfolio Backtest")
+    # ---- Sharpe-Optimal Backtest Line ----
+    ax.plot(opt_cum.index, opt_cum.values, color="magenta", lw=2, label="Sharpe-Optimal Portfolio")
     for sim in filtered[:100]:
         ax.plot(dates, port_cum.iloc[-1] * sim / sim[0], color="gray", alpha=0.05)
 
@@ -262,7 +282,8 @@ def plot_forecasts(port_rets, start_cap, central, paths, median_path):
     fig2, ax2 = plt.subplots(figsize=(12, 6))
     for sim in filtered[:100]:
         ax2.plot(dates, start_cap * sim / sim[0], color="gray", alpha=0.05)
-
+    # ---- Sharpe-Optimal Backtest Line ----
+    ax2.plot(opt_cum.index, opt_cum.values, color="magenta", lw=2, label="Sharpe-Optimal Portfolio")
     ax2.plot(dates[:opt_days], start_cap * central[:opt_days] / central[0],
              color="blue", lw=2, label=f"Forecast (Optimal ≤ {opt_years:.1f} yrs)")
     ax2.plot(dates[opt_days:], start_cap * central[opt_days:] / central[0],
@@ -351,6 +372,16 @@ def main():
             tickers = [t.strip() for t in tickers.split(",") if t.strip()]
             prices = fetch_prices_daily(tickers, backtest_start.strftime("%Y-%m-%d"), include_dividends=(div_mode == "Yes"))
             port_rets = portfolio_log_returns_daily(prices, weights)
+            # ---- Compute Sharpe-Optimal Portfolio ----
+            opt_weights = compute_sharpe_optimal_weights(prices)
+            opt_cum, opt_rets = backtest_from_weights(prices, opt_weights, start_cap)
+
+            opt_stats = {
+                "CAGR": annualized_return_daily(opt_rets),
+                "Volatility": annualized_vol_daily(opt_rets),
+                "Sharpe": annualized_sharpe_daily(opt_rets),
+                "Max Drawdown": max_drawdown_from_rets(opt_rets),
+
             mu, sigma = port_rets.mean(), port_rets.std(ddof=0)
             base_mean = mu - 0.5*sigma**2
             residuals = (port_rets-mu).to_numpy(dtype=np.float32); residuals -= residuals.mean()
@@ -380,20 +411,21 @@ def main():
                 f"<p style='color:white;font-size:27px;font-weight:bold;margin-top:17px;'>"
                 f"Forecasted Portfolio Value ~ <span style='font-weight:300;'>${final[-1]*start_cap:,.2f}</span></p>",
                 unsafe_allow_html=True)
-            rows=[("CAGR",f"{back['CAGR']:.2%}",f"{stats['CAGR']:.2%}"),
-                  ("Volatility",f"{back['Volatility']:.2%}",f"{stats['Volatility']:.2%}"),
-                  ("Sharpe",f"{back['Sharpe']:.2f}",f"{stats['Sharpe']:.2f}"),
-                  ("Max Drawdown",f"{back['Max Drawdown']:.2%}",f"{stats['Max Drawdown']:.2%}")]
+            rows=[
+                ("CAGR", f"{back['CAGR']:.2%}", f"{stats['CAGR']:.2%}", f"{opt_stats['CAGR']:.2%}"),
+                ("Volatility", f"{back['Volatility']:.2%}", f"{stats['Volatility']:.2%}", f"{opt_stats['Volatility']:.2%}"),
+                ("Sharpe", f"{back['Sharpe']:.2f}", f"{stats['Sharpe']:.2f}", f"{opt_stats['Sharpe']:.2f}"),
+                ("Max Drawdown", f"{back['Max Drawdown']:.2%}", f"{stats['Max Drawdown']:.2%}", f"{opt_stats['Max Drawdown']:.2%}")]
             html=("""
             <style>table.results,table.results tr,table.results th,table.results td{
             border:none!important;border-collapse:collapse!important;background:transparent!important;}
             table.results th,table.results td{color:white!important;font-family:'Helvetica Neue',sans-serif!important;
             font-size:15px!important;padding:3px 10px!important;text-align:left!important;}
-            </style><table class='results'><tr><th>Metric</th><th>Backtest</th><th>Forecast</th></tr>"""+
+            </style><table class='results'><tr><th>Metric</th><th>Backtest</th><th>Forecast</th><th>Sharpe-Optimal</th></tr>"""+
             "".join([f"<tr><td>{a}</td><td>{b}</td><td>{c}</td></tr>" for a,b,c in rows])+"</table>")
             st.subheader("Performance Comparison")
             st.markdown(html, unsafe_allow_html=True)
-            plot_forecasts(port_rets,start_cap,final,paths,median_path)
+            plot_forecasts(port_rets,start_cap,final,paths,median_path,opt_cum=opt_cum)
 
             if enable_oos=="Yes":
                 w_acc,w_n=compute_oos_directional_accuracy_walkforward(prices,weights,"W",5)
